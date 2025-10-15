@@ -20,6 +20,8 @@ youtube:
   schedule_minutes_from_now: 60
   draft_only: false
   archive_dir: ./uploaded
+  batch_step_minutes: 60
+  batch_limit: 0
   last_publish_at: ''
 ffmpeg:
   binary: ffmpeg
@@ -84,3 +86,9 @@ telegram:
   enabled: false
   bot_token: ''
   chat_id: ''
+maintenance:
+  auto_cleanup_on_start: false
+  retention_days:
+    downloads: 7
+    blurred: 14
+    merged: 30

@@ -4,7 +4,6 @@ import os  # FIX: нужен в load_cfg/_open_chrome
 import re  # FIX: используется в _slot_log, _natural_key
 import sys
 import json
-import tempfile
 try:
     import yaml
 except ModuleNotFoundError as exc:
@@ -26,11 +25,6 @@ from typing import Optional, List, Union, Tuple, Dict
 from PyQt6 import QtCore, QtGui, QtWidgets
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
-
-try:  # Pillow используется для автодетекта водяного знака
-    from PIL import Image, ImageFilter, ImageStat  # type: ignore
-except ModuleNotFoundError:  # pragma: no cover - Pillow опционален до установки
-    Image = ImageFilter = ImageStat = None  # type: ignore[assignment]
 
 # ---------- базовые пути ----------
 APP_DIR = Path(__file__).parent.resolve()
@@ -150,6 +144,13 @@ def load_cfg() -> dict:
     telegram.setdefault("enabled", False)
     telegram.setdefault("bot_token", "")
     telegram.setdefault("chat_id", "")
+
+    maintenance = data.setdefault("maintenance", {})
+    maintenance.setdefault("auto_cleanup_on_start", False)
+    retention = maintenance.setdefault("retention_days", {})
+    retention.setdefault("downloads", 7)
+    retention.setdefault("blurred", 14)
+    retention.setdefault("merged", 30)
 
     return data
 
@@ -460,6 +461,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_youtube_ui()
         self._load_autogen_cfg_ui()
         self._load_readme_preview()
+        maint_cfg = self.cfg.get("maintenance", {}) or {}
+        if maint_cfg.get("auto_cleanup_on_start"):
+            QtCore.QTimer.singleShot(200, lambda: self._run_maintenance_cleanup(manual=False))
 
     def _apply_theme(self):
         app = QtWidgets.QApplication.instance()
@@ -1144,13 +1148,6 @@ class MainWindow(QtWidgets.QMainWindow):
         ff_layout.addWidget(self.grp_portrait)
         ff_layout.addWidget(self.grp_landscape)
 
-        auto_row = QtWidgets.QHBoxLayout()
-        auto_row.addStretch(1)
-        self.btn_auto_detect_watermark = QtWidgets.QPushButton("Автодетект водяного знака")
-        self.btn_auto_detect_watermark.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_FileDialogDetailedView))
-        auto_row.addWidget(self.btn_auto_detect_watermark)
-        ff_layout.addLayout(auto_row)
-
         self.settings_tabs.addTab(page_ff, "FFmpeg")
 
         # --- YouTube дефолты ---
@@ -1183,6 +1180,53 @@ class MainWindow(QtWidgets.QMainWindow):
         grid_yt.addWidget(self.sb_youtube_limit_default, 4, 1)
 
         self.settings_tabs.addTab(page_yt, "YouTube")
+
+        # --- Maintenance ---
+        maint_cfg = self.cfg.get("maintenance", {}) or {}
+        retention_cfg = maint_cfg.get("retention_days", {}) or {}
+        page_maint = QtWidgets.QWidget()
+        maint_layout = QtWidgets.QVBoxLayout(page_maint)
+        maint_hint = QtWidgets.QLabel(
+            "Укажи, сколько дней хранить файлы в рабочих папках. 0 — ничего не удалять."
+        )
+        maint_hint.setWordWrap(True)
+        maint_hint.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
+        maint_layout.addWidget(maint_hint)
+
+        grid_maint = QtWidgets.QGridLayout()
+        grid_maint.setColumnStretch(1, 1)
+        self.sb_maint_downloads = QtWidgets.QSpinBox()
+        self.sb_maint_downloads.setRange(0, 365)
+        self.sb_maint_downloads.setValue(int(retention_cfg.get("downloads", 7)))
+        grid_maint.addWidget(QtWidgets.QLabel("RAW (downloads):"), 0, 0)
+        grid_maint.addWidget(self.sb_maint_downloads, 0, 1)
+
+        self.sb_maint_blurred = QtWidgets.QSpinBox()
+        self.sb_maint_blurred.setRange(0, 365)
+        self.sb_maint_blurred.setValue(int(retention_cfg.get("blurred", 14)))
+        grid_maint.addWidget(QtWidgets.QLabel("BLURRED:"), 1, 0)
+        grid_maint.addWidget(self.sb_maint_blurred, 1, 1)
+
+        self.sb_maint_merged = QtWidgets.QSpinBox()
+        self.sb_maint_merged.setRange(0, 365)
+        self.sb_maint_merged.setValue(int(retention_cfg.get("merged", 30)))
+        grid_maint.addWidget(QtWidgets.QLabel("MERGED:"), 2, 0)
+        grid_maint.addWidget(self.sb_maint_merged, 2, 1)
+
+        maint_layout.addLayout(grid_maint)
+
+        self.cb_maintenance_auto = QtWidgets.QCheckBox("Очищать автоматически при запуске")
+        self.cb_maintenance_auto.setChecked(bool(maint_cfg.get("auto_cleanup_on_start", False)))
+        maint_layout.addWidget(self.cb_maintenance_auto)
+
+        maint_buttons = QtWidgets.QHBoxLayout()
+        maint_buttons.addStretch(1)
+        self.btn_maintenance_cleanup = QtWidgets.QPushButton("Очистить сейчас")
+        maint_buttons.addWidget(self.btn_maintenance_cleanup)
+        maint_layout.addLayout(maint_buttons)
+        maint_layout.addStretch(1)
+
+        self.settings_tabs.addTab(page_maint, "Обслуживание")
 
         # --- Telegram ---
         tg_cfg = self.cfg.get("telegram", {}) or {}
@@ -1294,6 +1338,10 @@ class MainWindow(QtWidgets.QMainWindow):
             (self.cb_tg_enabled, "toggled"),
             (self.ed_tg_token, "textEdited"),
             (self.ed_tg_chat, "textEdited"),
+            (self.cb_maintenance_auto, "toggled"),
+            (self.sb_maint_downloads, "valueChanged"),
+            (self.sb_maint_blurred, "valueChanged"),
+            (self.sb_maint_merged, "valueChanged"),
             (self.dt_youtube_publish, "dateTimeChanged"),
             (self.cb_youtube_schedule, "toggled"),
             (self.cb_youtube_draft_only, "toggled"),
@@ -1322,107 +1370,6 @@ class MainWindow(QtWidgets.QMainWindow):
             edits.append((x, y, w, h))
         return edits
 
-    def _auto_detect_watermark(self):
-        if Image is None or ImageFilter is None or ImageStat is None:
-            tip = "Автодетект требует Pillow: pip install Pillow"
-            self._post_status(tip, state="error")
-            self._append_activity(tip, kind="error")
-            return
-
-        src_raw = self.ed_blur_src.text().strip() or self.cfg.get("blur_src_dir", self.cfg.get("downloads_dir", str(DL_DIR)))
-        src_dir = Path(os.path.expandvars(src_raw)).expanduser()
-        if not src_dir.exists():
-            self._post_status(f"Источник BLUR не найден: {src_dir}", state="error")
-            self._append_activity(f"Автодетект: нет папки {src_dir}", kind="error")
-            return
-
-        candidates: List[Path] = []
-        for pattern in ("*.mp4", "*.mov", "*.m4v", "*.webm", "*.mkv"):
-            candidates.extend(sorted(src_dir.glob(pattern)))
-        if not candidates:
-            self._post_status("Нет видео в источнике BLUR", state="error")
-            self._append_activity("Автодетект: не найдено видео для анализа", kind="error")
-            return
-
-        candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-        sample_videos = candidates[:3]
-
-        ff_cfg = self.cfg.get("ffmpeg", {}) or {}
-        ffbin = self.ed_ff_bin.text().strip() or ff_cfg.get("binary", "ffmpeg")
-        ffprobe = ff_cfg.get("probe_binary") or self._guess_ffprobe(ffbin)
-
-        try:
-            frames = self._collect_watermark_frames(sample_videos, ffbin, ffprobe)
-        except FileNotFoundError as exc:
-            msg = f"ffmpeg не найден: {exc}"
-            self._post_status(msg, state="error")
-            self._append_activity(msg, kind="error")
-            return
-        except Exception as exc:
-            msg = f"Автодетект: не удалось подготовить кадры ({exc})"
-            self._post_status(msg, state="error")
-            self._append_activity(msg, kind="error")
-            return
-
-        if not frames:
-            msg = "Автодетект: не удалось извлечь кадры для анализа"
-            self._post_status(msg, state="error")
-            self._append_activity(msg, kind="error")
-            return
-
-        candidate_map: Dict[str, List[Tuple[float, Tuple[int, int, int, int]]]] = {}
-        seen_names: List[str] = []
-        first_orientation: Optional[str] = None
-        for video_path, ts, image in frames:
-            try:
-                orientation = "portrait_9x16" if image.height >= image.width else "landscape_16x9"
-                if first_orientation is None:
-                    first_orientation = orientation
-                candidate_map.setdefault(orientation, []).extend(self._detect_watermark_candidates(image))
-            finally:
-                if hasattr(image, "close"):
-                    image.close()
-            name = video_path.name
-            if name not in seen_names:
-                seen_names.append(name)
-
-        if not candidate_map:
-            msg = "Автодетект: на кадрах не найдено характерных зон по краям"
-            self._post_status(msg, state="error")
-            self._append_activity(msg, kind="error")
-            return
-
-        orientation = max(candidate_map, key=lambda key: len(candidate_map[key])) if candidate_map else first_orientation or "portrait_9x16"
-        candidates_for_orientation = candidate_map.get(orientation, [])
-        if not candidates_for_orientation and first_orientation and first_orientation in candidate_map:
-            orientation = first_orientation
-            candidates_for_orientation = candidate_map.get(orientation, [])
-
-        zones = self._merge_watermark_candidates(candidates_for_orientation)
-        if not zones:
-            joined = ", ".join(seen_names) or "выбранных файлов"
-            msg = f"Автодетект: водяной знак не найден в {joined}"
-            self._post_status(msg, state="error")
-            self._append_activity(msg, kind="error")
-            return
-
-        edits = self.p_edits if orientation == "portrait_9x16" else self.l_edits
-        for idx in range(len(edits)):
-            zone = zones[idx] if idx < len(zones) else zones[-1]
-            widgets = edits[idx]
-            for widget, value in zip(widgets, [zone["x"], zone["y"], zone["w"], zone["h"]]):
-                widget.blockSignals(True)
-                widget.setValue(int(value))
-                widget.blockSignals(False)
-
-        self.cmb_aspect.setCurrentText(orientation)
-        self._mark_settings_dirty()
-        joined = ", ".join(seen_names[:3])
-        suffix = f" (и ещё {len(seen_names) - 3})" if len(seen_names) > 3 else ""
-        msg = f"Автодетект: обновлены зоны для {joined}{suffix} ({orientation})" if joined else f"Автодетект: обновлены зоны ({orientation})"
-        self._post_status("Зоны delogo обновлены", state="ok")
-        self._append_activity(msg, kind="success")
-
     @staticmethod
     def _guess_ffprobe(ffmpeg_bin: str) -> str:
         cleaned = (ffmpeg_bin or "").strip().strip('"')
@@ -1434,187 +1381,6 @@ class MainWindow(QtWidgets.QMainWindow):
         if candidate.exists():
             return str(candidate)
         return "ffprobe.exe" if sys.platform.startswith("win") else "ffprobe"
-
-    @classmethod
-    def _collect_watermark_frames(cls, videos: List[Path], ffbin: str, ffprobe: str, per_video: int = 4):
-        frames: List[Tuple[Path, float, "Image.Image"]] = []  # type: ignore[name-defined]
-        if Image is None:
-            return frames
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_dir = Path(tmp)
-            for video in videos:
-                duration = cls._probe_video_duration(video, ffprobe)
-                if duration and duration > 1:
-                    step = duration / max(1, per_video + 1)
-                    offsets = [step * (idx + 1) for idx in range(per_video)]
-                else:
-                    offsets = [idx * 5.0 for idx in range(per_video)]
-                if not offsets:
-                    offsets = [0.0]
-                for idx, ts in enumerate(offsets):
-                    ts = max(0.0, ts)
-                    if duration and ts >= duration:
-                        ts = max(0.0, duration - 0.5)
-                    frame_path = tmp_dir / f"probe_{video.stem}_{idx}.jpg"
-                    cmd = [ffbin, "-hide_banner", "-loglevel", "error", "-y"]
-                    if ts > 0:
-                        cmd.extend(["-ss", f"{ts:.3f}"])
-                    cmd.extend(["-i", str(video), "-frames:v", "1", "-q:v", "2", str(frame_path)])
-                    res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                    if res.returncode != 0 or not frame_path.exists():
-                        continue
-                    try:
-                        with Image.open(frame_path) as img_raw:
-                            frames.append((video, ts, img_raw.convert("RGB").copy()))
-                    except Exception:
-                        continue
-        return frames
-
-    @staticmethod
-    def _probe_video_duration(video: Path, ffprobe: str) -> Optional[float]:
-        if not ffprobe:
-            return None
-        try:
-            res = subprocess.run(
-                [ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(video)],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-        except FileNotFoundError:
-            return None
-        if res.returncode != 0:
-            return None
-        out = res.stdout.strip().splitlines()
-        if not out:
-            return None
-        try:
-            value = float(out[0])
-        except ValueError:
-            return None
-        return value if value > 0 else None
-
-    @staticmethod
-    def _detect_watermark_candidates(image):  # type: ignore[no-untyped-def]
-        try:
-            edges = image.convert("L").filter(ImageFilter.FIND_EDGES)
-        except Exception:
-            return []
-
-        w, h = edges.size
-        if w == 0 or h == 0:
-            return []
-
-        patch_w = max(int(w * 0.22), 80)
-        patch_h = max(int(h * 0.18), 60)
-        stride_x = max(20, patch_w // 3)
-        stride_y = max(20, patch_h // 3)
-
-        baseline = 0
-        if ImageStat:
-            cx0 = max(0, w // 2 - patch_w // 4)
-            cy0 = max(0, h // 2 - patch_h // 4)
-            cx1 = min(w, w // 2 + patch_w // 4)
-            cy1 = min(h, h // 2 + patch_h // 4)
-            baseline = ImageStat.Stat(edges.crop((cx0, cy0, cx1, cy1))).mean[0]
-
-        positions: List[Tuple[float, Tuple[int, int, int, int]]] = []
-        seen: set[Tuple[int, int, int, int]] = set()
-
-        def add_box(x0: int, y0: int):
-            x0 = max(0, min(int(x0), max(0, w - patch_w)))
-            y0 = max(0, min(int(y0), max(0, h - patch_h)))
-            box = (x0, y0, min(w, x0 + patch_w), min(h, y0 + patch_h))
-            if box in seen:
-                return
-            seen.add(box)
-            score = ImageStat.Stat(edges.crop(box)).mean[0] if ImageStat else 0
-            positions.append((score, box))
-
-        for x in range(0, max(1, w - patch_w + 1), stride_x):
-            add_box(x, 0)
-            add_box(x, h - patch_h)
-        for y in range(0, max(1, h - patch_h + 1), stride_y):
-            add_box(0, y)
-            add_box(w - patch_w, y)
-
-        if not positions:
-            return []
-
-        positions.sort(key=lambda item: item[0], reverse=True)
-        threshold = max(baseline * 1.25, baseline + 12)
-        strong = [item for item in positions if item[0] >= threshold]
-        candidates = strong if strong else positions[:6]
-        return candidates[:6]
-
-    @staticmethod
-    def _box_iou(box_a: Tuple[int, int, int, int], box_b: Tuple[int, int, int, int]) -> float:
-        ax0, ay0, ax1, ay1 = box_a
-        bx0, by0, bx1, by1 = box_b
-        inter_x0 = max(ax0, bx0)
-        inter_y0 = max(ay0, by0)
-        inter_x1 = min(ax1, bx1)
-        inter_y1 = min(ay1, by1)
-        if inter_x1 <= inter_x0 or inter_y1 <= inter_y0:
-            return 0.0
-        inter = float(inter_x1 - inter_x0) * float(inter_y1 - inter_y0)
-        area_a = float(max(0, ax1 - ax0)) * float(max(0, ay1 - ay0))
-        area_b = float(max(0, bx1 - bx0)) * float(max(0, by1 - by0))
-        union = area_a + area_b - inter
-        if union <= 0:
-            return 0.0
-        return inter / union
-
-    @classmethod
-    def _merge_watermark_candidates(cls, candidates: List[Tuple[float, Tuple[int, int, int, int]]], limit: int = 3):
-        if not candidates:
-            return []
-        clusters: List[Dict[str, float]] = []  # type: ignore[var-annotated]
-        for score, box in sorted(candidates, key=lambda item: item[0], reverse=True):
-            merged = False
-            for cluster in clusters:
-                if cls._box_iou(tuple(map(int, cluster["box"])), box) >= 0.3:  # type: ignore[index]
-                    cluster["score"] = max(cluster["score"], score)
-                    cluster["count"] += 1
-                    cluster["sum_x0"] += box[0]
-                    cluster["sum_y0"] += box[1]
-                    cluster["sum_x1"] += box[2]
-                    cluster["sum_y1"] += box[3]
-                    merged = True
-                    break
-            if not merged:
-                clusters.append({
-                    "score": score,
-                    "count": 1.0,
-                    "sum_x0": float(box[0]),
-                    "sum_y0": float(box[1]),
-                    "sum_x1": float(box[2]),
-                    "sum_y1": float(box[3]),
-                    "box": box,
-                })
-
-        scored: List[Tuple[float, float, Tuple[float, float, float, float]]] = []
-        for cluster in clusters:
-            count = max(1.0, cluster["count"])
-            avg_box = (
-                cluster["sum_x0"] / count,
-                cluster["sum_y0"] / count,
-                cluster["sum_x1"] / count,
-                cluster["sum_y1"] / count,
-            )
-            scored.append((cluster["count"], cluster["score"], avg_box))
-
-        scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
-        zones = []
-        for _, _, box in scored[:limit]:
-            x0, y0, x1, y1 = box
-            zones.append({
-                "x": max(0, int(round(x0))),
-                "y": max(0, int(round(y0))),
-                "w": max(1, int(round(x1 - x0))),
-                "h": max(1, int(round(y1 - y0))),
-            })
-        return zones
 
     def _load_zones_into_ui(self):
         ff = self.cfg.get("ffmpeg", {})
@@ -1681,8 +1447,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_reload_history.clicked.connect(self._reload_history)
         self.btn_save_settings.clicked.connect(self._save_settings_clicked)
         self.btn_save_autogen_cfg.clicked.connect(self._save_autogen_cfg)
-        self.btn_auto_detect_watermark.clicked.connect(self._auto_detect_watermark)
         self.btn_reload_readme.clicked.connect(self._load_readme_preview)
+        self.btn_maintenance_cleanup.clicked.connect(lambda: self._run_maintenance_cleanup(manual=True))
 
         self.btn_youtube_src_browse.clicked.connect(lambda: self._browse_dir(self.ed_youtube_src, "Выбери папку с клипами"))
         self.cb_youtube_draft_only.toggled.connect(self._toggle_youtube_schedule)
@@ -2585,6 +2351,13 @@ class MainWindow(QtWidgets.QMainWindow):
         tg_cfg["bot_token"] = self.ed_tg_token.text().strip()
         tg_cfg["chat_id"] = self.ed_tg_chat.text().strip()
 
+        maint_cfg = self.cfg.setdefault("maintenance", {})
+        maint_cfg["auto_cleanup_on_start"] = bool(self.cb_maintenance_auto.isChecked())
+        retention = maint_cfg.setdefault("retention_days", {})
+        retention["downloads"] = int(self.sb_maint_downloads.value())
+        retention["blurred"] = int(self.sb_maint_blurred.value())
+        retention["merged"] = int(self.sb_maint_merged.value())
+
         save_cfg(self.cfg)
         ensure_dirs(self.cfg)
         self._refresh_path_fields()
@@ -2603,6 +2376,81 @@ class MainWindow(QtWidgets.QMainWindow):
 
         if not silent:
             self._post_status("Настройки сохранены", state="ok")
+
+    def _run_maintenance_cleanup(self, manual: bool = True):
+        self._save_settings_clicked(silent=True)
+        maint = self.cfg.get("maintenance", {}) or {}
+        retention = maint.get("retention_days", {}) or {}
+        mapping = [
+            ("RAW", Path(self.cfg.get("downloads_dir", str(DL_DIR))), int(retention.get("downloads", 0))),
+            ("BLURRED", Path(self.cfg.get("blurred_dir", str(BLUR_DIR))), int(retention.get("blurred", 0))),
+            ("MERGED", Path(self.cfg.get("merged_dir", str(MERG_DIR))), int(retention.get("merged", 0))),
+        ]
+
+        now = time.time()
+        removed_total = 0
+        details: List[str] = []
+        errors: List[str] = []
+
+        self._append_activity("Очистка каталогов: запуск…", kind="running")
+
+        for label, folder, days in mapping:
+            if days <= 0:
+                continue
+            folder = Path(os.path.expandvars(str(folder))).expanduser()
+            if not folder.exists():
+                continue
+            threshold = now - days * 24 * 3600
+            removed_here = 0
+            try:
+                entries = list(folder.iterdir())
+            except Exception as exc:
+                errors.append(f"{label}: не удалось прочитать каталог ({exc})")
+                continue
+            for item in entries:
+                try:
+                    mtime = item.stat().st_mtime
+                except Exception as exc:
+                    errors.append(f"{label}: {item.name} — {exc}")
+                    continue
+                if mtime >= threshold:
+                    continue
+                try:
+                    if item.is_file():
+                        item.unlink()
+                        removed_here += 1
+                    elif item.is_dir():
+                        # удаляем только пустые директории
+                        if not any(item.iterdir()):
+                            item.rmdir()
+                            removed_here += 1
+                except Exception as exc:
+                    errors.append(f"{label}: {item.name} — {exc}")
+            if removed_here:
+                removed_total += removed_here
+                details.append(f"{label}: {removed_here}")
+
+        if removed_total:
+            summary = ", ".join(details) if details else f"удалено {removed_total} элементов"
+            msg = f"Очистка каталогов завершена: {summary}"
+            self._append_activity(msg, kind="success")
+            if manual:
+                self._post_status(msg, state="ok")
+        else:
+            msg = "Очистка каталогов: подходящих файлов не найдено"
+            self._append_activity(msg, kind="info")
+            if manual:
+                self._post_status(msg, state="idle")
+
+        if errors:
+            err_head = f"Очистка: {len(errors)} ошибок"
+            self._append_activity(err_head, kind="error")
+            for detail in errors[:5]:
+                self._append_activity(f"↳ {detail}", kind="error")
+            if manual:
+                self._post_status(err_head, state="error")
+
+        self._refresh_stats()
 
     def _test_tg_settings(self):
         self._save_settings_clicked(silent=True)
