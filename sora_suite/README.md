@@ -20,10 +20,29 @@ python -m playwright install chromium
 
 **FFmpeg**: установите в систему (`ffmpeg` в PATH).
 
-> В `requirements.txt` теперь включены `PyQt6-Qt6` и `PyQt6-Qt6-Data` (а `PyQt6-Qt6-DBus` подтянется автоматически только на Linux),
-> поэтому вместе с PyQt6 автоматически подтягиваются мультимедийные плагины Qt. После установки зависимости можно сразу
-> пользоваться мини‑плеером предпросмотра
-> блюра без ручного докачивания Qt.
+### Qt Multimedia плагины (macOS/Windows/Linux)
+
+В `requirements.txt` уже прописаны пакеты `PyQt6-Qt6`, `PyQt6-Qt6-Data` и `PyQt6-Qt6-Multimedia`, поэтому при установке зависимостей
+подтягиваются все необходимые плагины Qt (включая мультимедиа и кодеки предпросмотра блюра). На Linux дополнительно ставится
+`PyQt6-Qt6-DBus`.
+
+Если мини-плеер жалуется на отсутствие плагинов (`Failed to create QVideoSink` и т.п.), выполните повторную установку, чтобы
+установщик скачал бинарные колёса под вашу платформу:
+
+```bash
+# macOS / Windows
+pip install --upgrade --force-reinstall \
+  PyQt6 PyQt6-Qt6 PyQt6-Qt6-Data PyQt6-Qt6-Multimedia
+
+# Linux
+pip install --upgrade --force-reinstall \
+  PyQt6 PyQt6-Qt6 PyQt6-Qt6-Data PyQt6-Qt6-Multimedia PyQt6-Qt6-DBus
+```
+
+* На **Linux** дополнительно убедитесь, что в системе стоят `libxcb`/`libxkbcommon` (обычно приходят из `qt6-base`).
+
+После успешной установки папка `.venv/lib/pythonX/site-packages/PyQt6/Qt6/plugins/` будет содержать директории `multimedia`,
+`platforms`, `imageformats` и т.д., а предпросмотр блюра заработает без дополнительных телодвижений.
 
 ## Запуск GUI
 
