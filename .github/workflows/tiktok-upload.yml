@@ -1,0 +1,58 @@
+name: TikTok Upload
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: TikTok profile name from app_config.yaml
+        required: true
+      src_dir:
+        description: Folder with videos (relative to repo root)
+        required: true
+        default: merged
+      limit:
+        description: How many videos to upload (0 = all)
+        required: false
+        default: '0'
+      interval:
+        description: Minutes between scheduled posts
+        required: false
+        default: '0'
+      publish_at:
+        description: ISO UTC time to start scheduling (optional)
+        required: false
+        default: ''
+      draft:
+        description: 'Set to 1 to keep drafts'
+        required: false
+        default: '0'
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: python scripts/bootstrap.py
+      - name: Prepare cookies
+        env:
+          TIKTOK_COOKIES_JSON: ${{ secrets.TIKTOK_COOKIES_JSON }}
+        run: |
+          mkdir -p auth
+          echo "$TIKTOK_COOKIES_JSON" > auth/tiktok_cookies.json
+      - name: Run TikTok uploader
+        env:
+          APP_CONFIG_PATH: sora_suite/app_config.yaml
+          TIKTOK_PROFILE_NAME: ${{ inputs.profile }}
+          TIKTOK_SRC_DIR: ${{ github.workspace }}/${{ inputs.src_dir }}
+          TIKTOK_ARCHIVE_DIR: ${{ github.workspace }}/uploaded_tiktok
+          TIKTOK_BATCH_LIMIT: ${{ inputs.limit }}
+          TIKTOK_BATCH_STEP_MINUTES: ${{ inputs.interval }}
+          TIKTOK_PUBLISH_AT: ${{ inputs.publish_at }}
+          TIKTOK_DRAFT_ONLY: ${{ inputs.draft }}
+        run: |
+          python sora_suite/workers/tiktok/upload_queue.py
