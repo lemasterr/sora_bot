@@ -1,6 +1,6 @@
 PyQt6==6.7.0
 PyQt6-Qt6==6.7.0
-PyQt6-Qt6-DBus==6.7.0
+PyQt6-Qt6-DBus==6.7.0; sys_platform == "linux"
 PyQt6-Qt6-Data==6.7.0
 playwright==1.48.0
 PyYAML==6.0.2
