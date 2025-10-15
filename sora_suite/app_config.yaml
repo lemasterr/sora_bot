@@ -8,6 +8,9 @@ autogen:
   workdir: ./workers/autogen
   entry: main.py
   config_path: ./workers/autogen/config.yaml
+  submitted_log: ./workers/autogen/submitted.log
+  failed_log: ./workers/autogen/failed.log
+  instances: []
 downloader:
   workdir: ./workers/downloader
   entry: download_all.py

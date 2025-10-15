@@ -19,10 +19,13 @@ import subprocess
 import socket
 import shutil
 from pathlib import Path
+from functools import partial
 from urllib.request import urlopen, Request
 from typing import Optional, List, Union, Tuple, Dict
 
 from PyQt6 import QtCore, QtGui, QtWidgets
+
+from blur_preview import BlurPreviewDialog
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
 
@@ -63,6 +66,9 @@ def load_cfg() -> dict:
     autogen.setdefault("workdir", str(WORKERS_DIR / "autogen"))
     autogen.setdefault("entry", "main.py")
     autogen.setdefault("config_path", str(WORKERS_DIR / "autogen" / "config.yaml"))
+    autogen.setdefault("submitted_log", str(WORKERS_DIR / "autogen" / "submitted.log"))
+    autogen.setdefault("failed_log", str(WORKERS_DIR / "autogen" / "failed.log"))
+    autogen.setdefault("instances", [])
 
     downloader = data.setdefault("downloader", {})
     downloader.setdefault("workdir", str(WORKERS_DIR / "downloader"))
@@ -158,6 +164,41 @@ def load_cfg() -> dict:
     ui.setdefault("activity_density", "compact")
 
     return data
+
+
+def slugify(value: str) -> str:
+    value = re.sub(r"[^a-zA-Z0-9]+", "-", value.strip().lower())
+    value = re.sub(r"-+", "-", value).strip("-")
+    return value or "instance"
+
+
+ERROR_GUIDE: List[Tuple[str, str, str]] = [
+    (
+        "AUTOGEN_TIMEOUT",
+        "Playwright не увидел поле ввода или кнопку Sora.",
+        "Открой вкладку drafts, обнови селекторы в workers/autogen/selectors.yaml и перезапусти автоген.",
+    ),
+    (
+        "AUTOGEN_REJECT",
+        "Sora вернула ошибку очереди или лимита.",
+        "Увеличь паузу backoff_seconds_on_reject в конфиге автогена или запусти генерацию позже.",
+    ),
+    (
+        "DOWNLOAD_HTTP",
+        "FFmpeg/yt-dlp не смогли скачать ролик.",
+        "Проверь интернет, авторизацию в браузере и актуальность cookies профиля Chrome.",
+    ),
+    (
+        "BLUR_CODEC",
+        "FFmpeg не поддерживает исходный кодек или требуется перекодирование.",
+        "Выбери preset libx264, включи перекодирование аудио и повтори обработку.",
+    ),
+    (
+        "YOUTUBE_QUOTA",
+        "YouTube API вернул ошибку квоты или авторизации.",
+        "Проверь OAuth-ключи, refresh_token и лимиты API в Google Cloud Console.",
+    ),
+]
 
 
 def save_cfg(cfg: dict):
@@ -510,6 +551,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self._settings_autosave_timer.timeout.connect(self._autosave_settings)
         self._register_settings_autosave_sources()
 
+        self._preset_cache: Dict[str, List[Dict[str, int]]] = {}
+        self._preset_tables: Dict[str, QtWidgets.QTableWidget] = {}
+        self._autogen_instance_runners: Dict[str, ProcRunner] = {}
+
+        self._current_step_started: Optional[float] = None
+        self._current_step_state: str = "idle"
+        self._current_step_timer = QtCore.QTimer(self)
+        self._current_step_timer.setInterval(1000)
+        self._current_step_timer.timeout.connect(self._tick_step_timer)
+
     # ----- helpers -----
     def _perform_delayed_startup(self):
         self._refresh_stats()
@@ -518,6 +569,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_youtube_ui()
         self._load_autogen_cfg_ui()
         self._load_readme_preview()
+        self._refresh_autogen_instances_ui()
+        self._reload_used_prompts()
         maint_cfg = self.cfg.get("maintenance", {}) or {}
         if maint_cfg.get("auto_cleanup_on_start"):
             QtCore.QTimer.singleShot(200, lambda: self._run_maintenance_cleanup(manual=False))
@@ -733,8 +786,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lbl_current_event_body = QtWidgets.QLabel("—")
         self.lbl_current_event_body.setObjectName("currentEventBody")
         self.lbl_current_event_body.setWordWrap(True)
+        self.lbl_current_event_timer = QtWidgets.QLabel("—")
+        self.lbl_current_event_timer.setObjectName("currentEventTimer")
+        self.lbl_current_event_timer.setStyleSheet("color:#94a3b8;font-size:11px;")
         card_layout.addWidget(self.lbl_current_event_title)
         card_layout.addWidget(self.lbl_current_event_body)
+        card_layout.addWidget(self.lbl_current_event_timer)
         act_layout.addWidget(self.current_event_card, 0)
 
         act_header = QtWidgets.QHBoxLayout()
@@ -1037,11 +1094,92 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_load_prompts = QtWidgets.QPushButton("Загрузить")
         self.btn_save_prompts = QtWidgets.QPushButton("Сохранить")
         self.btn_save_and_run_autogen = QtWidgets.QPushButton("Сохранить и запустить автоген")
-        bar.addWidget(self.btn_load_prompts); bar.addWidget(self.btn_save_prompts); bar.addStretch(1); bar.addWidget(self.btn_save_and_run_autogen)
+        bar.addWidget(self.btn_load_prompts)
+        bar.addWidget(self.btn_save_prompts)
+        bar.addStretch(1)
+        bar.addWidget(self.btn_save_and_run_autogen)
         pp.addLayout(bar)
+
         self.ed_prompts = QtWidgets.QPlainTextEdit()
         self.ed_prompts.setPlaceholderText("По одному промпту на строке…")
-        pp.addWidget(self.ed_prompts, 1)
+        pp.addWidget(self.ed_prompts, 2)
+
+        grp_used = QtWidgets.QGroupBox("Использованные промпты")
+        used_layout = QtWidgets.QVBoxLayout(grp_used)
+        self.tbl_used_prompts = QtWidgets.QTableWidget(0, 3)
+        self.tbl_used_prompts.setHorizontalHeaderLabels(["Когда", "Окно", "Текст"])
+        self.tbl_used_prompts.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.tbl_used_prompts.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.tbl_used_prompts.verticalHeader().setVisible(False)
+        self.tbl_used_prompts.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        self.tbl_used_prompts.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        self.tbl_used_prompts.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        used_layout.addWidget(self.tbl_used_prompts, 1)
+        used_btns = QtWidgets.QHBoxLayout()
+        self.btn_used_refresh = QtWidgets.QPushButton("Обновить")
+        self.btn_used_clear = QtWidgets.QPushButton("Очистить журнал")
+        used_btns.addWidget(self.btn_used_refresh)
+        used_btns.addWidget(self.btn_used_clear)
+        used_btns.addStretch(1)
+        used_layout.addLayout(used_btns)
+        pp.addWidget(grp_used, 1)
+
+        grp_instances = QtWidgets.QGroupBox("Окна Sora и параллельная подача")
+        inst_layout = QtWidgets.QVBoxLayout(grp_instances)
+        top_row = QtWidgets.QHBoxLayout()
+        self.lst_instances = QtWidgets.QListWidget()
+        self.lst_instances.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
+        top_row.addWidget(self.lst_instances, 2)
+
+        form = QtWidgets.QFormLayout()
+        self.ed_instance_name = QtWidgets.QLineEdit()
+        form.addRow("Название окна:", self.ed_instance_name)
+        self.sb_instance_port = QtWidgets.QSpinBox()
+        self.sb_instance_port.setRange(9000, 9999)
+        self.sb_instance_port.setValue(9222)
+        form.addRow("CDP порт:", self.sb_instance_port)
+        self.cmb_instance_profile = QtWidgets.QComboBox()
+        form.addRow("Chrome профиль:", self.cmb_instance_profile)
+        self.ed_instance_userdir = QtWidgets.QLineEdit()
+        form.addRow("user_data_dir (кастом):", self.ed_instance_userdir)
+        self.ed_instance_profile_dir = QtWidgets.QLineEdit()
+        form.addRow("profile_directory:", self.ed_instance_profile_dir)
+        src_wrap = QtWidgets.QWidget(); src_layout = QtWidgets.QHBoxLayout(src_wrap); src_layout.setContentsMargins(0,0,0,0)
+        self.ed_instance_prompts = QtWidgets.QLineEdit()
+        self.btn_instance_prompts = QtWidgets.QPushButton("…")
+        src_layout.addWidget(self.ed_instance_prompts, 1)
+        src_layout.addWidget(self.btn_instance_prompts)
+        form.addRow("Файл промптов:", src_wrap)
+        self.ed_instance_submitted = QtWidgets.QLineEdit()
+        form.addRow("Журнал отправок:", self.ed_instance_submitted)
+        self.cb_instance_enabled = QtWidgets.QCheckBox("Включить в автозапуск")
+        form.addRow(self.cb_instance_enabled)
+        top_row.addLayout(form, 3)
+        inst_layout.addLayout(top_row)
+
+        btn_row = QtWidgets.QHBoxLayout()
+        self.btn_instance_save = QtWidgets.QPushButton("Сохранить/обновить")
+        self.btn_instance_delete = QtWidgets.QPushButton("Удалить")
+        self.btn_instance_duplicate = QtWidgets.QPushButton("Дублировать")
+        btn_row.addWidget(self.btn_instance_save)
+        btn_row.addWidget(self.btn_instance_delete)
+        btn_row.addWidget(self.btn_instance_duplicate)
+        btn_row.addStretch(1)
+        inst_layout.addLayout(btn_row)
+
+        run_row = QtWidgets.QHBoxLayout()
+        self.btn_instance_launch = QtWidgets.QPushButton("Запустить окна Chrome")
+        self.btn_instance_run = QtWidgets.QPushButton("Параллельный автоген")
+        run_row.addWidget(self.btn_instance_launch)
+        run_row.addWidget(self.btn_instance_run)
+        run_row.addStretch(1)
+        inst_layout.addLayout(run_row)
+
+        self.lbl_instances_hint = QtWidgets.QLabel("Выдели несколько окон, чтобы запустить их одновременно.")
+        self.lbl_instances_hint.setStyleSheet("color:#94a3b8;font-size:11px;")
+        inst_layout.addWidget(self.lbl_instances_hint)
+
+        pp.addWidget(grp_instances, 2)
         self.tabs.addTab(self.tab_prompts, "Промпты")
 
         # TAB: Названия
@@ -1080,6 +1218,22 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.tab_settings.setWidget(settings_body)
         self.tabs.addTab(self.tab_settings, "Настройки")
+        # TAB: Ошибки
+        self.tab_errors = QtWidgets.QWidget(); err_layout = QtWidgets.QVBoxLayout(self.tab_errors)
+        self.tbl_errors = QtWidgets.QTableWidget(len(ERROR_GUIDE), 3)
+        self.tbl_errors.setHorizontalHeaderLabels(["Код", "Что означает", "Что сделать"])
+        self.tbl_errors.verticalHeader().setVisible(False)
+        self.tbl_errors.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.tbl_errors.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
+        self.tbl_errors.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        self.tbl_errors.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        self.tbl_errors.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        for row, (code, meaning, action) in enumerate(ERROR_GUIDE):
+            self.tbl_errors.setItem(row, 0, QtWidgets.QTableWidgetItem(code))
+            self.tbl_errors.setItem(row, 1, QtWidgets.QTableWidgetItem(meaning))
+            self.tbl_errors.setItem(row, 2, QtWidgets.QTableWidgetItem(action))
+        err_layout.addWidget(self.tbl_errors)
+        self.tabs.addTab(self.tab_errors, "Ошибки")
         # TAB: История
         self.tab_history = QtWidgets.QWidget(); h = QtWidgets.QVBoxLayout(self.tab_history)
         self.btn_reload_history = QtWidgets.QPushButton("Обновить")
@@ -1256,20 +1410,22 @@ class MainWindow(QtWidgets.QMainWindow):
         ff_form.addRow("format:", self.cmb_format)
         ff_form.addRow("Потоки BLUR:", self.sb_blur_threads)
         ff_form.addRow("", self.cb_copy_audio)
-        self.cmb_aspect = QtWidgets.QComboBox()
-        self.cmb_aspect.addItems(["portrait_9x16", "landscape_16x9"])
-        self.cmb_aspect.setCurrentText(ff.get("active_preset", "portrait_9x16"))
-        ff_form.addRow("Активный пресет:", self.cmb_aspect)
+        self.cmb_active_preset = QtWidgets.QComboBox()
+        ff_form.addRow("Активный пресет:", self.cmb_active_preset)
         ff_layout.addLayout(ff_form)
 
-        self.grp_portrait = QtWidgets.QGroupBox("Координаты 9:16 (три зоны delogo)")
-        gp = QtWidgets.QGridLayout(self.grp_portrait)
-        self.p_edits = self._make_zone_edits(gp)
-        self.grp_landscape = QtWidgets.QGroupBox("Координаты 16:9 (три зоны delogo)")
-        glp = QtWidgets.QGridLayout(self.grp_landscape)
-        self.l_edits = self._make_zone_edits(glp)
-        ff_layout.addWidget(self.grp_portrait)
-        ff_layout.addWidget(self.grp_landscape)
+        preset_btns = QtWidgets.QHBoxLayout()
+        self.btn_preset_add = QtWidgets.QPushButton("Добавить пресет")
+        self.btn_preset_delete = QtWidgets.QPushButton("Удалить пресет")
+        self.btn_preset_preview = QtWidgets.QPushButton("Предпросмотр и разметка…")
+        preset_btns.addWidget(self.btn_preset_add)
+        preset_btns.addWidget(self.btn_preset_delete)
+        preset_btns.addWidget(self.btn_preset_preview)
+        preset_btns.addStretch(1)
+        ff_layout.addLayout(preset_btns)
+
+        self.tab_presets = QtWidgets.QTabWidget()
+        ff_layout.addWidget(self.tab_presets, 1)
 
         self.settings_tabs.addTab(page_ff, "FFmpeg")
 
@@ -1458,7 +1614,7 @@ class MainWindow(QtWidgets.QMainWindow):
             (self.cmb_preset, "currentIndexChanged"),
             (self.cmb_format, "currentIndexChanged"),
             (self.cb_copy_audio, "toggled"),
-            (self.cmb_aspect, "currentIndexChanged"),
+            (self.cmb_active_preset, "currentIndexChanged"),
             (self.sb_blur_threads, "valueChanged"),
             (self.sb_youtube_default_delay, "valueChanged"),
             (self.cb_youtube_default_draft, "toggled"),
@@ -1540,22 +1696,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self._on_merged_path_edited(merged)
         else:
             self._upload_src_autofollow = auto
-    def _make_zone_edits(self, grid: QtWidgets.QGridLayout):
-        edits = []
-        headers = ["Зона", "x", "y", "w", "h"]
-        for j, name in enumerate(headers):
-            lbl = QtWidgets.QLabel(f"<b>{name}</b>")
-            grid.addWidget(lbl, 0, j)
-        for i in range(3):
-            grid.addWidget(QtWidgets.QLabel(f"{i+1}"), i+1, 0)
-            x = QtWidgets.QSpinBox(); x.setRange(0, 4000)
-            y = QtWidgets.QSpinBox(); y.setRange(0, 4000)
-            w = QtWidgets.QSpinBox(); w.setRange(0, 4000)
-            h = QtWidgets.QSpinBox(); h.setRange(0, 4000)
-            grid.addWidget(x, i+1, 1); grid.addWidget(y, i+1, 2)
-            grid.addWidget(w, i+1, 3); grid.addWidget(h, i+1, 4)
-            edits.append((x, y, w, h))
-        return edits
 
     @staticmethod
     def _guess_ffprobe(ffmpeg_bin: str) -> str:
@@ -1570,22 +1710,129 @@ class MainWindow(QtWidgets.QMainWindow):
         return "ffprobe.exe" if sys.platform.startswith("win") else "ffprobe"
 
     def _load_zones_into_ui(self):
-        ff = self.cfg.get("ffmpeg", {})
-        pr = ff.get("presets", {})
-        pz = (pr.get("portrait_9x16") or {}).get("zones", [])
-        lz = (pr.get("landscape_16x9") or {}).get("zones", [])
-        def fill(edits, zones):
-            for i in range(3):
-                if i < len(zones):
-                    x,y,w,h = zones[i]["x"], zones[i]["y"], zones[i]["w"], zones[i]["h"]
-                else:
-                    x=y=w=h=0
-                edits[i][0].setValue(int(x))
-                edits[i][1].setValue(int(y))
-                edits[i][2].setValue(int(w))
-                edits[i][3].setValue(int(h))
-        fill(self.p_edits, pz)
-        fill(self.l_edits, lz)
+        ff = self.cfg.get("ffmpeg", {}) or {}
+        presets = ff.get("presets", {}) or {}
+
+        self._preset_cache = {}
+        self._preset_tables = {}
+        self.tab_presets.clear()
+
+        if not presets:
+            presets = {
+                "portrait_9x16": {
+                    "zones": [
+                        {"x": 30, "y": 105, "w": 157, "h": 62},
+                        {"x": 515, "y": 610, "w": 157, "h": 62},
+                        {"x": 30, "y": 1110, "w": 157, "h": 62},
+                    ]
+                }
+            }
+
+        for name, body in presets.items():
+            zones = [
+                {
+                    "x": int(zone.get("x", 0)),
+                    "y": int(zone.get("y", 0)),
+                    "w": int(zone.get("w", 0)),
+                    "h": int(zone.get("h", 0)),
+                }
+                for zone in (body.get("zones") or [])
+            ]
+            if not zones:
+                zones = [{"x": 0, "y": 0, "w": 0, "h": 0}]
+            self._preset_cache[name] = zones
+            self._create_preset_tab(name)
+
+        self.cmb_active_preset.blockSignals(True)
+        self.cmb_active_preset.clear()
+        for name in self._preset_cache.keys():
+            self.cmb_active_preset.addItem(name)
+        active = ff.get("active_preset") or next(iter(self._preset_cache.keys()))
+        idx = self.cmb_active_preset.findText(active)
+        if idx < 0:
+            idx = 0
+        self.cmb_active_preset.setCurrentIndex(idx)
+        self.cmb_active_preset.blockSignals(False)
+        self._select_preset_tab(self.cmb_active_preset.currentText())
+
+    def _create_preset_tab(self, name: str):
+        widget = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(widget)
+        table = QtWidgets.QTableWidget(0, 4)
+        table.setHorizontalHeaderLabels(["x", "y", "w", "h"])
+        header = table.horizontalHeader()
+        header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
+        layout.addWidget(table, 1)
+        btn_row = QtWidgets.QHBoxLayout()
+        btn_add = QtWidgets.QPushButton("Добавить зону")
+        btn_remove = QtWidgets.QPushButton("Удалить зону")
+        btn_row.addWidget(btn_add)
+        btn_row.addWidget(btn_remove)
+        btn_row.addStretch(1)
+        layout.addLayout(btn_row)
+        self.tab_presets.addTab(widget, name)
+        self._preset_tables[name] = table
+        btn_add.clicked.connect(partial(self._add_zone_to_preset, name))
+        btn_remove.clicked.connect(partial(self._remove_zone_from_preset, name))
+        table.itemChanged.connect(partial(self._on_preset_zone_changed, name))
+        self._populate_preset_table(name)
+
+    def _populate_preset_table(self, name: str):
+        table = self._preset_tables.get(name)
+        zones = self._preset_cache.get(name, [])
+        if not table:
+            return
+        table.blockSignals(True)
+        table.setRowCount(0)
+        for zone in zones:
+            row = table.rowCount()
+            table.insertRow(row)
+            for col, key in enumerate(["x", "y", "w", "h"]):
+                item = QtWidgets.QTableWidgetItem(str(int(zone.get(key, 0))))
+                item.setTextAlignment(int(QtCore.Qt.AlignmentFlag.AlignCenter))
+                table.setItem(row, col, item)
+        table.blockSignals(False)
+
+    def _select_preset_tab(self, name: str):
+        for i in range(self.tab_presets.count()):
+            if self.tab_presets.tabText(i) == name:
+                self.tab_presets.setCurrentIndex(i)
+                break
+
+    def _add_zone_to_preset(self, name: str):
+        zones = self._preset_cache.setdefault(name, [])
+        zones.append({"x": 0, "y": 0, "w": 0, "h": 0})
+        self._populate_preset_table(name)
+        self._mark_settings_dirty()
+
+    def _remove_zone_from_preset(self, name: str):
+        zones = self._preset_cache.setdefault(name, [])
+        table = self._preset_tables.get(name)
+        if not table or not zones:
+            return
+        row = table.currentRow()
+        if row < 0 or row >= len(zones):
+            row = len(zones) - 1
+        if row < 0:
+            return
+        zones.pop(row)
+        if not zones:
+            zones.append({"x": 0, "y": 0, "w": 0, "h": 0})
+        self._populate_preset_table(name)
+        self._mark_settings_dirty()
+
+    def _on_preset_zone_changed(self, name: str, item: QtWidgets.QTableWidgetItem):
+        try:
+            value = max(0, int(item.text()))
+        except ValueError:
+            value = 0
+        item.setText(str(value))
+        zones = self._preset_cache.setdefault(name, [])
+        while len(zones) <= item.row():
+            zones.append({"x": 0, "y": 0, "w": 0, "h": 0})
+        key = ["x", "y", "w", "h"][item.column()]
+        zones[item.row()][key] = value
+        self._mark_settings_dirty()
 
     def _load_readme_preview(self):
         if not hasattr(self, "txt_readme"):
@@ -1624,6 +1871,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_load_prompts.clicked.connect(self._load_prompts)
         self.btn_save_prompts.clicked.connect(self._save_prompts)
         self.btn_save_and_run_autogen.clicked.connect(self._save_and_run_autogen)
+        self.btn_used_refresh.clicked.connect(self._reload_used_prompts)
+        self.btn_used_clear.clicked.connect(self._clear_used_prompts)
+        self.lst_instances.itemSelectionChanged.connect(self._on_instance_selected)
+        self.btn_instance_save.clicked.connect(self._on_instance_save)
+        self.btn_instance_delete.clicked.connect(self._on_instance_delete)
+        self.btn_instance_duplicate.clicked.connect(self._on_instance_duplicate)
+        self.btn_instance_prompts.clicked.connect(self._browse_instance_prompts)
+        self.btn_instance_launch.clicked.connect(self._launch_selected_instances)
+        self.btn_instance_run.clicked.connect(lambda: self._run_autogen_instances())
 
         self.btn_load_titles.clicked.connect(self._load_titles)
         self.btn_save_titles.clicked.connect(self._save_titles)
@@ -1640,6 +1896,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_maintenance_cleanup.clicked.connect(lambda: self._run_maintenance_cleanup(manual=True))
         self.btn_maintenance_sizes.clicked.connect(self._report_dir_sizes)
         self.cmb_ui_activity_density.currentIndexChanged.connect(self._on_activity_density_changed)
+        self.cmb_active_preset.currentTextChanged.connect(self._on_active_preset_changed)
+        self.btn_preset_add.clicked.connect(self._on_preset_add)
+        self.btn_preset_delete.clicked.connect(self._on_preset_delete)
+        self.btn_preset_preview.clicked.connect(self._open_blur_preview)
 
         self.btn_youtube_src_browse.clicked.connect(lambda: self._browse_dir(self.ed_youtube_src, "Выбери папку с клипами"))
         self.cb_youtube_draft_only.toggled.connect(self._toggle_youtube_schedule)
@@ -1716,6 +1976,449 @@ class MainWindow(QtWidgets.QMainWindow):
         if state == "ok": color = "#1bb55c"
         if state == "error": color = "#d74c4c"
         self.pb_global.setStyleSheet(f"QProgressBar::chunk {{ background-color: {color}; }}")
+
+        if state == "running":
+            if self._current_step_state != "running":
+                self._current_step_started = time.monotonic()
+                self._current_step_timer.start()
+            elapsed = 0.0
+            if self._current_step_started is not None:
+                elapsed = time.monotonic() - self._current_step_started
+            self._set_step_timer_label(elapsed, prefix="⌛")
+        else:
+            if self._current_step_state == "running" and self._current_step_started is not None:
+                elapsed = time.monotonic() - self._current_step_started
+                self._set_step_timer_label(elapsed, prefix="⏱")
+            if state == "idle":
+                if hasattr(self, "lbl_current_event_timer"):
+                    self.lbl_current_event_timer.setText("—")
+                self._current_step_timer.stop()
+                self._current_step_started = None
+        self._current_step_state = state
+
+    def _set_step_timer_label(self, seconds: float, prefix: str = "⌛"):
+        if not hasattr(self, "lbl_current_event_timer"):
+            return
+        seconds = max(0, int(seconds))
+        minutes, sec = divmod(seconds, 60)
+        self.lbl_current_event_timer.setText(f"{prefix} {minutes:02d}:{sec:02d}")
+
+    def _tick_step_timer(self):
+        if self._current_step_started is None:
+            self._current_step_timer.stop()
+            return
+        elapsed = time.monotonic() - self._current_step_started
+        self._set_step_timer_label(elapsed, prefix="⌛")
+
+    # ----- автоген-инстансы -----
+    def _refresh_instance_profiles(self):
+        if not hasattr(self, "cmb_instance_profile"):
+            return
+        profiles = self.cfg.get("chrome", {}).get("profiles", []) or []
+        self.cmb_instance_profile.blockSignals(True)
+        self.cmb_instance_profile.clear()
+        self.cmb_instance_profile.addItem("Активный профиль (из настроек)", "")
+        for prof in profiles:
+            name = prof.get("name", "")
+            if name:
+                self.cmb_instance_profile.addItem(name, name)
+        self.cmb_instance_profile.blockSignals(False)
+
+    def _refresh_autogen_instances_ui(self):
+        if not hasattr(self, "lst_instances"):
+            return
+        auto_cfg = self.cfg.get("autogen", {}) or {}
+        instances = auto_cfg.get("instances", []) or []
+        self.lst_instances.clear()
+        for inst in instances:
+            name = inst.get("name") or f"Порт {inst.get('cdp_port', '—')}"
+            label = f"{name} · порт {inst.get('cdp_port', '—')}"
+            if not inst.get("enabled", True):
+                label = "🛑 " + label
+            item = QtWidgets.QListWidgetItem(label)
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, dict(inst))
+            if not inst.get("enabled", True):
+                item.setForeground(QtGui.QColor("#64748b"))
+            self.lst_instances.addItem(item)
+        if instances:
+            self.lst_instances.setCurrentRow(0)
+        self._refresh_instance_profiles()
+
+    def _selected_instances(self) -> List[dict]:
+        if not hasattr(self, "lst_instances"):
+            return []
+        items = self.lst_instances.selectedItems()
+        if not items:
+            return []
+        return [dict(it.data(QtCore.Qt.ItemDataRole.UserRole) or {}) for it in items]
+
+    def _clear_instance_form(self):
+        self.ed_instance_name.clear()
+        self.sb_instance_port.setValue(9222)
+        self.cmb_instance_profile.setCurrentIndex(0)
+        self.ed_instance_userdir.clear()
+        self.ed_instance_profile_dir.clear()
+        self.ed_instance_prompts.clear()
+        self.ed_instance_submitted.clear()
+        self.cb_instance_enabled.setChecked(True)
+
+    def _on_instance_selected(self):
+        items = self.lst_instances.selectedItems()
+        if not items:
+            self._clear_instance_form()
+            return
+        inst = dict(items[0].data(QtCore.Qt.ItemDataRole.UserRole) or {})
+        self.ed_instance_name.setText(inst.get("name", ""))
+        try:
+            self.sb_instance_port.setValue(int(inst.get("cdp_port", 9222)))
+        except Exception:
+            self.sb_instance_port.setValue(9222)
+        profile_name = inst.get("chrome_profile", "") or ""
+        idx = self.cmb_instance_profile.findData(profile_name)
+        if idx < 0:
+            idx = 0
+        self.cmb_instance_profile.setCurrentIndex(idx)
+        self.ed_instance_userdir.setText(inst.get("user_data_dir", ""))
+        self.ed_instance_profile_dir.setText(inst.get("profile_directory", ""))
+        self.ed_instance_prompts.setText(inst.get("prompts_file", ""))
+        self.ed_instance_submitted.setText(inst.get("submitted_log", ""))
+        self.cb_instance_enabled.setChecked(bool(inst.get("enabled", True)))
+
+    def _default_instance_paths(self, name: str) -> Tuple[str, str]:
+        slug = slugify(name)
+        prompts = WORKERS_DIR / "autogen" / f"prompts_{slug}.txt"
+        submitted = WORKERS_DIR / "autogen" / f"submitted_{slug}.log"
+        return str(prompts), str(submitted)
+
+    def _ensure_path_exists(self, path: str):
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        if not p.exists():
+            try:
+                p.touch()
+            except Exception:
+                pass
+
+    def _on_instance_save(self):
+        name = self.ed_instance_name.text().strip()
+        if not name:
+            self._post_status("Укажи название окна", state="error")
+            return
+        port = int(self.sb_instance_port.value())
+        prompts = self.ed_instance_prompts.text().strip()
+        submitted = self.ed_instance_submitted.text().strip()
+        if not prompts or not submitted:
+            default_prompts, default_sub = self._default_instance_paths(name)
+            prompts = prompts or default_prompts
+            submitted = submitted or default_sub
+        chrome_profile = self.cmb_instance_profile.currentData() or ""
+        inst_cfg = {
+            "name": name,
+            "cdp_port": port,
+            "chrome_profile": chrome_profile,
+            "user_data_dir": self.ed_instance_userdir.text().strip(),
+            "profile_directory": self.ed_instance_profile_dir.text().strip(),
+            "prompts_file": prompts,
+            "submitted_log": submitted,
+            "enabled": bool(self.cb_instance_enabled.isChecked()),
+        }
+        auto_cfg = self.cfg.setdefault("autogen", {})
+        instances = auto_cfg.setdefault("instances", [])
+        for idx, existing in enumerate(instances):
+            if existing.get("name") == name:
+                instances[idx] = inst_cfg
+                break
+        else:
+            instances.append(inst_cfg)
+        save_cfg(self.cfg)
+        self._refresh_autogen_instances_ui()
+        self._post_status(f"Окно {name} сохранено", state="ok")
+
+    def _on_instance_delete(self):
+        selected = self._selected_instances()
+        if not selected:
+            return
+        names = {inst.get("name") for inst in selected if inst.get("name")}
+        auto_cfg = self.cfg.setdefault("autogen", {})
+        auto_cfg["instances"] = [inst for inst in auto_cfg.get("instances", []) if inst.get("name") not in names]
+        save_cfg(self.cfg)
+        self._refresh_autogen_instances_ui()
+        self._post_status("Инстансы удалены", state="ok")
+
+    def _on_instance_duplicate(self):
+        selected = self._selected_instances()
+        if not selected:
+            return
+        base = selected[0]
+        base_name = base.get("name", "Копия")
+        auto_cfg = self.cfg.setdefault("autogen", {})
+        instances = auto_cfg.setdefault("instances", [])
+        ports = {inst.get("cdp_port") for inst in instances}
+        new_port = base.get("cdp_port", 9222)
+        while new_port in ports:
+            new_port += 1
+        suffix = 2
+        new_name = f"{base_name} копия"
+        existing_names = {inst.get("name") for inst in instances}
+        while new_name in existing_names:
+            new_name = f"{base_name} копия {suffix}"
+            suffix += 1
+        clone = dict(base)
+        clone["name"] = new_name
+        clone["cdp_port"] = new_port
+        clone["enabled"] = False
+        prompts, submitted = self._default_instance_paths(new_name)
+        clone["prompts_file"] = prompts
+        clone["submitted_log"] = submitted
+        instances.append(clone)
+        save_cfg(self.cfg)
+        self._refresh_autogen_instances_ui()
+        self._post_status(f"Создан дубликат {new_name}", state="ok")
+
+    def _browse_instance_prompts(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Файл промптов", str(WORKERS_DIR / "autogen"), "Текст (*.txt)")
+        if path:
+            self.ed_instance_prompts.setText(path)
+
+    def _launch_selected_instances(self):
+        instances = self._selected_instances()
+        if not instances:
+            instances = [inst for inst in (self.cfg.get("autogen", {}).get("instances") or []) if inst.get("enabled", True)]
+        if not instances:
+            self._post_status("Нет инстансов для запуска", state="error")
+            return
+        for inst in instances:
+            self._open_chrome(instance=inst)
+
+    def _run_autogen_instances(self, instances: Optional[List[dict]] = None) -> bool:
+        if instances is None:
+            instances = self._selected_instances()
+            if not instances:
+                instances = [inst for inst in (self.cfg.get("autogen", {}).get("instances") or []) if inst.get("enabled", True)]
+        if not instances:
+            self._post_status("Нет инстансов для автогена", state="error")
+            return False
+
+        auto_cfg = self.cfg.get("autogen", {}) or {}
+        workdir = auto_cfg.get("workdir", str(WORKERS_DIR / "autogen"))
+        entry = auto_cfg.get("entry", "main.py")
+        updated_names = set()
+
+        for inst in instances:
+            name = inst.get("name") or f"порт {inst.get('cdp_port', '—')}"
+            prompts = inst.get("prompts_file", "")
+            submitted = inst.get("submitted_log", "")
+            if not prompts or not submitted:
+                default_prompts, default_sub = self._default_instance_paths(name)
+                prompts = prompts or default_prompts
+                submitted = submitted or default_sub
+            inst["prompts_file"] = prompts
+            inst["submitted_log"] = submitted
+            self._ensure_path_exists(prompts)
+            self._ensure_path_exists(submitted)
+            env = os.environ.copy()
+            env["PYTHONUNBUFFERED"] = "1"
+            env["SORA_PROMPTS_FILE"] = prompts
+            env["SORA_SUBMITTED_LOG"] = submitted
+            env["SORA_FAILED_LOG"] = inst.get("failed_log") or auto_cfg.get("failed_log", str(WORKERS_DIR / "autogen" / "failed.log"))
+            env["SORA_INSTANCE_NAME"] = name
+            port = int(inst.get("cdp_port", auto_cfg.get("cdp_port", 9222)))
+            endpoint = inst.get("cdp_endpoint") or f"http://localhost:{port}"
+            env["SORA_CDP_ENDPOINT"] = endpoint
+
+            runner = self._autogen_instance_runners.get(name)
+            if runner is None:
+                runner = ProcRunner(f"AUTOGEN:{name}")
+                runner.line.connect(self._slot_log)
+                runner.finished.connect(self._proc_done)
+                runner.notify.connect(self._notify)
+                self._autogen_instance_runners[name] = runner
+            if runner.proc and runner.proc.poll() is None:
+                self._post_status(f"{name}: процесс уже выполняется", state="error")
+                continue
+            self._post_status(f"Запуск автогена для {name}", state="running")
+            runner.run([sys.executable, entry], cwd=workdir, env=env)
+            updated_names.add(name)
+
+        if updated_names:
+            cfg_instances = self.cfg.setdefault("autogen", {}).setdefault("instances", [])
+            for stored in cfg_instances:
+                if stored.get("name") in updated_names:
+                    match = next((inst for inst in instances if inst.get("name") == stored.get("name")), None)
+                    if match:
+                        stored.update(match)
+            save_cfg(self.cfg)
+        return bool(updated_names)
+
+    def _on_active_preset_changed(self, name: str):
+        if not name:
+            return
+        self._select_preset_tab(name)
+        self._mark_settings_dirty()
+
+    def _on_preset_add(self):
+        base = self.cmb_active_preset.currentText() or ""
+        text, ok = QtWidgets.QInputDialog.getText(self, "Новый пресет", "Название пресета:")
+        name = text.strip()
+        if not ok or not name:
+            return
+        if name in self._preset_cache:
+            self._post_status("Такой пресет уже существует", state="error")
+            return
+        sample = self._preset_cache.get(base) or [{"x": 0, "y": 0, "w": 0, "h": 0}]
+        self._preset_cache[name] = [dict(zone) for zone in sample]
+        self._create_preset_tab(name)
+        self.cmb_active_preset.addItem(name)
+        self.cmb_active_preset.setCurrentText(name)
+        self._mark_settings_dirty()
+
+    def _on_preset_delete(self):
+        name = self.cmb_active_preset.currentText().strip()
+        if not name:
+            return
+        if len(self._preset_cache) <= 1:
+            self._post_status("Нельзя удалить последний пресет", state="error")
+            return
+        confirm = QtWidgets.QMessageBox.question(
+            self,
+            "Удалить пресет",
+            f"Удалить пресет «{name}»?",
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+        )
+        if confirm != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        self._preset_cache.pop(name, None)
+        table = self._preset_tables.pop(name, None)
+        if table:
+            table.deleteLater()
+        for idx in range(self.tab_presets.count()):
+            if self.tab_presets.tabText(idx) == name:
+                self.tab_presets.removeTab(idx)
+                break
+        idx = self.cmb_active_preset.findText(name)
+        self.cmb_active_preset.blockSignals(True)
+        if idx >= 0:
+            self.cmb_active_preset.removeItem(idx)
+        self.cmb_active_preset.blockSignals(False)
+        if self.cmb_active_preset.count():
+            self.cmb_active_preset.setCurrentIndex(max(0, idx - 1))
+        self._mark_settings_dirty()
+
+    def _open_blur_preview(self):
+        preset = self.cmb_active_preset.currentText().strip()
+        if not preset:
+            self._post_status("Нет выбранного пресета", state="error")
+            return
+        zones = self._preset_cache.get(preset, [])
+        dirs = [
+            Path(self.cfg.get("downloads_dir", str(DL_DIR))),
+            Path(self.cfg.get("blur_src_dir", self.cfg.get("downloads_dir", str(DL_DIR)))),
+            Path(self.cfg.get("blurred_dir", str(BLUR_DIR))),
+        ]
+        dlg = BlurPreviewDialog(self, preset, zones, dirs)
+        if dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            new_zones = dlg.zones()
+            if not new_zones:
+                new_zones = [{"x": 0, "y": 0, "w": 0, "h": 0}]
+            self._preset_cache[preset] = new_zones
+            self._populate_preset_table(preset)
+            self._mark_settings_dirty()
+            self._post_status(f"Пресет {preset} обновлён", state="ok")
+
+    # ----- использованные промпты -----
+    def _parse_used_prompt_line(self, line: str, fallback_instance: str) -> Tuple[str, str, str]:
+        parts = line.split("\t", 2)
+        if len(parts) == 3:
+            ts, instance, prompt = parts
+        else:
+            ts = time.strftime("%Y-%m-%d %H:%M:%S")
+            instance = fallback_instance
+            prompt = line
+        ts = ts.strip() or "—"
+        instance = instance.strip() or fallback_instance
+        prompt = prompt.strip()
+        return ts, instance, prompt
+
+    def _gather_used_prompts(self) -> List[Tuple[str, str, str]]:
+        rows: List[Tuple[str, str, str]] = []
+        seen: set[Path] = set()
+
+        def collect(path_str: Optional[str], instance_name: str):
+            if not path_str:
+                return
+            path = Path(path_str)
+            if path in seen or not path.exists():
+                return
+            seen.add(path)
+            try:
+                for raw in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+                    line = raw.strip()
+                    if not line:
+                        continue
+                    rows.append(self._parse_used_prompt_line(line, instance_name))
+            except Exception as exc:
+                self._append_activity(f"Не удалось прочитать {path}: {exc}", kind="error", card_text=False)
+
+        auto_cfg = self.cfg.get("autogen", {}) or {}
+        collect(auto_cfg.get("submitted_log"), "Основной")
+        for inst in auto_cfg.get("instances", []) or []:
+            collect(inst.get("submitted_log"), inst.get("name") or "Instance")
+
+        def _sort_key(row: Tuple[str, str, str]):
+            ts, _, prompt = row
+            try:
+                return time.strptime(ts, "%Y-%m-%d %H:%M:%S")
+            except Exception:
+                return time.localtime(0)
+
+        rows.sort(key=_sort_key, reverse=True)
+        return rows
+
+    def _reload_used_prompts(self):
+        if not hasattr(self, "tbl_used_prompts"):
+            return
+        rows = self._gather_used_prompts()
+        self.tbl_used_prompts.blockSignals(True)
+        self.tbl_used_prompts.setRowCount(0)
+        for ts, instance, prompt in rows[:400]:
+            row = self.tbl_used_prompts.rowCount()
+            self.tbl_used_prompts.insertRow(row)
+            for col, text in enumerate([ts, instance, prompt]):
+                item = QtWidgets.QTableWidgetItem(text)
+                align = QtCore.Qt.AlignmentFlag.AlignCenter if col < 2 else QtCore.Qt.AlignmentFlag.AlignLeft
+                item.setTextAlignment(int(align))
+                self.tbl_used_prompts.setItem(row, col, item)
+        self.tbl_used_prompts.blockSignals(False)
+
+    def _clear_used_prompts(self):
+        if not hasattr(self, "tbl_used_prompts"):
+            return
+        paths = set()
+        auto_cfg = self.cfg.get("autogen", {}) or {}
+        if auto_cfg.get("submitted_log"):
+            paths.add(Path(auto_cfg.get("submitted_log")))
+        for inst in auto_cfg.get("instances", []) or []:
+            if inst.get("submitted_log"):
+                paths.add(Path(inst.get("submitted_log")))
+        if not paths:
+            self._post_status("Журналов нет", state="idle")
+            return
+        confirm = QtWidgets.QMessageBox.question(
+            self,
+            "Очистить журналы",
+            "Удалить записи об использованных промптах?",
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+        )
+        if confirm != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        for path in paths:
+            try:
+                if path.exists():
+                    path.unlink()
+            except Exception as exc:
+                self._append_activity(f"Не удалось удалить {path}: {exc}", kind="error", card_text=False)
+        self._reload_used_prompts()
+        self._post_status("Журналы промптов очищены", state="ok")
 
     def _append_activity(self, text: str, kind: str = "info", card_text: Optional[Union[str, bool]] = None):
         if not text:
@@ -1825,6 +2528,12 @@ class MainWindow(QtWidgets.QMainWindow):
             f"QLabel#currentEventBody{{color:{color};font-size:15px;font-weight:600;}}"
         )
         self.lbl_current_event_body.setText(text or "—")
+        if hasattr(self, "lbl_current_event_timer"):
+            self.lbl_current_event_timer.setText("—")
+        self._current_step_started = None
+        self._current_step_state = "idle"
+        if hasattr(self, "_current_step_timer"):
+            self._current_step_timer.stop()
         self.cfg.setdefault("ui", {})["accent_kind"] = kind
         if persist:
             save_cfg(self.cfg)
@@ -1896,12 +2605,22 @@ class MainWindow(QtWidgets.QMainWindow):
     # ----- обработчик завершения подпроцессов -----
     @QtCore.pyqtSlot(int, str)
     def _proc_done(self, rc: int, tag: str):
+        if tag.startswith("AUTOGEN:"):
+            name = tag.split(":", 1)[1] or "Instance"
+            msg = f"Автоген ({name}) завершён" + (" ✓" if rc == 0 else " ✗")
+            self._post_status(msg, state=("ok" if rc == 0 else "error"))
+            append_history(self.cfg, {"event": "autogen_instance_finish", "rc": rc, "name": name})
+            if rc == 0:
+                self._send_tg(f"✍️ {name}: автоген завершён")
+            self._reload_used_prompts()
+            return
         if tag == "AUTOGEN":
             msg = "Вставка промптов завершена" + (" ✓" if rc == 0 else " ✗")
             self._post_status(msg, state=("ok" if rc == 0 else "error"))
             append_history(self.cfg, {"event": "autogen_finish", "rc": rc})
             if rc == 0:
                 self._send_tg("AUTOGEN: ok")
+            self._reload_used_prompts()
         elif tag == "DL":
             msg = "Скачка завершена" + (" ✓" if rc == 0 else " ✗")
             self._post_status(msg, state=("ok" if rc == 0 else "error"))
@@ -1918,11 +2637,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_stats()
 
     # ----- Chrome (через тень профиля) -----
-    def _open_chrome(self):
+    def _open_chrome(self, instance: Optional[dict] = None):
         try:
             port = int(self.cfg.get("chrome", {}).get("cdp_port", 9222))
         except Exception:
             port = 9222
+        if instance:
+            try:
+                port = int(instance.get("cdp_port", port))
+            except Exception:
+                pass
 
         ch = self.cfg.get("chrome", {})
         if sys.platform == "darwin":
@@ -1933,8 +2657,9 @@ class MainWindow(QtWidgets.QMainWindow):
             default_chrome = "google-chrome"
         chrome_bin = os.path.expandvars(ch.get("binary") or default_chrome)
         profiles = ch.get("profiles", [])
-        active_name = ch.get("active_profile", "")
-        fallback_userdir = os.path.expandvars(ch.get("user_data_dir", "") or "")
+        active_name = (instance or {}).get("chrome_profile") or ch.get("active_profile", "")
+        fallback_userdir = (instance or {}).get("user_data_dir") or os.path.expandvars(ch.get("user_data_dir", "") or "")
+        profile_override = (instance or {}).get("profile_directory", "")
 
         # уже поднят CDP?
         if port_in_use(port) and cdp_ready(port):
@@ -1957,15 +2682,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
             if active:
                 shadow_root = _prepare_shadow_profile(active, shadow_base)
-                prof_dir = active.get("profile_directory", "Default")
+                prof_dir = profile_override or active.get("profile_directory", "Default")
             elif fallback_userdir:
                 fake_active = {
                     "name": "Imported",
                     "user_data_dir": fallback_userdir,
-                    "profile_directory": "Default",
+                    "profile_directory": profile_override or "Default",
                 }
                 shadow_root = _prepare_shadow_profile(fake_active, shadow_base)
-                prof_dir = "Default"
+                prof_dir = profile_override or "Default"
             else:
                 name = "Empty"
                 shadow_root = shadow_base / name
@@ -1987,7 +2712,6 @@ class MainWindow(QtWidgets.QMainWindow):
             ]
 
             subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
             # ждём подъёма CDP (до ~10 сек)
             t0 = time.time()
             while time.time() - t0 < 10:
@@ -2135,6 +2859,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _run_autogen_sync(self) -> bool:
         self._save_settings_clicked(silent=True)
+        instances = [inst for inst in (self.cfg.get("autogen", {}).get("instances") or []) if inst.get("enabled", True)]
+        if instances:
+            return self._run_autogen_instances(instances)
         workdir=self.cfg.get("autogen",{}).get("workdir", str(WORKERS_DIR / "autogen"))
         entry=self.cfg.get("autogen",{}).get("entry","main.py")
         python=sys.executable; cmd=[python, entry]; env=os.environ.copy(); env["PYTHONUNBUFFERED"]="1"
@@ -2205,11 +2932,11 @@ class MainWindow(QtWidgets.QMainWindow):
         copy_audio = self.cb_copy_audio.isChecked()
         threads = int(self.sb_blur_threads.value())
 
-        active = self.cmb_aspect.currentText().strip()
+        active = self.cmb_active_preset.currentText().strip()
         presets = (self.cfg.get("ffmpeg", {}).get("presets") or {})
         zones = (presets.get(active) or {}).get("zones") or []
-        if len(zones) != 3:
-            self._post_status("Нужно три зоны delogo в пресете", state="error")
+        if not zones:
+            self._post_status("В пресете нет зон для блюра", state="error")
             return False
 
         # источник для BLUR
@@ -2234,7 +2961,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         def blur_one(v: Path) -> bool:
             out = dst_dir / v.name
-            delogos = ",".join([f"delogo=x={z['x']}:y={z['y']}:w={z['w']}:h={z['h']}:show=0" for z in zones])
+            delogos = ",".join([
+                f"delogo=x={z['x']}:y={z['y']}:w={z['w']}:h={z['h']}:show=0" for z in zones
+            ])
             vf = delogos + (f",{post}" if post else "") + ",format=yuv420p"
 
             def _build_cmd(use_hw: bool, audio_copy: bool) -> List[str]:
@@ -2579,6 +3308,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.runner_autogen.stop()
         self.runner_dl.stop()
         self.runner_upload.stop()
+        for runner in self._autogen_instance_runners.values():
+            runner.stop()
         # стоп ffmpeg / любые активные
         with self._procs_lock:
             procs = list(self._active_procs)
@@ -2644,20 +3375,13 @@ class MainWindow(QtWidgets.QMainWindow):
         ff["preset"] = self.cmb_preset.currentText()
         ff["format"] = self.cmb_format.currentText()
         ff["copy_audio"] = bool(self.cb_copy_audio.isChecked())
-        ff["active_preset"] = self.cmb_aspect.currentText().strip()
+        ff["active_preset"] = self.cmb_active_preset.currentText().strip()
         ff["blur_threads"] = int(self.sb_blur_threads.value())
 
         presets = ff.setdefault("presets", {})
-        for key, edits in [("portrait_9x16", self.p_edits), ("landscape_16x9", self.l_edits)]:
-            zones = []
-            for i in range(3):
-                zones.append({
-                    "x": edits[i][0].value(),
-                    "y": edits[i][1].value(),
-                    "w": edits[i][2].value(),
-                    "h": edits[i][3].value(),
-                })
-            presets.setdefault(key, {})["zones"] = zones
+        presets.clear()
+        for name, zones in self._preset_cache.items():
+            presets[name] = {"zones": [dict(z) for z in zones]}
 
         self.cfg.setdefault("merge", {})["group_size"] = int(self.sb_merge_group.value())
 
@@ -2997,6 +3721,7 @@ class MainWindow(QtWidgets.QMainWindow):
             item = QtWidgets.QListWidgetItem(p.get("name", ""))
             self.lst_profiles.addItem(item)
         self.lbl_prof_active.setText(active if active else "—")
+        self._refresh_instance_profiles()
 
     def _on_profile_selected(self):
         items = self.lst_profiles.selectedItems()
