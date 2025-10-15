@@ -33,6 +33,7 @@ class BlurPreviewDialog(QtWidgets.QDialog):
         self._zones: List[Dict[str, int]] = [dict(z) for z in zones] if zones else []
         self._overlay_items: List[QtWidgets.QGraphicsRectItem] = []
         self._video_sources: List[Path] = []
+        self._source_dirs: List[Path] = [Path(d) for d in source_dirs if d]
         self._video_enabled = VIDEO_PREVIEW_AVAILABLE
 
         self._capture: Optional["cv2.VideoCapture"] = None
@@ -56,7 +57,7 @@ class BlurPreviewDialog(QtWidgets.QDialog):
             picker_layout.addWidget(QtWidgets.QLabel("Видео:"))
             self.cmb_video = QtWidgets.QComboBox()
             self.cmb_video.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
-            self._video_sources = self._collect_videos(source_dirs)
+            self._video_sources = self._collect_videos(self._source_dirs)
             for path in self._video_sources:
                 self.cmb_video.addItem(path.name, str(path))
             picker_layout.addWidget(self.cmb_video, 1)
@@ -149,7 +150,7 @@ class BlurPreviewDialog(QtWidgets.QDialog):
             self.slider.sliderMoved.connect(self._on_slider_moved)
             self.cmb_video.currentIndexChanged.connect(self._on_video_selected)
             self.btn_browse_video.clicked.connect(self._browse_video)
-            self.btn_reload_list.clicked.connect(lambda: self._reload_sources(source_dirs))
+            self.btn_reload_list.clicked.connect(self._reload_sources)
 
         self._populate_zone_table()
         if self._video_enabled and self._video_sources:
@@ -172,8 +173,8 @@ class BlurPreviewDialog(QtWidgets.QDialog):
                 continue
         return videos
 
-    def _reload_sources(self, dirs: List[Path]):
-        self._video_sources = self._collect_videos(dirs)
+    def _reload_sources(self):
+        self._video_sources = self._collect_videos(self._source_dirs)
         self.cmb_video.blockSignals(True)
         self.cmb_video.clear()
         for path in self._video_sources:
@@ -195,6 +196,33 @@ class BlurPreviewDialog(QtWidgets.QDialog):
             self._reset_video_controls()
             return
         self._load_video(path)
+
+    def _browse_video(self):
+        if not self._video_enabled:
+            return
+        start_dir = self._source_dirs[0] if self._source_dirs else Path.home()
+        file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Выбрать видео для предпросмотра",
+            str(start_dir),
+            "Видео (*.mp4 *.mov *.m4v *.webm);;Все файлы (*)",
+        )
+        if not file_path:
+            return
+        path = Path(file_path)
+        if not path.exists():
+            QtWidgets.QMessageBox.warning(self, "Файл не найден", f"Файл {path} недоступен.")
+            return
+        if path not in self._video_sources:
+            self._video_sources.append(path)
+            self.cmb_video.addItem(path.name, str(path))
+        parent_dir = path.parent
+        if parent_dir and parent_dir not in self._source_dirs:
+            self._source_dirs.insert(0, parent_dir)
+        index = self.cmb_video.findData(str(path))
+        if index >= 0:
+            self.cmb_video.setCurrentIndex(index)
+            self._on_video_selected(index)
 
     def _load_video(self, path: Path):
         assert self._video_enabled
