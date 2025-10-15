@@ -77,7 +77,16 @@ def ensure_credentials(channel_cfg: Dict[str, Any], config_dir: Path) -> Credent
             log("Обновили refresh_token")
         else:
             flow = InstalledAppFlow.from_client_secrets_file(str(client_path), SCOPES)
-            creds = flow.run_console()
+            if hasattr(flow, "run_local_server"):
+                log("Запускаем локальное окно авторизации Google")
+                try:
+                    creds = flow.run_local_server(port=0, prompt="consent")
+                except TypeError:
+                    # для старых версий без параметра prompt
+                    creds = flow.run_local_server(port=0)
+            else:
+                log("run_local_server недоступен, откроется консольный ввод кода")
+                creds = flow.run_console()
         cred_path.parent.mkdir(parents=True, exist_ok=True)
         with cred_path.open("w", encoding="utf-8") as fh:
             fh.write(creds.to_json())
