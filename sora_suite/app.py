@@ -2312,24 +2312,24 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             from blur_preview import (
                 BlurPreviewDialog,
-                HAS_MULTIMEDIA_BACKEND,
-                MULTIMEDIA_BACKEND_TIP,
+                VIDEO_PREVIEW_AVAILABLE,
+                VIDEO_PREVIEW_TIP,
             )
         except Exception as exc:  # pragma: no cover - защитное сообщение для UI
             self._post_status(f"Предпросмотр недоступен: {exc}", state="error")
             return
 
-        if not HAS_MULTIMEDIA_BACKEND:
-            QtWidgets.QMessageBox.warning(
+        preview_available = VIDEO_PREVIEW_AVAILABLE
+        if not preview_available:
+            QtWidgets.QMessageBox.information(
                 self,
-                "Предпросмотр недоступен",
+                "Предпросмотр ограничен",
                 (
-                    "Модуль QtMultimedia не нашёл видеодрайверы. "
-                    "Предпросмотр временно отключён.\n\n"
-                    f"{MULTIMEDIA_BACKEND_TIP}"
+                    "Библиотека OpenCV не найдена, поэтому видео не будет показано, "
+                    "но координаты можно отредактировать в таблице.\n\n"
+                    f"{VIDEO_PREVIEW_TIP}"
                 ),
             )
-            return
 
         zones = self._preset_cache.get(preset, [])
         dirs = [

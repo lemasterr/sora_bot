@@ -1,42 +1,24 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Диалог предпросмотра видео и настройки зон блюра."""
+"""Диалог предпросмотра видео и настройки зон блюра без зависимости от QtMultimedia."""
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List, Dict
+from typing import Dict, List, Optional
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 
-try:  # pragma: no cover - импорт зависит от окружения
-    from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
-    from PyQt6.QtMultimediaWidgets import QGraphicsVideoItem
-except Exception:  # noqa: BLE001 - важно поймать любые сбои загрузки бэкенда
-    QMediaPlayer = None  # type: ignore[assignment]
-    QAudioOutput = None  # type: ignore[assignment]
-    QGraphicsVideoItem = None  # type: ignore[assignment]
+try:  # pragma: no cover - OpenCV не всегда установлен в тестовой среде
+    import cv2
+except Exception:  # noqa: BLE001 - в бою важно отловить любую ошибку
+    cv2 = None  # type: ignore[assignment]
 
 
-def _detect_multimedia_backend() -> bool:
-    """Возвращает True, если QtMultimedia видит видеобэкенды."""
-
-    if QMediaPlayer is None:  # импорт не удался
-        return False
-
-    try:
-        supported = QMediaPlayer.supportedMimeTypes()
-    except Exception:  # pragma: no cover - защитный сценарий
-        return False
-
-    return any(mt.startswith("video/") for mt in supported)
-
-
-HAS_MULTIMEDIA_BACKEND = _detect_multimedia_backend()
-
-MULTIMEDIA_BACKEND_TIP = (
-    "Установи системные плагины QtMultimedia (например, пакеты PyQt6-Qt6 и PyQt6-Qt6-Data) "
-    "или собери приложение с комплектом медиасервисов Qt, чтобы работал предпросмотр видео."
+VIDEO_PREVIEW_AVAILABLE = cv2 is not None
+VIDEO_PREVIEW_TIP = (
+    "Установи библиотеку opencv-python (pip install opencv-python) — она включает ffmpeg-бэкенд, "
+    "который нужен для предпросмотра видео."
 )
 
 
@@ -51,23 +33,24 @@ class BlurPreviewDialog(QtWidgets.QDialog):
         self._zones: List[Dict[str, int]] = [dict(z) for z in zones] if zones else []
         self._overlay_items: List[QtWidgets.QGraphicsRectItem] = []
         self._video_sources: List[Path] = []
-        self._video_enabled = HAS_MULTIMEDIA_BACKEND and QMediaPlayer is not None and QGraphicsVideoItem is not None
+        self._video_enabled = VIDEO_PREVIEW_AVAILABLE
+
+        self._capture: Optional["cv2.VideoCapture"] = None
+        self._current_frame = 0
+        self._frame_count = 0
+        self._fps = 25.0
+        self._frame_size = QtCore.QSizeF()
+
+        self._timer = QtCore.QTimer(self)
+        self._timer.setTimerType(QtCore.Qt.TimerType.PreciseTimer)
+        self._timer.timeout.connect(self._advance_frame)
 
         layout = QtWidgets.QVBoxLayout(self)
 
         if self._video_enabled:
             self._scene = QtWidgets.QGraphicsScene(self)
-            self._video_item = QGraphicsVideoItem()
-            self._scene.addItem(self._video_item)
-
-            self._player = QMediaPlayer(self)
-            self._audio = QAudioOutput(self)
-            self._player.setAudioOutput(self._audio)
-            self._player.setVideoOutput(self._video_item)
-
-            self._video_item.nativeSizeChanged.connect(self._update_overlay_geometry)
-            self._player.positionChanged.connect(self._sync_position)
-            self._player.durationChanged.connect(self._sync_duration)
+            self._pixmap_item = QtWidgets.QGraphicsPixmapItem()
+            self._scene.addItem(self._pixmap_item)
 
             picker_layout = QtWidgets.QHBoxLayout()
             picker_layout.addWidget(QtWidgets.QLabel("Видео:"))
@@ -98,27 +81,25 @@ class BlurPreviewDialog(QtWidgets.QDialog):
             controls = QtWidgets.QHBoxLayout()
             self.btn_play = QtWidgets.QPushButton("▶")
             self.btn_pause = QtWidgets.QPushButton("⏸")
+            self.btn_pause.setEnabled(False)
             self.slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
             self.slider.setRange(0, 0)
+            self.slider.setEnabled(False)
             self.lbl_time = QtWidgets.QLabel("00:00 / 00:00")
             controls.addWidget(self.btn_play)
             controls.addWidget(self.btn_pause)
             controls.addWidget(self.slider, 1)
             controls.addWidget(self.lbl_time)
             layout.addLayout(controls)
-
         else:
             self._scene = None
-            self._video_item = None
-            self._player = None
-            self._audio = None
-
-            info_box = QtWidgets.QGroupBox("Видеопросмотр недоступен")
+            self._pixmap_item = None
+            info_box = QtWidgets.QGroupBox("Предпросмотр недоступен")
             info_layout = QtWidgets.QVBoxLayout(info_box)
             label = QtWidgets.QLabel(
-                "QtMultimedia не смог загрузить видео-бэкенд. Предпросмотр отключён, "
+                "Не удалось загрузить библиотеку OpenCV. Предпросмотр отключён, "
                 "но координаты можно отредактировать вручную.\n\n"
-                f"{MULTIMEDIA_BACKEND_TIP}"
+                f"{VIDEO_PREVIEW_TIP}"
             )
             label.setWordWrap(True)
             label.setStyleSheet("color:#cbd5f5")
@@ -142,8 +123,10 @@ class BlurPreviewDialog(QtWidgets.QDialog):
         layout.addWidget(zones_box)
 
         footer = QtWidgets.QHBoxLayout()
-        hint = "Выбери видео и настрой координаты. Кнопка ОК сохранит изменения." if self._video_enabled else (
-            "Видеопросмотр отключён, но координаты из таблицы сохранятся после нажатия ОК."
+        hint = (
+            "Выбери видео и настрой координаты. Кнопка ОК сохранит изменения."
+            if self._video_enabled
+            else "Видеопросмотр отключён, но координаты из таблицы сохранятся после нажатия ОК."
         )
         self.lbl_hint = QtWidgets.QLabel(hint)
         self.lbl_hint.setStyleSheet("color:#94a3b8")
@@ -161,9 +144,9 @@ class BlurPreviewDialog(QtWidgets.QDialog):
         self.tbl_zones.itemChanged.connect(self._on_zone_item_changed)
 
         if self._video_enabled:
-            self.btn_play.clicked.connect(self._player.play)
-            self.btn_pause.clicked.connect(self._player.pause)
-            self.slider.sliderMoved.connect(self._player.setPosition)
+            self.btn_play.clicked.connect(self._play)
+            self.btn_pause.clicked.connect(self._pause)
+            self.slider.sliderMoved.connect(self._on_slider_moved)
             self.cmb_video.currentIndexChanged.connect(self._on_video_selected)
             self.btn_browse_video.clicked.connect(self._browse_video)
             self.btn_reload_list.clicked.connect(lambda: self._reload_sources(source_dirs))
@@ -172,6 +155,7 @@ class BlurPreviewDialog(QtWidgets.QDialog):
         if self._video_enabled and self._video_sources:
             self._on_video_selected(0)
 
+    # ----- работа с видео -----
     def _collect_videos(self, dirs: List[Path]) -> List[Path]:
         videos: List[Path] = []
         seen = set()
@@ -197,48 +181,152 @@ class BlurPreviewDialog(QtWidgets.QDialog):
         self.cmb_video.blockSignals(False)
         if self._video_sources:
             self._on_video_selected(0)
+        else:
+            self._release_capture()
+            self._reset_video_controls()
 
     def _on_video_selected(self, index: int):
         if not self._video_enabled:
             return
         path = Path(self.cmb_video.itemData(index) or "")
-        if path and path.exists():
-            self._player.pause()
-            self._player.setPosition(0)
-            self._player.setSource(QtCore.QUrl.fromLocalFile(str(path)))
-            self.lbl_hint.setText(f"Открыт файл: {path}")
-        else:
+        if not path.exists():
             self.lbl_hint.setText("Выбери видео для предпросмотра")
-
-    def _browse_video(self):
-        if not self._video_enabled:
+            self._release_capture()
+            self._reset_video_controls()
             return
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Выбери видео", "", "Видео (*.mp4 *.mov *.m4v *.webm)")
-        if path:
-            if self.cmb_video.findData(path) == -1:
-                self.cmb_video.addItem(Path(path).name, path)
-            self.cmb_video.setCurrentIndex(self.cmb_video.findData(path))
+        self._load_video(path)
 
-    def _sync_position(self, pos: int):
-        if not self._video_enabled:
+    def _load_video(self, path: Path):
+        assert self._video_enabled
+        self._release_capture()
+        if cv2 is None:
+            self.lbl_hint.setText(VIDEO_PREVIEW_TIP)
+            self._reset_video_controls()
             return
+
+        cap = cv2.VideoCapture(str(path))
+        if not cap or not cap.isOpened():
+            self.lbl_hint.setText("Не удалось открыть файл для предпросмотра")
+            self._reset_video_controls()
+            return
+
+        self._capture = cap
+        self._fps = float(cap.get(cv2.CAP_PROP_FPS) or 25.0)
+        if self._fps <= 0:
+            self._fps = 25.0
+        self._frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        if self._frame_count < 0:
+            self._frame_count = 0
+        self.slider.setEnabled(self._frame_count > 0)
+        self.slider.setRange(0, max(self._frame_count - 1, 0))
+        self.btn_play.setEnabled(self._frame_count > 0)
+        self.btn_pause.setEnabled(False)
+        self._current_frame = 0
+        self._frame_size = QtCore.QSizeF()
+        self._seek_to(self._current_frame)
+        self.lbl_hint.setText(f"Открыт файл: {path}")
+
+    def _seek_to(self, frame_index: int):
+        if not self._capture:
+            return
+        frame_index = max(0, frame_index)
+        if self._frame_count:
+            frame_index = min(frame_index, self._frame_count - 1)
+        self._capture.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+        ok, frame = self._capture.read()
+        if not ok:
+            return
+        self._current_frame = frame_index
+        self._show_frame(frame)
+
+    def _advance_frame(self):
+        if not self._capture:
+            return
+        ok, frame = self._capture.read()
+        if not ok:
+            self._timer.stop()
+            self.btn_play.setEnabled(True)
+            self.btn_pause.setEnabled(False)
+            return
+        self._current_frame += 1
+        self._show_frame(frame)
+
+    def _show_frame(self, frame):
+        if self._pixmap_item is None:
+            return
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) if cv2 is not None else frame
+        height, width, _ = frame_rgb.shape
+        bytes_per_line = width * 3
+        image = QtGui.QImage(frame_rgb.data, width, height, bytes_per_line, QtGui.QImage.Format.Format_RGB888)
+        pixmap = QtGui.QPixmap.fromImage(image)
+        self._pixmap_item.setPixmap(pixmap)
+        self._frame_size = QtCore.QSizeF(width, height)
+        self.view.fitInView(self._pixmap_item, QtCore.Qt.AspectRatioMode.KeepAspectRatio)
+        self._update_overlay_geometry()
         self.slider.blockSignals(True)
-        self.slider.setValue(pos)
+        self.slider.setValue(self._current_frame)
         self.slider.blockSignals(False)
-        total = max(self._player.duration(), 1)
-        self.lbl_time.setText(f"{self._fmt_ms(pos)} / {self._fmt_ms(total)}")
+        self._update_time_label()
 
-    def _sync_duration(self, duration: int):
-        if not self._video_enabled:
+    def _play(self):
+        if not self._capture or self._frame_count <= 0:
             return
-        self.slider.setRange(0, duration)
-        self.lbl_time.setText(f"00:00 / {self._fmt_ms(duration)}")
+        interval = max(1, int(1000 / self._fps))
+        self._timer.start(interval)
+        self.btn_play.setEnabled(False)
+        self.btn_pause.setEnabled(True)
 
-    def _fmt_ms(self, ms: int) -> str:
-        seconds = int(ms / 1000)
-        m, s = divmod(seconds, 60)
+    def _pause(self):
+        if self._timer.isActive():
+            self._timer.stop()
+        self.btn_play.setEnabled(True)
+        self.btn_pause.setEnabled(False)
+
+    def _on_slider_moved(self, value: int):
+        self._pause()
+        self._seek_to(value)
+
+    def _update_time_label(self):
+        current_seconds = self._current_frame / self._fps if self._fps else 0
+        total_seconds = self._frame_count / self._fps if self._fps and self._frame_count else 0
+        self.lbl_time.setText(f"{self._fmt_seconds(current_seconds)} / {self._fmt_seconds(total_seconds)}")
+
+    def _fmt_seconds(self, seconds: float) -> str:
+        total = int(max(0, seconds))
+        m, s = divmod(total, 60)
         return f"{m:02d}:{s:02d}"
 
+    def _reset_video_controls(self):
+        if not self._video_enabled:
+            return
+        self._timer.stop()
+        self.btn_play.setEnabled(False)
+        self.btn_pause.setEnabled(False)
+        self.slider.setEnabled(False)
+        self.slider.setRange(0, 0)
+        self.slider.setValue(0)
+        self.lbl_time.setText("00:00 / 00:00")
+        self._frame_count = 0
+        self._current_frame = 0
+        self._frame_size = QtCore.QSizeF()
+        if self._pixmap_item:
+            self._pixmap_item.setPixmap(QtGui.QPixmap())
+        self._update_overlay_geometry()
+
+    def _release_capture(self):
+        if self._capture is not None:
+            try:
+                self._capture.release()
+            except Exception:  # pragma: no cover - защитный случай
+                pass
+        self._capture = None
+
+    def closeEvent(self, event):  # noqa: N802 - Qt-стиль
+        self._timer.stop()
+        self._release_capture()
+        super().closeEvent(event)
+
+    # ----- таблица зон -----
     def _populate_zone_table(self):
         self.tbl_zones.blockSignals(True)
         self.tbl_zones.setRowCount(0)
@@ -305,18 +393,16 @@ class BlurPreviewDialog(QtWidgets.QDialog):
             self._overlay_items.append(rect)
         for rect in self._overlay_items[len(self._zones):]:
             self._scene.removeItem(rect)
-        self._overlay_items = self._overlay_items[:len(self._zones)]
+        self._overlay_items = self._overlay_items[: len(self._zones)]
         self._update_overlay_geometry()
 
     def _update_overlay_geometry(self):
-        if not self._video_enabled or not self._video_item:
-            return
-        size = self._video_item.nativeSize()
-        if not size or size.width() == 0 or size.height() == 0:
+        if not self._video_enabled or not self._frame_size or self._frame_size.isEmpty():
             return
         for rect_item, zone in zip(self._overlay_items, self._zones):
             rect_item.setRect(zone.get("x", 0), zone.get("y", 0), zone.get("w", 0), zone.get("h", 0))
 
     def zones(self) -> List[Dict[str, int]]:
         return [dict(z) for z in self._zones]
+
 
