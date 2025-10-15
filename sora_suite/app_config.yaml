@@ -11,6 +11,7 @@ autogen:
   submitted_log: ./workers/autogen/submitted.log
   failed_log: ./workers/autogen/failed.log
   instances: []
+  active_prompts_profile: __general__
 downloader:
   workdir: ./workers/downloader
   entry: download_all.py

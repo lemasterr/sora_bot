@@ -29,6 +29,8 @@ from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
 
 # ---------- базовые пути ----------
+PROMPTS_DEFAULT_KEY = "__general__"
+
 APP_DIR = Path(__file__).parent.resolve()
 PROJECT_ROOT = APP_DIR.parent.resolve()
 WORKERS_DIR = PROJECT_ROOT / "workers"
@@ -68,6 +70,7 @@ def load_cfg() -> dict:
     autogen.setdefault("submitted_log", str(WORKERS_DIR / "autogen" / "submitted.log"))
     autogen.setdefault("failed_log", str(WORKERS_DIR / "autogen" / "failed.log"))
     autogen.setdefault("instances", [])
+    autogen.setdefault("active_prompts_profile", PROMPTS_DEFAULT_KEY)
 
     downloader = data.setdefault("downloader", {})
     downloader.setdefault("workdir", str(WORKERS_DIR / "downloader"))
@@ -518,6 +521,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cfg = load_cfg()
         ensure_dirs(self.cfg)
 
+        auto_cfg = self.cfg.setdefault("autogen", {})
+        key = auto_cfg.get("active_prompts_profile", PROMPTS_DEFAULT_KEY) or PROMPTS_DEFAULT_KEY
+        self._current_prompt_profile_key = key
+        self._instance_prompt_last_auto = ""
+        self._last_instance_profile = ""
+
+        self._ensure_all_profile_prompts()
+
         self._apply_theme()
 
         self.setWindowTitle("Sora Suite — Control Panel")
@@ -564,7 +575,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _perform_delayed_startup(self):
         self._refresh_stats()
         self._reload_history()
-        self._refresh_profiles_ui()
+        self._auto_scan_profiles_at_start()
+        self._refresh_prompt_profiles_ui()
         self._refresh_youtube_ui()
         self._load_autogen_cfg_ui()
         self._load_readme_preview()
@@ -573,6 +585,27 @@ class MainWindow(QtWidgets.QMainWindow):
         maint_cfg = self.cfg.get("maintenance", {}) or {}
         if maint_cfg.get("auto_cleanup_on_start"):
             QtCore.QTimer.singleShot(200, lambda: self._run_maintenance_cleanup(manual=False))
+
+    def _ensure_all_profile_prompts(self):
+        try:
+            self._ensure_path_exists(str(self._default_profile_prompts(None)))
+        except Exception:
+            pass
+
+        for profile in self.cfg.get("chrome", {}).get("profiles", []) or []:
+            name = profile.get("name") or profile.get("profile_directory")
+            if not name:
+                continue
+            try:
+                self._ensure_path_exists(str(self._default_profile_prompts(name)))
+            except Exception:
+                continue
+
+    def _ensure_profile_prompt_files(self, profile_name: Optional[str]):
+        try:
+            self._ensure_path_exists(str(self._default_profile_prompts(profile_name)))
+        except Exception:
+            pass
 
     def _apply_theme(self):
         app = QtWidgets.QApplication.instance()
@@ -620,6 +653,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 background-color: #141c2b; border: 1px solid #2b364d; border-radius: 6px; padding: 4px 6px;
                 selection-background-color: #4c6ef5; selection-color: #f8fafc;
             }
+            QCheckBox { color: #f8fafc; spacing: 6px; }
+            QCheckBox::indicator {
+                width: 18px; height: 18px; border-radius: 4px;
+                border: 1px solid #4b5563; background: #111827;
+            }
+            QCheckBox::indicator:checked { background: #4c6ef5; border-color: #93c5fd; }
+            QCheckBox::indicator:hover { border-color: #93c5fd; }
             QListWidget { border: 1px solid #2b364d; border-radius: 10px; background-color: #131b2b; color: #f1f5f9; }
             QTabWidget::pane { border: 1px solid #2b364d; border-radius: 10px; margin-top: -4px; }
             QTabBar::tab { background: #141c2b; border: 1px solid #2b364d; padding: 6px 12px; margin-right: 4px;
@@ -754,6 +794,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_open_raw = QtWidgets.QPushButton("RAW (downloads)")
         self.btn_open_blur = QtWidgets.QPushButton("BLURRED")
         self.btn_open_merge = QtWidgets.QPushButton("MERGED")
+        self.btn_start_selected = QtWidgets.QPushButton("Старт выбранного")
         self.btn_stop_all = QtWidgets.QPushButton("Стоп все")
         tb.addWidget(self.btn_open_chrome)
         tb.addWidget(self.btn_open_root)
@@ -761,6 +802,7 @@ class MainWindow(QtWidgets.QMainWindow):
         tb.addWidget(self.btn_open_blur)
         tb.addWidget(self.btn_open_merge)
         tb.addStretch(1)
+        tb.addWidget(self.btn_start_selected)
         tb.addWidget(self.btn_stop_all)
         v.addLayout(tb)
 
@@ -836,12 +878,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tab_tasks = QtWidgets.QWidget()
         lt = QtWidgets.QVBoxLayout(self.tab_tasks)
         lt.setContentsMargins(0, 0, 0, 0)
+        tasks_intro = QtWidgets.QLabel(
+            "Основная панель запуска: отметь нужные этапы, нажми старт и следи за прогрессом и статистикой."
+        )
+        tasks_intro.setWordWrap(True)
+        tasks_intro.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;padding:0 12px 8px 12px;}")
+        lt.addWidget(tasks_intro)
 
         self.task_tabs = QtWidgets.QTabWidget()
         lt.addWidget(self.task_tabs)
 
         grp_choose = QtWidgets.QGroupBox("Что выполнить")
         f = QtWidgets.QFormLayout(grp_choose)
+        f.setVerticalSpacing(6)
         self.cb_do_autogen = QtWidgets.QCheckBox("Вставка промптов в Sora")
         self.cb_do_download = QtWidgets.QCheckBox("Авто-скачка видео")
         self.cb_do_blur = QtWidgets.QCheckBox("Блюр водяного знака (ffmpeg, пресеты 9:16 / 16:9)")
@@ -867,10 +916,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pb_global = QtWidgets.QProgressBar(); self.pb_global.setMinimum(0); self.pb_global.setMaximum(1); self.pb_global.setValue(1); self.pb_global.setFormat("—")
         vb.addWidget(self.lbl_status); vb.addWidget(self.pb_global)
         grid_stat = QtWidgets.QGridLayout()
+        grid_stat.setVerticalSpacing(6)
         grid_stat.addWidget(QtWidgets.QLabel("<b>RAW</b>"), 0, 0)
         grid_stat.addWidget(QtWidgets.QLabel("<b>BLURRED</b>"), 0, 1)
         grid_stat.addWidget(QtWidgets.QLabel("<b>MERGED</b>"), 0, 2)
         grid_stat.addWidget(QtWidgets.QLabel("<b>UPLOAD</b>"), 0, 3)
+        captions = [
+            QtWidgets.QLabel("скачанные черновики"),
+            QtWidgets.QLabel("готовые к блюру"),
+            QtWidgets.QLabel("склеенные ролики"),
+            QtWidgets.QLabel("кандидаты на YouTube"),
+        ]
+        for idx, lbl in enumerate(captions):
+            lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            lbl.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
+            grid_stat.addWidget(lbl, 1, idx)
         self.lbl_stat_raw = QtWidgets.QLabel("0")
         self.lbl_stat_blur = QtWidgets.QLabel("0")
         self.lbl_stat_merge = QtWidgets.QLabel("0")
@@ -880,10 +940,14 @@ class MainWindow(QtWidgets.QMainWindow):
             w.setStyleSheet(
                 "QLabel{font: 700 16px 'Menlo'; padding:6px; border:1px solid #2b364d; background:#131b2b; border-radius:8px;}"
             )
-        grid_stat.addWidget(self.lbl_stat_raw, 1, 0)
-        grid_stat.addWidget(self.lbl_stat_blur, 1, 1)
-        grid_stat.addWidget(self.lbl_stat_merge, 1, 2)
-        grid_stat.addWidget(self.lbl_stat_upload, 1, 3)
+        self.lbl_stat_raw.setToolTip("Количество видеофайлов в папке RAW")
+        self.lbl_stat_blur.setToolTip("Сколько клипов ждут обработки блюром")
+        self.lbl_stat_merge.setToolTip("Готовые склейки в итоговой папке")
+        self.lbl_stat_upload.setToolTip("Сколько файлов попадёт в очередь YouTube")
+        grid_stat.addWidget(self.lbl_stat_raw, 2, 0)
+        grid_stat.addWidget(self.lbl_stat_blur, 2, 1)
+        grid_stat.addWidget(self.lbl_stat_merge, 2, 2)
+        grid_stat.addWidget(self.lbl_stat_upload, 2, 3)
         vb.addLayout(grid_stat)
 
         pipeline_tab = QtWidgets.QWidget()
@@ -1088,23 +1152,84 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tabs.addTab(self.tab_youtube, "YouTube")
 
         # TAB: Промпты
-        self.tab_prompts = QtWidgets.QWidget(); pp = QtWidgets.QVBoxLayout(self.tab_prompts)
-        bar = QtWidgets.QHBoxLayout()
-        self.btn_load_prompts = QtWidgets.QPushButton("Загрузить")
-        self.btn_save_prompts = QtWidgets.QPushButton("Сохранить")
+        self.tab_prompts = QtWidgets.QWidget()
+        pp = QtWidgets.QVBoxLayout(self.tab_prompts)
+        pp.setContentsMargins(12, 12, 12, 12)
+        pp.setSpacing(12)
+
+        prompts_intro = QtWidgets.QLabel(
+            "Менеджер промптов: выбери профиль Chrome слева, редактируй текст справа, а ниже смотри историю и управляй параллельными окнами."
+        )
+        prompts_intro.setWordWrap(True)
+        prompts_intro.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
+        pp.addWidget(prompts_intro)
+
+        prompts_split = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+        pp.addWidget(prompts_split, 2)
+
+        profile_panel = QtWidgets.QFrame()
+        profile_layout = QtWidgets.QVBoxLayout(profile_panel)
+        profile_layout.setContentsMargins(0, 0, 0, 0)
+        profile_layout.setSpacing(8)
+
+        lbl_profiles = QtWidgets.QLabel("<b>Профили промптов</b>")
+        profile_layout.addWidget(lbl_profiles)
+        self.lbl_prompts_active = QtWidgets.QLabel("—")
+        self.lbl_prompts_active.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
+        profile_layout.addWidget(self.lbl_prompts_active)
+
+        self.lst_prompt_profiles = QtWidgets.QListWidget()
+        self.lst_prompt_profiles.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        self.lst_prompt_profiles.setUniformItemSizes(True)
+        self.lst_prompt_profiles.setStyleSheet(
+            "QListWidget{background:#101827;border:1px solid #23324b;border-radius:10px;padding:6px;}"
+        )
+        profile_layout.addWidget(self.lst_prompt_profiles, 1)
+
+        profile_hint = QtWidgets.QLabel(
+            "Каждый профиль получает свой файл `prompts_*.txt`. При выборе профиль сразу становится активным для сценария."
+        )
+        profile_hint.setWordWrap(True)
+        profile_hint.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
+        profile_layout.addWidget(profile_hint)
+        profile_layout.addStretch(1)
+
+        editor_panel = QtWidgets.QFrame()
+        editor_layout = QtWidgets.QVBoxLayout(editor_panel)
+        editor_layout.setContentsMargins(0, 0, 0, 0)
+        editor_layout.setSpacing(8)
+
+        editor_bar = QtWidgets.QHBoxLayout()
+        self.btn_load_prompts = QtWidgets.QPushButton("Обновить файл")
+        self.btn_save_prompts = QtWidgets.QPushButton("Сохранить изменения")
         self.btn_save_and_run_autogen = QtWidgets.QPushButton("Сохранить и запустить автоген")
-        bar.addWidget(self.btn_load_prompts)
-        bar.addWidget(self.btn_save_prompts)
-        bar.addStretch(1)
-        bar.addWidget(self.btn_save_and_run_autogen)
-        pp.addLayout(bar)
+        editor_bar.addWidget(self.btn_load_prompts)
+        editor_bar.addWidget(self.btn_save_prompts)
+        editor_bar.addStretch(1)
+        editor_bar.addWidget(self.btn_save_and_run_autogen)
+        editor_layout.addLayout(editor_bar)
+
+        self.lbl_prompts_path = QtWidgets.QLabel("—")
+        self.lbl_prompts_path.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
+        self.lbl_prompts_path.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        editor_layout.addWidget(self.lbl_prompts_path)
 
         self.ed_prompts = QtWidgets.QPlainTextEdit()
-        self.ed_prompts.setPlaceholderText("По одному промпту на строке…")
-        pp.addWidget(self.ed_prompts, 2)
+        self.ed_prompts.setPlaceholderText("Один промпт — одна строка. Эти строки сохраняются для выбранного профиля.")
+        self.ed_prompts.setLineWrapMode(QtWidgets.QPlainTextEdit.LineWrapMode.NoWrap)
+        mono = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.SystemFont.FixedFont)
+        mono.setPointSize(11)
+        self.ed_prompts.setFont(mono)
+        editor_layout.addWidget(self.ed_prompts, 1)
+
+        prompts_split.addWidget(profile_panel)
+        prompts_split.addWidget(editor_panel)
+        prompts_split.setStretchFactor(0, 1)
+        prompts_split.setStretchFactor(1, 2)
 
         grp_used = QtWidgets.QGroupBox("Использованные промпты")
         used_layout = QtWidgets.QVBoxLayout(grp_used)
+        used_layout.setSpacing(8)
         self.tbl_used_prompts = QtWidgets.QTableWidget(0, 3)
         self.tbl_used_prompts.setHorizontalHeaderLabels(["Когда", "Окно", "Текст"])
         self.tbl_used_prompts.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
@@ -1125,20 +1250,28 @@ class MainWindow(QtWidgets.QMainWindow):
 
         grp_instances = QtWidgets.QGroupBox("Окна Sora и параллельная подача")
         inst_layout = QtWidgets.QVBoxLayout(grp_instances)
+        inst_layout.setSpacing(10)
         top_row = QtWidgets.QHBoxLayout()
         self.lst_instances = QtWidgets.QListWidget()
         self.lst_instances.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
         top_row.addWidget(self.lst_instances, 2)
 
         form = QtWidgets.QFormLayout()
+        form.setVerticalSpacing(8)
         self.ed_instance_name = QtWidgets.QLineEdit()
         form.addRow("Название окна:", self.ed_instance_name)
         self.sb_instance_port = QtWidgets.QSpinBox()
         self.sb_instance_port.setRange(9000, 9999)
         self.sb_instance_port.setValue(9222)
         form.addRow("CDP порт:", self.sb_instance_port)
+        profile_wrap = QtWidgets.QWidget()
+        profile_layout = QtWidgets.QHBoxLayout(profile_wrap)
+        profile_layout.setContentsMargins(0, 0, 0, 0)
         self.cmb_instance_profile = QtWidgets.QComboBox()
-        form.addRow("Chrome профиль:", self.cmb_instance_profile)
+        self.btn_instance_scan = QtWidgets.QPushButton("Автонайти")
+        profile_layout.addWidget(self.cmb_instance_profile, 1)
+        profile_layout.addWidget(self.btn_instance_scan)
+        form.addRow("Chrome профиль:", profile_wrap)
         self.ed_instance_userdir = QtWidgets.QLineEdit()
         form.addRow("user_data_dir (кастом):", self.ed_instance_userdir)
         self.ed_instance_profile_dir = QtWidgets.QLineEdit()
@@ -1183,6 +1316,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # TAB: Названия
         self.tab_titles = QtWidgets.QWidget(); pt = QtWidgets.QVBoxLayout(self.tab_titles)
+        titles_intro = QtWidgets.QLabel("Редактор имён для переименования скачанных роликов — каждое имя на новой строке.")
+        titles_intro.setWordWrap(True)
+        titles_intro.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
+        pt.addWidget(titles_intro)
         bar2 = QtWidgets.QHBoxLayout()
         self.btn_load_titles = QtWidgets.QPushButton("Загрузить")
         self.btn_save_titles = QtWidgets.QPushButton("Сохранить")
@@ -1200,6 +1337,10 @@ class MainWindow(QtWidgets.QMainWindow):
         settings_body = QtWidgets.QWidget()
         settings_layout = QtWidgets.QVBoxLayout(settings_body)
         settings_layout.setContentsMargins(16, 16, 16, 16)
+        settings_intro = QtWidgets.QLabel("Настройки сгруппированы по вкладкам: каталоги, Chrome, FFmpeg, YouTube, Telegram и обслуживание.")
+        settings_intro.setWordWrap(True)
+        settings_intro.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
+        settings_layout.addWidget(settings_intro)
 
         self.settings_tabs = QtWidgets.QTabWidget()
         settings_layout.addWidget(self.settings_tabs, 1)
@@ -1252,6 +1393,8 @@ class MainWindow(QtWidgets.QMainWindow):
         page_paths = QtWidgets.QWidget()
         grid_paths = QtWidgets.QGridLayout(page_paths)
         grid_paths.setColumnStretch(1, 1)
+        grid_paths.setVerticalSpacing(8)
+        grid_paths.setHorizontalSpacing(10)
         row = 0
 
         self.ed_root = QtWidgets.QLineEdit(self.cfg.get("project_root", str(PROJECT_ROOT)))
@@ -1864,6 +2007,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_open_blur.clicked.connect(lambda: open_in_finder(self.cfg.get("blurred_dir", BLUR_DIR)))
         self.btn_open_merge.clicked.connect(lambda: open_in_finder(self.cfg.get("merged_dir", MERG_DIR)))
         self.btn_stop_all.clicked.connect(self._stop_all)
+        self.btn_start_selected.clicked.connect(self._run_scenario)
         self.btn_activity_clear.clicked.connect(self._clear_activity)
         self.chk_activity_visible.toggled.connect(self._on_activity_toggle)
 
@@ -1872,13 +2016,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_save_and_run_autogen.clicked.connect(self._save_and_run_autogen)
         self.btn_used_refresh.clicked.connect(self._reload_used_prompts)
         self.btn_used_clear.clicked.connect(self._clear_used_prompts)
+        self.lst_prompt_profiles.itemSelectionChanged.connect(self._on_prompt_profile_selection)
         self.lst_instances.itemSelectionChanged.connect(self._on_instance_selected)
+        self.cmb_instance_profile.currentIndexChanged.connect(self._on_instance_profile_changed)
         self.btn_instance_save.clicked.connect(self._on_instance_save)
         self.btn_instance_delete.clicked.connect(self._on_instance_delete)
         self.btn_instance_duplicate.clicked.connect(self._on_instance_duplicate)
         self.btn_instance_prompts.clicked.connect(self._browse_instance_prompts)
         self.btn_instance_launch.clicked.connect(self._launch_selected_instances)
         self.btn_instance_run.clicked.connect(lambda: self._run_autogen_instances())
+        self.btn_instance_scan.clicked.connect(self._on_profile_scan)
 
         self.btn_load_titles.clicked.connect(self._load_titles)
         self.btn_save_titles.clicked.connect(self._save_titles)
@@ -2057,9 +2204,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cmb_instance_profile.setCurrentIndex(0)
         self.ed_instance_userdir.clear()
         self.ed_instance_profile_dir.clear()
-        self.ed_instance_prompts.clear()
+        general = str(self._default_profile_prompts(None))
+        self.ed_instance_prompts.setText(general)
         self.ed_instance_submitted.clear()
         self.cb_instance_enabled.setChecked(True)
+        self._instance_prompt_last_auto = general
+        self._last_instance_profile = ""
 
     def _on_instance_selected(self):
         items = self.lst_instances.selectedItems()
@@ -2073,6 +2223,7 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             self.sb_instance_port.setValue(9222)
         profile_name = inst.get("chrome_profile", "") or ""
+        self._last_instance_profile = profile_name
         idx = self.cmb_instance_profile.findData(profile_name)
         if idx < 0:
             idx = 0
@@ -2080,14 +2231,51 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ed_instance_userdir.setText(inst.get("user_data_dir", ""))
         self.ed_instance_profile_dir.setText(inst.get("profile_directory", ""))
         self.ed_instance_prompts.setText(inst.get("prompts_file", ""))
+        self._instance_prompt_last_auto = inst.get("prompts_file", "") or ""
         self.ed_instance_submitted.setText(inst.get("submitted_log", ""))
         self.cb_instance_enabled.setChecked(bool(inst.get("enabled", True)))
 
-    def _default_instance_paths(self, name: str) -> Tuple[str, str]:
-        slug = slugify(name)
-        prompts = WORKERS_DIR / "autogen" / f"prompts_{slug}.txt"
+    def _on_instance_profile_changed(self, idx: int):
+        if not hasattr(self, "cmb_instance_profile"):
+            return
+        profile_name = self.cmb_instance_profile.itemData(idx) or ""
+        fallback_name = profile_name or self.cfg.get("chrome", {}).get("active_profile", "") or ""
+        profile = self._find_profile(profile_name) or self._find_profile(fallback_name)
+
+        if profile:
+            if not self.ed_instance_userdir.text().strip():
+                self.ed_instance_userdir.setText(profile.get("user_data_dir", ""))
+            if not self.ed_instance_profile_dir.text().strip():
+                self.ed_instance_profile_dir.setText(profile.get("profile_directory", ""))
+
+        prompts_default = str(self._default_profile_prompts(fallback_name or None))
+        current_path = self.ed_instance_prompts.text().strip()
+        prev_default = str(self._default_profile_prompts(self._last_instance_profile or None))
+        if (not current_path) or current_path == self._instance_prompt_last_auto or current_path == prev_default:
+            self.ed_instance_prompts.setText(prompts_default)
+            self._instance_prompt_last_auto = prompts_default
+
+        self._last_instance_profile = profile_name
+
+    def _default_profile_prompts(self, profile_name: Optional[str]) -> Path:
+        if not profile_name:
+            return WORKERS_DIR / "autogen" / "prompts.txt"
+        slug = slugify(profile_name) or "profile"
+        return WORKERS_DIR / "autogen" / f"prompts_{slug}.txt"
+
+    def _default_instance_paths(self, name: str, profile: Optional[str] = None) -> Tuple[str, str]:
+        prompts = self._default_profile_prompts(profile)
+        slug = slugify(name) or "instance"
         submitted = WORKERS_DIR / "autogen" / f"submitted_{slug}.log"
         return str(prompts), str(submitted)
+
+    def _find_profile(self, name: str) -> Optional[dict]:
+        if not name:
+            return None
+        for profile in self.cfg.get("chrome", {}).get("profiles", []) or []:
+            if profile.get("name") == name:
+                return profile
+        return None
 
     def _ensure_path_exists(self, path: str):
         p = Path(path)
@@ -2104,13 +2292,16 @@ class MainWindow(QtWidgets.QMainWindow):
             self._post_status("Укажи название окна", state="error")
             return
         port = int(self.sb_instance_port.value())
+        chrome_profile = self.cmb_instance_profile.currentData() or ""
         prompts = self.ed_instance_prompts.text().strip()
         submitted = self.ed_instance_submitted.text().strip()
         if not prompts or not submitted:
-            default_prompts, default_sub = self._default_instance_paths(name)
+            default_prompts, default_sub = self._default_instance_paths(name, chrome_profile)
             prompts = prompts or default_prompts
             submitted = submitted or default_sub
-        chrome_profile = self.cmb_instance_profile.currentData() or ""
+        self._ensure_path_exists(prompts)
+        self._ensure_path_exists(submitted)
+        self._ensure_profile_prompt_files(chrome_profile or None)
         inst_cfg = {
             "name": name,
             "cdp_port": port,
@@ -2166,9 +2357,10 @@ class MainWindow(QtWidgets.QMainWindow):
         clone["name"] = new_name
         clone["cdp_port"] = new_port
         clone["enabled"] = False
-        prompts, submitted = self._default_instance_paths(new_name)
+        prompts, submitted = self._default_instance_paths(new_name, clone.get("chrome_profile"))
         clone["prompts_file"] = prompts
         clone["submitted_log"] = submitted
+        self._ensure_profile_prompt_files(clone.get("chrome_profile") or None)
         instances.append(clone)
         save_cfg(self.cfg)
         self._refresh_autogen_instances_ui()
@@ -2207,14 +2399,16 @@ class MainWindow(QtWidgets.QMainWindow):
             name = inst.get("name") or f"порт {inst.get('cdp_port', '—')}"
             prompts = inst.get("prompts_file", "")
             submitted = inst.get("submitted_log", "")
+            profile_name = inst.get("chrome_profile", "") or ""
             if not prompts or not submitted:
-                default_prompts, default_sub = self._default_instance_paths(name)
+                default_prompts, default_sub = self._default_instance_paths(name, profile_name)
                 prompts = prompts or default_prompts
                 submitted = submitted or default_sub
             inst["prompts_file"] = prompts
             inst["submitted_log"] = submitted
             self._ensure_path_exists(prompts)
             self._ensure_path_exists(submitted)
+            self._ensure_profile_prompt_files(profile_name or None)
             env = os.environ.copy()
             env["PYTHONUNBUFFERED"] = "1"
             env["SORA_PROMPTS_FILE"] = prompts
@@ -2749,18 +2943,27 @@ class MainWindow(QtWidgets.QMainWindow):
             self._post_status(f"Ошибка запуска Chrome/shadow: {e}", state="error")
 
     # ----- Prompts/Titles -----
-    def _prompts_path(self)->Path:
-        return WORKERS_DIR / "autogen" / "prompts.txt"
+    def _prompts_path(self, key: Optional[str] = None) -> Path:
+        active = key or self._current_prompt_profile_key or PROMPTS_DEFAULT_KEY
+        if active in ("", PROMPTS_DEFAULT_KEY):
+            return self._default_profile_prompts(None)
+        return self._default_profile_prompts(active)
 
     def _load_prompts(self):
-        p=self._prompts_path()
-        txt = p.read_text(encoding="utf-8") if p.exists() else ""
+        path = self._prompts_path()
+        self._ensure_path_exists(str(path))
+        txt = path.read_text(encoding="utf-8") if path.exists() else ""
         self.ed_prompts.setPlainText(txt)
-        self._post_status(f"Промпты загружены ({p})", state="idle")
+        if hasattr(self, "lbl_prompts_path"):
+            self.lbl_prompts_path.setText(str(path))
+        self._post_status(f"Промпты загружены ({path})", state="idle")
 
     def _save_prompts(self):
-        p=self._prompts_path(); p.parent.mkdir(parents=True,exist_ok=True)
-        p.write_text(self.ed_prompts.toPlainText(), encoding="utf-8")
+        path = self._prompts_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(self.ed_prompts.toPlainText(), encoding="utf-8")
+        if hasattr(self, "lbl_prompts_path"):
+            self.lbl_prompts_path.setText(str(path))
         self._post_status("Промпты сохранены", state="ok")
 
     def _save_and_run_autogen(self):
@@ -3732,6 +3935,80 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as e:
             self.sig_log.emit(f"[STAT] ошибка: {e}")
 
+    def _prompt_profile_label(self, key: Optional[str]) -> str:
+        if not key or key == PROMPTS_DEFAULT_KEY:
+            return "Общий список"
+        return str(key)
+
+    def _update_prompts_active_label(self):
+        if hasattr(self, "lbl_prompts_active"):
+            label = self._prompt_profile_label(self._current_prompt_profile_key)
+            self.lbl_prompts_active.setText(f"Сценарий использует: {label}")
+        if hasattr(self, "lbl_prompts_path"):
+            path = self._prompts_path()
+            self.lbl_prompts_path.setText(str(path))
+
+    def _set_active_prompt_profile(self, key: str, persist: bool = True, reload: bool = True):
+        normalized = key or PROMPTS_DEFAULT_KEY
+        if self._current_prompt_profile_key == normalized:
+            self._update_prompts_active_label()
+            if reload:
+                self._load_prompts()
+            return
+        self._current_prompt_profile_key = normalized
+        self.cfg.setdefault("autogen", {})["active_prompts_profile"] = normalized
+        if persist:
+            save_cfg(self.cfg)
+        target = None if normalized == PROMPTS_DEFAULT_KEY else normalized
+        self._ensure_profile_prompt_files(target)
+        self._update_prompts_active_label()
+        if reload:
+            self._load_prompts()
+
+    def _refresh_prompt_profiles_ui(self):
+        if not hasattr(self, "lst_prompt_profiles"):
+            return
+        profiles = [(PROMPTS_DEFAULT_KEY, self._prompt_profile_label(PROMPTS_DEFAULT_KEY), self._default_profile_prompts(None))]
+        for profile in self.cfg.get("chrome", {}).get("profiles", []) or []:
+            name = profile.get("name") or profile.get("profile_directory") or ""
+            if not name:
+                continue
+            profiles.append((name, name, self._default_profile_prompts(name)))
+
+        target_key = self._current_prompt_profile_key or PROMPTS_DEFAULT_KEY
+        keys = [key for key, _, _ in profiles]
+        if target_key not in keys and profiles:
+            target_key = profiles[0][0]
+            self._current_prompt_profile_key = target_key
+
+        self.lst_prompt_profiles.blockSignals(True)
+        self.lst_prompt_profiles.clear()
+        target_row = 0
+        for idx, (key, label, path) in enumerate(profiles):
+            item = QtWidgets.QListWidgetItem(label)
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, key)
+            item.setToolTip(str(path))
+            self.lst_prompt_profiles.addItem(item)
+            if key == target_key:
+                target_row = idx
+        self.lst_prompt_profiles.blockSignals(False)
+
+        if self.lst_prompt_profiles.count():
+            self.lst_prompt_profiles.blockSignals(True)
+            self.lst_prompt_profiles.setCurrentRow(target_row)
+            self.lst_prompt_profiles.blockSignals(False)
+
+        self._set_active_prompt_profile(target_key, persist=False, reload=True)
+
+    def _on_prompt_profile_selection(self):
+        if not hasattr(self, "lst_prompt_profiles"):
+            return
+        items = self.lst_prompt_profiles.selectedItems()
+        if not items:
+            return
+        key = items[0].data(QtCore.Qt.ItemDataRole.UserRole) or PROMPTS_DEFAULT_KEY
+        self._set_active_prompt_profile(key, persist=True, reload=True)
+
     # ----- Профили: UI/логика -----
     def _refresh_profiles_ui(self):
         ch = self.cfg.get("chrome", {})
@@ -3744,6 +4021,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.lst_profiles.addItem(item)
         self.lbl_prof_active.setText(active if active else "—")
         self._refresh_instance_profiles()
+        self._refresh_prompt_profiles_ui()
 
     def _on_profile_selected(self):
         items = self.lst_profiles.selectedItems()
@@ -3778,6 +4056,7 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             profiles.append({"name": name, "user_data_dir": root, "profile_directory": prof})
 
+        self._ensure_profile_prompt_files(name)
         save_cfg(self.cfg)
         self._refresh_profiles_ui()
         self._post_status(f"Профиль «{name}» сохранён", state="ok")
@@ -3792,6 +4071,8 @@ class MainWindow(QtWidgets.QMainWindow):
         ch["profiles"] = [p for p in profiles if p.get("name") != name]
         if ch.get("active_profile") == name:
             ch["active_profile"] = ""
+        if self._current_prompt_profile_key == name:
+            self._set_active_prompt_profile(PROMPTS_DEFAULT_KEY, persist=True, reload=True)
         save_cfg(self.cfg)
         self._refresh_profiles_ui()
         self._post_status(f"Профиль «{name}» удалён", state="ok")
@@ -3806,9 +4087,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_profiles_ui()
         self._post_status(f"Активный профиль: {name}", state="ok")
 
-    def _on_profile_scan(self):
-        found: List[Dict[str, str]] = []
+    def _auto_scan_profiles_at_start(self):
+        chrome_cfg = self.cfg.get("chrome", {})
+        if chrome_cfg.get("profiles"):
+            self._refresh_profiles_ui()
+            return
+        added, total = self._apply_profile_scan(auto=True)
+        if total and added:
+            self._post_status(f"Автоматически добавлены профили Chrome: {added}", state="info")
+        elif total:
+            self._post_status("Профили Chrome обнаружены", state="info")
+        self._refresh_profiles_ui()
 
+    def _discover_chrome_profile_roots(self) -> List[Path]:
         bases: List[Path] = []
         if sys.platform == "darwin":
             bases.append(Path.home() / "Library/Application Support/Google/Chrome")
@@ -3823,8 +4114,11 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             bases.append(Path.home() / ".config/google-chrome")
             bases.append(Path.home() / ".config/chromium")
+        return bases
 
-        for base in bases:
+    def _discover_chrome_profiles(self) -> List[Dict[str, str]]:
+        found: List[Dict[str, str]] = []
+        for base in self._discover_chrome_profile_roots():
             base = base.expanduser()
             try:
                 if not base.exists():
@@ -3836,26 +4130,60 @@ class MainWindow(QtWidgets.QMainWindow):
                         found.append({"name": entry, "user_data_dir": str(base), "profile_directory": entry})
             except Exception:
                 continue
+        return found
 
+    def _apply_profile_scan(self, auto: bool = False) -> Tuple[int, int]:
+        found = self._discover_chrome_profiles()
         if not found:
-            self._post_status("Профили не найдены. Проверь путь.", state="error")
-            return
+            if not auto:
+                self._post_status("Профили не найдены. Проверь путь.", state="error")
+            return 0, 0
 
         ch = self.cfg.setdefault("chrome", {})
-        names_existing = {p.get("name") for p in ch.setdefault("profiles", [])}
+        profiles = ch.setdefault("profiles", [])
+        names_existing = {p.get("name") for p in profiles}
         added = 0
-        for p in found:
-            if p["name"] not in names_existing:
-                ch["profiles"].append(p)
-                names_existing.add(p["name"])
+        changed = False
+        for prof in found:
+            name = prof.get("name")
+            if not name:
+                continue
+            if name not in names_existing:
+                profiles.append(prof)
+                names_existing.add(name)
                 added += 1
+                changed = True
+            else:
+                for existing in profiles:
+                    if existing.get("name") == name:
+                        if not existing.get("user_data_dir") and prof.get("user_data_dir"):
+                            existing["user_data_dir"] = prof.get("user_data_dir")
+                            changed = True
+                        if not existing.get("profile_directory") and prof.get("profile_directory"):
+                            existing["profile_directory"] = prof.get("profile_directory")
+                            changed = True
+                        break
+            self._ensure_profile_prompt_files(name)
 
-        if not ch.get("active_profile") and ch["profiles"]:
-            ch["active_profile"] = ch["profiles"][0]["name"]
+        if profiles and not ch.get("active_profile"):
+            ch["active_profile"] = profiles[0].get("name", "")
+            if ch["active_profile"]:
+                changed = True
 
-        save_cfg(self.cfg)
-        self._refresh_profiles_ui()
-        self._post_status(f"Найдено профилей: {added if added else len(found)}", state="ok")
+        if changed:
+            save_cfg(self.cfg)
+
+        if not auto:
+            msg = f"Найдено профилей: {added if added else len(found)}"
+            if added and added != len(found):
+                msg += f" (новых: {added})"
+            self._post_status(msg, state="ok")
+        return added, len(found)
+
+    def _on_profile_scan(self):
+        added, total = self._apply_profile_scan(auto=False)
+        if total:
+            self._refresh_profiles_ui()
 
 
 # ----- YouTube: UI/логика -----
