@@ -4,7 +4,15 @@ import os  # FIX: нужен в load_cfg/_open_chrome
 import re  # FIX: используется в _slot_log, _natural_key
 import sys
 import json
-import yaml
+try:
+    import yaml
+except ModuleNotFoundError as exc:
+    tip = (
+        "PyYAML не найден. Установи зависимости командой \n"
+        "    python -m pip install -r sora_suite/requirements.txt\n"
+        "и запусти приложение повторно."
+    )
+    raise SystemExit(f"{tip}\nИсходная ошибка: {exc}") from exc
 import time
 import threading
 import subprocess
