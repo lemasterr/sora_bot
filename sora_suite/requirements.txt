@@ -1,0 +1,4 @@
+PyQt6==6.7.0
+playwright==1.48.0
+PyYAML==6.0.2
+platformdirs==4.2.2

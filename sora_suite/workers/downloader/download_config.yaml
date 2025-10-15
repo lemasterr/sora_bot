@@ -1,0 +1,21 @@
+cdp_endpoint: "http://localhost:9222"
+candidate_urls:
+  - "https://sora.chatgpt.com/drafts"
+  - "https://sora.chatgpt.com/library"
+  - "https://sora.chatgpt.com/my-videos"
+  - "https://sora.chatgpt.com/"
+download_dir: "../downloads"
+max_videos: 0
+pick_policy: "first"
+max_scrolls: 60
+scroll_pause_ms: 700
+download_labels:
+  - "Download"
+  - "Скачать"
+  - "Завантажити"
+  - "Descargar"
+  - "Télécharger"
+  - "Herunterladen"
+  - "Baixar"
+  - "Scarica"
+debug: false
