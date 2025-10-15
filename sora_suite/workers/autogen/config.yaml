@@ -13,3 +13,5 @@ queue_retry:
   backoff_seconds_on_reject: 180
   success_pause_every_n: 2
   success_pause_seconds: 180
+  max_retry_cycles: 0           # 0 = бесконечно
+  max_attempts_per_prompt: 0    # 0 = без лимита
