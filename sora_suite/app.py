@@ -155,6 +155,7 @@ def load_cfg() -> dict:
     ui = data.setdefault("ui", {})
     ui.setdefault("show_activity", True)
     ui.setdefault("accent_kind", "info")
+    ui.setdefault("activity_density", "compact")
 
     return data
 
@@ -588,13 +589,17 @@ class MainWindow(QtWidgets.QMainWindow):
     def _send_tg(self, text: str) -> bool:
         tg_cfg = self.cfg.get("telegram", {}) or {}
         if not tg_cfg.get("enabled"):
-            self._append_activity("Telegram выключен — уведомление пропущено", kind="info")
+            if not getattr(self, "_tg_disabled_warned", False):
+                self._append_activity("Telegram выключен — уведомление пропущено", kind="info")
+                self._tg_disabled_warned = True
             return False
         ok = send_tg(self.cfg, text)
         if ok:
             self._append_activity(f"Telegram ✓ {text}", kind="success")
+            self._tg_disabled_warned = False
         else:
             self._append_activity("Telegram ✗ не удалось отправить сообщение", kind="error")
+            self._tg_disabled_warned = False
         return ok
 
     def ui(self, fn):
@@ -751,10 +756,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lst_activity.setWordWrap(True)
         self.lst_activity.setAlternatingRowColors(False)
         self.lst_activity.setSpacing(2)
-        self.lst_activity.setStyleSheet(
-            "QListWidget{background:#101827;border:1px solid #23324b;border-radius:10px;padding:6px;}"
-            "QListWidget::item{margin:2px;padding:6px 8px;border-radius:6px;background:#172235;}"
-        )
+        self._apply_activity_density(persist=False)
         act_layout.addWidget(self.lst_activity, 1)
 
         self.lbl_activity_hint = QtWidgets.QLabel("Здесь можно посмотреть детальный лог процессов: скачка, блюр, склейка, загрузка.")
@@ -1162,6 +1164,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cb_ui_show_activity = QtWidgets.QCheckBox("Показывать историю событий в левой панели")
         self.cb_ui_show_activity.setChecked(bool(self.cfg.get("ui", {}).get("show_activity", True)))
         ui_form.addRow(self.cb_ui_show_activity)
+
+        self.cmb_ui_activity_density = QtWidgets.QComboBox()
+        self.cmb_ui_activity_density.addItem("Компактная", "compact")
+        self.cmb_ui_activity_density.addItem("Стандартная", "cozy")
+        density_cur = self.cfg.get("ui", {}).get("activity_density", "compact")
+        idx = self.cmb_ui_activity_density.findData(density_cur)
+        if idx < 0:
+            idx = 0
+        self.cmb_ui_activity_density.setCurrentIndex(idx)
+        ui_form.addRow("Вид истории событий:", self.cmb_ui_activity_density)
+
         ui_hint = QtWidgets.QLabel("Когда история скрыта, остаётся только карточка с текущим этапом.")
         ui_hint.setWordWrap(True)
         ui_hint.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
@@ -1201,7 +1214,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_prof_add = QtWidgets.QPushButton("Добавить/обновить")
         self.btn_prof_del = QtWidgets.QPushButton("Удалить")
         self.btn_prof_set = QtWidgets.QPushButton("Сделать активным")
-        self.btn_prof_scan = QtWidgets.QPushButton("Автонайти (macOS)")
+        self.btn_prof_scan = QtWidgets.QPushButton("Автонайти профили")
         btns.addWidget(self.btn_prof_add)
         btns.addWidget(self.btn_prof_del)
         btns.addWidget(self.btn_prof_set)
@@ -1330,6 +1343,8 @@ class MainWindow(QtWidgets.QMainWindow):
         maint_layout.addWidget(self.cb_maintenance_auto)
 
         maint_buttons = QtWidgets.QHBoxLayout()
+        self.btn_env_check = QtWidgets.QPushButton("Проверка окружения")
+        maint_buttons.addWidget(self.btn_env_check)
         self.btn_maintenance_sizes = QtWidgets.QPushButton("Размеры папок")
         maint_buttons.addWidget(self.btn_maintenance_sizes)
         maint_buttons.addStretch(1)
@@ -1431,6 +1446,7 @@ class MainWindow(QtWidgets.QMainWindow):
             (self.ed_blur_src, "textEdited"),
             (self.ed_merge_src, "textEdited"),
             (self.cb_ui_show_activity, "toggled"),
+            (self.cmb_ui_activity_density, "currentIndexChanged"),
             (self.ed_cdp_port, "textEdited"),
             (self.ed_userdir, "textEdited"),
             (self.ed_chrome_bin, "textEdited"),
@@ -1620,8 +1636,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_save_settings.clicked.connect(self._save_settings_clicked)
         self.btn_save_autogen_cfg.clicked.connect(self._save_autogen_cfg)
         self.btn_reload_readme.clicked.connect(self._load_readme_preview)
+        self.btn_env_check.clicked.connect(self._run_env_check)
         self.btn_maintenance_cleanup.clicked.connect(lambda: self._run_maintenance_cleanup(manual=True))
         self.btn_maintenance_sizes.clicked.connect(self._report_dir_sizes)
+        self.cmb_ui_activity_density.currentIndexChanged.connect(self._on_activity_density_changed)
 
         self.btn_youtube_src_browse.clicked.connect(lambda: self._browse_dir(self.ed_youtube_src, "Выбери папку с клипами"))
         self.cb_youtube_draft_only.toggled.connect(self._toggle_youtube_schedule)
@@ -1720,6 +1738,7 @@ class MainWindow(QtWidgets.QMainWindow):
         item.setForeground(brush_fg)
         item.setBackground(brush_bg)
         item.setTextAlignment(int(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter))
+        self._style_activity_item(item)
         self.lst_activity.addItem(item)
         while self.lst_activity.count() > 200:
             self.lst_activity.takeItem(0)
@@ -1833,6 +1852,46 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_settings_activity_toggle(self, checked: bool):
         self._apply_activity_visibility(bool(checked), persist=False)
+
+    def _apply_activity_density(self, density: Optional[str] = None, persist: bool = False):
+        if not hasattr(self, "lst_activity"):
+            return
+        if density is None:
+            density = self.cfg.get("ui", {}).get("activity_density", "compact")
+        if density not in {"compact", "cozy"}:
+            density = "compact"
+
+        margin = "2px" if density == "compact" else "4px"
+        padding = "4px 6px" if density == "compact" else "6px 10px"
+        radius = "6px" if density == "compact" else "10px"
+        spacing = 1 if density == "compact" else 4
+
+        self.lst_activity.setSpacing(spacing)
+        self.lst_activity.setStyleSheet(
+            "QListWidget{background:#101827;border:1px solid #23324b;border-radius:10px;padding:6px;}"
+            f"QListWidget::item{{margin:{margin};padding:{padding};border-radius:{radius};background:#172235;}}"
+        )
+
+        for idx in range(self.lst_activity.count()):
+            item = self.lst_activity.item(idx)
+            if item:
+                self._style_activity_item(item, density)
+
+        self.cfg.setdefault("ui", {})["activity_density"] = density
+        if persist:
+            save_cfg(self.cfg)
+
+    def _style_activity_item(self, item: QtWidgets.QListWidgetItem, density: Optional[str] = None):
+        density = density or self.cfg.get("ui", {}).get("activity_density", "compact")
+        font = QtGui.QFont(self.font())
+        font.setPointSize(10 if density == "compact" else 11)
+        item.setFont(font)
+        height = 28 if density == "compact" else 42
+        item.setSizeHint(QtCore.QSize(0, height))
+
+    def _on_activity_density_changed(self, idx: int):
+        density = self.cmb_ui_activity_density.itemData(idx) or "compact"
+        self._apply_activity_density(density, persist=False)
 
     # ----- обработчик завершения подпроцессов -----
     @QtCore.pyqtSlot(int, str)
@@ -2024,8 +2083,20 @@ class MainWindow(QtWidgets.QMainWindow):
         if not steps:
             self._post_status("Ничего не выбрано", state="error"); return
 
+        self._save_settings_clicked(silent=True)
         self._post_status("Запуск сценария…", state="running")
         append_history(self.cfg, {"event":"scenario_start","steps":steps})
+
+        label_map = {
+            "autogen": "Autogen",
+            "download": "Download",
+            "blur": "Blur",
+            "merge": "Merge",
+            "upload": "YouTube",
+        }
+        summary = " → ".join(label_map.get(step, step) for step in steps)
+        if summary:
+            self._send_tg(f"🚀 Сценарий запущен: {summary}")
 
         def flow():
             ok_all = True
@@ -2054,6 +2125,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._post_status("Сценарий завершён", state=("ok" if ok_all else "error"))
             append_history(self.cfg, {"event":"scenario_finish","ok":ok_all})
             self._refresh_stats()
+            self._send_tg("✅ Сценарий завершён" if ok_all else "⚠️ Сценарий завершён с ошибками")
 
         threading.Thread(target=flow, daemon=True).start()
 
@@ -2062,6 +2134,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._run_autogen_sync()
 
     def _run_autogen_sync(self) -> bool:
+        self._save_settings_clicked(silent=True)
         workdir=self.cfg.get("autogen",{}).get("workdir", str(WORKERS_DIR / "autogen"))
         entry=self.cfg.get("autogen",{}).get("entry","main.py")
         python=sys.executable; cmd=[python, entry]; env=os.environ.copy(); env["PYTHONUNBUFFERED"]="1"
@@ -2070,16 +2143,23 @@ class MainWindow(QtWidgets.QMainWindow):
         def on_finish(rc, tag):
             if tag=="AUTOGEN": rc_holder["rc"]=rc; done.set()
         self.runner_autogen.finished.connect(on_finish)
+        self._send_tg("✍️ Autogen запускается")
         self.runner_autogen.run(cmd, cwd=workdir, env=env)
         self._post_status("Вставка промптов…", state="running")
         done.wait()
         self.runner_autogen.finished.disconnect(on_finish)
-        return rc_holder["rc"] == 0
+        ok = rc_holder["rc"] == 0
+        self._send_tg("✍️ Autogen завершён" if ok else "⚠️ Autogen завершён с ошибками")
+        return ok
 
     def _run_download(self):
         self._run_download_sync()
 
     def _run_download_sync(self) -> bool:
+        self._save_settings_clicked(silent=True)
+        dest_dir = Path(self.cfg.get("downloads_dir", str(DL_DIR)))
+        before = len(self._iter_videos(dest_dir)) if dest_dir.exists() else 0
+
         workdir=self.cfg.get("downloader",{}).get("workdir", str(WORKERS_DIR / "downloader"))
         entry=self.cfg.get("downloader",{}).get("entry","download_all.py")
         python=sys.executable; cmd=[python, entry]; env=os.environ.copy(); env["PYTHONUNBUFFERED"]="1"
@@ -2092,11 +2172,17 @@ class MainWindow(QtWidgets.QMainWindow):
         def on_finish(rc, tag):
             if tag=="DL": rc_holder["rc"]=rc; done.set()
         self.runner_dl.finished.connect(on_finish)
+        self._send_tg(f"⬇️ Скачивание запускается → {dest_dir}")
         self.runner_dl.run(cmd, cwd=workdir, env=env)
         self._post_status("Скачивание…", state="running")
         done.wait()
         self.runner_dl.finished.disconnect(on_finish)
-        return rc_holder["rc"] == 0
+        ok = rc_holder["rc"] == 0
+        after = len(self._iter_videos(dest_dir)) if dest_dir.exists() else before
+        delta = max(after - before, 0)
+        status = "завершено" if ok else "завершено с ошибками"
+        self._send_tg(f"⬇️ Скачивание {status}: +{delta} файлов (итого {after}) → {dest_dir}")
+        return ok
 
     # ----- BLUR -----
     def _run_blur_presets_sync(self) -> bool:
@@ -2142,6 +2228,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
 
         self._post_status(f"Блюр по пресету {active} ({total} видео)…", progress=0, total=total, state="running")
+        self._send_tg(f"🌫️ Блюр запускается: {total} файлов → {dst_dir}")
         counter = {"done": 0}
         lock = Lock()
 
@@ -2212,7 +2299,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         ok_all = all(results)
         append_history(self.cfg, {"event":"blur_finish","ok":ok_all,"count":total,"preset":active,"src":str(src_dir)})
-        self._send_tg(f"BLUR: завершено (ok={ok_all}, {total} файлов, пресет={active})")
+        status = "завершён" if ok_all else "с ошибками"
+        self._send_tg(f"🌫️ Блюр {status}: {total} файлов, пресет {active}, из {src_dir.name} → {dst_dir}")
         if ok_all:
             self._post_status("Блюр завершён", state="ok")
         else:
@@ -2221,6 +2309,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ----- MERGE -----
     def _run_merge_sync(self) -> bool:
+        self._save_settings_clicked(silent=True)
         merge_cfg = self.cfg.get("merge", {}) or {}
         group = int(self.sb_merge_group.value() or merge_cfg.get("group_size", 3))
         pattern = merge_cfg.get("pattern", "*.mp4")
@@ -2248,6 +2337,7 @@ class MainWindow(QtWidgets.QMainWindow):
         groups: List[List[Path]] = [files[i:i + group] for i in range(0, len(files), group)]
         total = len(groups)
         self._post_status(f"Склейка группами по {group}…", progress=0, total=total, state="running")
+        self._send_tg(f"🧵 Склейка запускается: {total} групп → {out_dir}")
         ok_all = True
 
         for i, g in enumerate(groups, 1):
@@ -2310,7 +2400,8 @@ class MainWindow(QtWidgets.QMainWindow):
             "group_size": group,
             "src": str(src_dir)
         })
-        self._send_tg(f"MERGE: завершено (ok={ok_all}, groups={total}, by={group})")
+        status = "завершена" if ok_all else "с ошибками"
+        self._send_tg(f"🧵 Склейка {status}: {total} групп по {group}, из {src_dir.name} → {out_dir}")
 
         if ok_all:
             self._post_status("Склейка завершена", state="ok")
@@ -2346,10 +2437,12 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
 
         publish_at = ""
+        schedule_text = ""
         if self.cb_youtube_schedule.isChecked() and not self.cb_youtube_draft_only.isChecked():
             dt_local = self.dt_youtube_publish.dateTime()
             yt_cfg["last_publish_at"] = dt_local.toString(QtCore.Qt.DateFormat.ISODate)
             publish_at = dt_local.toUTC().toString("yyyy-MM-dd'T'HH:mm:ss'Z'")
+            schedule_text = dt_local.toString("dd.MM HH:mm")
             save_cfg(self.cfg)
 
         workdir = yt_cfg.get("workdir", str(WORKERS_DIR / "uploader"))
@@ -2377,11 +2470,17 @@ class MainWindow(QtWidgets.QMainWindow):
                 done.set()
 
         self.runner_upload.finished.connect(on_finish)
+        draft_note = " (черновики)" if self.cb_youtube_draft_only.isChecked() else ""
+        self._send_tg(f"📤 YouTube загрузка запускается: {len(videos)} файлов, канал {channel}{draft_note}")
         self.runner_upload.run(cmd, cwd=workdir, env=env)
         self._post_status("Загрузка на YouTube…", state="running")
         done.wait()
         self.runner_upload.finished.disconnect(on_finish)
-        return rc_holder["rc"] == 0
+        ok = rc_holder["rc"] == 0
+        status = "завершена" if ok else "с ошибками"
+        schedule_part = f", старт {schedule_text}" if schedule_text else draft_note
+        self._send_tg(f"📤 YouTube загрузка {status}: {len(videos)} файлов, канал {channel}{schedule_part}")
+        return ok
 
     def _start_youtube_single(self):
         threading.Thread(target=self._run_upload_sync, daemon=True).start()
@@ -2419,6 +2518,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not files:
             self._post_status("В папке нет видео", state="error"); return
 
+        self._send_tg(f"📝 Переименование запускается: {len(files)} файлов в {folder}")
         use_titles = self.rb_ren_from_titles.isChecked()
         prefix = self.ed_ren_prefix.text().strip()
         start_no = int(self.ed_ren_start.value())
@@ -2471,7 +2571,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         append_history(self.cfg, {"event":"rename", "dir": str(folder), "count": done, "mode": ("titles" if use_titles else "seq")})
         self._post_status(f"Переименовано: {done}/{total}", state=("ok" if done==total else "error"))
-        self._send_tg(f"RENAME: {done}/{total} в {folder.name}")
+        self._send_tg(f"📝 Переименование завершено: {done}/{total} файлов → {folder}")
         self._refresh_stats()
 
     # ----- Stop -----
@@ -2577,6 +2677,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         ui_cfg = self.cfg.setdefault("ui", {})
         ui_cfg["show_activity"] = bool(self.cb_ui_show_activity.isChecked())
+        ui_cfg["activity_density"] = self.cmb_ui_activity_density.currentData() or "compact"
 
         maint_cfg = self.cfg.setdefault("maintenance", {})
         maint_cfg["auto_cleanup_on_start"] = bool(self.cb_maintenance_auto.isChecked())
@@ -2594,15 +2695,126 @@ class MainWindow(QtWidgets.QMainWindow):
             self._settings_autosave_timer.stop()
         self._settings_dirty = False
 
+        mode = "авто" if from_autosave else "вручную"
         if from_autosave or not silent:
             stamp = QtCore.QDateTime.currentDateTime().toString("HH:mm:ss")
-            mode = "авто" if from_autosave else "вручную"
             self.lbl_settings_status.setStyleSheet("color:#1b9c5d;")
             self.lbl_settings_status.setText(f"Настройки сохранены ({mode} {stamp})")
             self._append_activity(f"Настройки сохранены ({mode})", kind="success")
 
         if not silent:
             self._post_status("Настройки сохранены", state="ok")
+            if not from_autosave:
+                self._send_tg("⚙️ Настройки сохранены (вручную)")
+
+    def _run_env_check(self):
+        self._save_settings_clicked(silent=True)
+
+        self._append_activity("Проверка окружения…", kind="running", card_text="Проверка окружения")
+
+        entries: List[Tuple[str, str, str]] = []
+
+        def record(label: str, status: str, detail: str = ""):
+            entries.append((label, status, detail))
+
+        # FFmpeg
+        ffbin = self.ed_ff_bin.text().strip() or "ffmpeg"
+        ff_path = _normalize_path(ffbin)
+        if ff_path.exists():
+            record("FFmpeg", "ok", str(ff_path))
+        else:
+            found = shutil.which(ffbin)
+            record("FFmpeg", "ok" if found else "warn", found or f"не найден ({ffbin})")
+
+        # Chrome binary
+        chrome_bin = self.ed_chrome_bin.text().strip() or self.cfg.get("chrome", {}).get("binary", "")
+        chrome_path = _normalize_path(chrome_bin)
+        if chrome_path.exists():
+            record("Chrome binary", "ok", str(chrome_path))
+        else:
+            record("Chrome binary", "warn", f"не найден ({chrome_bin})")
+
+        # Chrome profile availability
+        ch_cfg = self.cfg.get("chrome", {}) or {}
+        profiles = [p for p in (ch_cfg.get("profiles") or []) if isinstance(p, dict)]
+        active_name = ch_cfg.get("active_profile", "") or ""
+        if profiles:
+            if active_name:
+                record("Chrome профиль", "ok", active_name)
+            else:
+                record("Chrome профиль", "warn", "активный профиль не выбран")
+        else:
+            record("Chrome профиль", "warn", "список пуст")
+
+        # Telegram configuration
+        tg_cfg = self.cfg.get("telegram", {}) or {}
+        if not tg_cfg.get("enabled"):
+            record("Telegram", "info", "уведомления отключены")
+        elif tg_cfg.get("bot_token") and tg_cfg.get("chat_id"):
+            record("Telegram", "ok", "готово")
+        else:
+            record("Telegram", "warn", "укажи token и chat id")
+
+        # YouTube configuration
+        yt_cfg = self.cfg.get("youtube", {}) or {}
+        channels = yt_cfg.get("channels") or []
+        active_channel = yt_cfg.get("active_channel", "") or ""
+        if active_channel:
+            record("YouTube канал", "ok", active_channel)
+            creds_path = ""
+            for ch in channels:
+                if ch.get("name") == active_channel:
+                    creds_path = ch.get("credentials", "")
+                    break
+            if creds_path:
+                cred_norm = _normalize_path(creds_path)
+                record("YouTube credentials", "ok" if cred_norm.exists() else "warn", str(cred_norm))
+            else:
+                record("YouTube credentials", "warn", "файл не указан")
+        else:
+            record("YouTube канал", "warn", "не выбран")
+
+        # Folder health
+        folders = [
+            ("RAW", self.cfg.get("downloads_dir", str(DL_DIR))),
+            ("BLURRED", self.cfg.get("blurred_dir", str(BLUR_DIR))),
+            ("MERGED", self.cfg.get("merged_dir", str(MERG_DIR))),
+            ("UPLOAD", yt_cfg.get("upload_src_dir", self.cfg.get("merged_dir", str(MERG_DIR))))
+        ]
+        for label, raw in folders:
+            folder = _normalize_path(raw)
+            record(f"Каталог {label}", "ok" if folder.exists() else "warn", str(folder))
+
+        icon_map = {"ok": "✅", "warn": "⚠️", "info": "ℹ️"}
+        kind_map = {"ok": "success", "warn": "error", "info": "info"}
+        summary_lines: List[str] = []
+
+        warn_count = 0
+        ok_count = 0
+        considered = 0
+        for label, status, detail in entries:
+            icon = icon_map.get(status, "ℹ️")
+            text = f"{icon} {label}"
+            if detail:
+                text += f" — {detail}"
+            self._append_activity(f"[CHECK] {text}", kind=kind_map.get(status, "info"), card_text=False)
+            if status == "warn":
+                warn_count += 1
+                considered += 1
+            elif status == "ok":
+                ok_count += 1
+                considered += 1
+            summary_lines.append(text)
+
+        if considered == 0:
+            considered = 1
+        summary = f"Проверка окружения: {ok_count}/{considered} OK"
+        result_kind = "success" if warn_count == 0 else "error"
+        self._append_activity(summary, kind=result_kind)
+        self._post_status(summary, state=("ok" if warn_count == 0 else "error"))
+
+        if summary_lines:
+            self._send_tg("🩺 Проверка окружения\n" + "\n".join(summary_lines))
 
     def _run_maintenance_cleanup(self, manual: bool = True):
         self._save_settings_clicked(silent=True)
@@ -2663,11 +2875,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self._append_activity(msg, kind="success")
             if manual:
                 self._post_status(msg, state="ok")
+            self._send_tg(f"🧹 {msg}")
         else:
             msg = "Очистка каталогов: подходящих файлов не найдено"
             self._append_activity(msg, kind="info")
             if manual:
                 self._post_status(msg, state="idle")
+            self._send_tg("🧹 Очистка: подходящих файлов не найдено")
 
         if errors:
             err_head = f"Очистка: {len(errors)} ошибок"
@@ -2676,6 +2890,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._append_activity(f"↳ {detail}", kind="error", card_text=False)
             if manual:
                 self._post_status(err_head, state="error")
+            self._send_tg("⚠️ Очистка завершена с ошибками")
 
         self._refresh_stats()
 
@@ -2706,6 +2921,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for row in rows:
             self._append_activity(row, kind="info", card_text=False)
         self._post_status("Размеры папок обновлены", state="ok")
+        self._send_tg(f"📦 Размеры папок: {summary}")
 
     def _test_tg_settings(self):
         self._save_settings_clicked(silent=True)
@@ -2844,18 +3060,35 @@ class MainWindow(QtWidgets.QMainWindow):
         self._post_status(f"Активный профиль: {name}", state="ok")
 
     def _on_profile_scan(self):
-        # macOS: авто-поиск
-        base = os.path.expanduser("~/Library/Application Support/Google/Chrome")
-        found = []
-        try:
-            if os.path.isdir(base):
-                candidates = ["Default"] + [d for d in os.listdir(base) if d.startswith("Profile ")]
-                for d in candidates:
-                    p = os.path.join(base, d)
-                    if os.path.isdir(p):
-                        found.append({"name": d, "user_data_dir": base, "profile_directory": d})
-        except Exception:
-            pass
+        found: List[Dict[str, str]] = []
+
+        bases: List[Path] = []
+        if sys.platform == "darwin":
+            bases.append(Path.home() / "Library/Application Support/Google/Chrome")
+        elif sys.platform.startswith("win"):
+            for env_key in ["LOCALAPPDATA", "APPDATA", "USERPROFILE"]:
+                raw = os.environ.get(env_key)
+                if not raw:
+                    continue
+                candidate = Path(raw) / "Google" / "Chrome" / "User Data"
+                if candidate not in bases:
+                    bases.append(candidate)
+        else:
+            bases.append(Path.home() / ".config/google-chrome")
+            bases.append(Path.home() / ".config/chromium")
+
+        for base in bases:
+            base = base.expanduser()
+            try:
+                if not base.exists():
+                    continue
+                entries = ["Default"] + [d for d in os.listdir(base) if d.startswith("Profile ")]
+                for entry in entries:
+                    path = base / entry
+                    if path.is_dir():
+                        found.append({"name": entry, "user_data_dir": str(base), "profile_directory": entry})
+            except Exception:
+                continue
 
         if not found:
             self._post_status("Профили не найдены. Проверь путь.", state="error")
@@ -2863,16 +3096,19 @@ class MainWindow(QtWidgets.QMainWindow):
 
         ch = self.cfg.setdefault("chrome", {})
         names_existing = {p.get("name") for p in ch.setdefault("profiles", [])}
+        added = 0
         for p in found:
             if p["name"] not in names_existing:
                 ch["profiles"].append(p)
+                names_existing.add(p["name"])
+                added += 1
 
         if not ch.get("active_profile") and ch["profiles"]:
             ch["active_profile"] = ch["profiles"][0]["name"]
 
         save_cfg(self.cfg)
         self._refresh_profiles_ui()
-        self._post_status(f"Найдено профилей: {len(found)}", state="ok")
+        self._post_status(f"Найдено профилей: {added if added else len(found)}", state="ok")
 
 
 # ----- YouTube: UI/логика -----
