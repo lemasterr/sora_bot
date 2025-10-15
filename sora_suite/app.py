@@ -4,6 +4,7 @@ import os  # FIX: нужен в load_cfg/_open_chrome
 import re  # FIX: используется в _slot_log, _natural_key
 import sys
 import json
+import tempfile
 try:
     import yaml
 except ModuleNotFoundError as exc:
@@ -25,6 +26,11 @@ from typing import Optional, List, Union
 from PyQt6 import QtCore, QtGui, QtWidgets
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
+
+try:  # Pillow используется для автодетекта водяного знака
+    from PIL import Image, ImageFilter, ImageStat  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - Pillow опционален до установки
+    Image = ImageFilter = ImageStat = None  # type: ignore[assignment]
 
 # ---------- базовые пути ----------
 APP_DIR = Path(__file__).parent.resolve()
@@ -414,6 +420,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cfg = load_cfg()
         ensure_dirs(self.cfg)
 
+        self._apply_theme()
+
         self.setWindowTitle("Sora Suite — Control Panel")
         self.resize(1500, 950)
 
@@ -436,6 +444,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_profiles_ui()
         self._refresh_youtube_ui()
         self._load_autogen_cfg_ui()
+        self._load_readme_preview()
 
         # дать раннеру ffmpeg доступ к self для логов
         _run_ffmpeg._self = self  # type: ignore[attr-defined]
@@ -448,6 +457,64 @@ class MainWindow(QtWidgets.QMainWindow):
         self._register_settings_autosave_sources()
 
     # ----- helpers -----
+    def _apply_theme(self):
+        app = QtWidgets.QApplication.instance()
+        if not app:
+            return
+
+        app.setStyle("Fusion")
+
+        palette = QtGui.QPalette()
+        base = QtGui.QColor("#0f172a")
+        text = QtGui.QColor("#e2e8f0")
+        disabled = QtGui.QColor("#64748b")
+        highlight = QtGui.QColor("#2563eb")
+
+        roles = {
+            QtGui.QPalette.ColorRole.Window: base,
+            QtGui.QPalette.ColorRole.Base: QtGui.QColor("#0b1120"),
+            QtGui.QPalette.ColorRole.AlternateBase: QtGui.QColor("#111c2f"),
+            QtGui.QPalette.ColorRole.WindowText: text,
+            QtGui.QPalette.ColorRole.Text: text,
+            QtGui.QPalette.ColorRole.Button: QtGui.QColor("#1d4ed8"),
+            QtGui.QPalette.ColorRole.ButtonText: QtGui.QColor("#f8fafc"),
+            QtGui.QPalette.ColorRole.Highlight: highlight,
+            QtGui.QPalette.ColorRole.HighlightedText: QtGui.QColor("#f8fafc"),
+            QtGui.QPalette.ColorRole.BrightText: QtGui.QColor("#ffffff"),
+            QtGui.QPalette.ColorRole.Link: QtGui.QColor("#38bdf8"),
+        }
+        for role, color in roles.items():
+            palette.setColor(QtGui.QPalette.ColorGroup.Active, role, color)
+            palette.setColor(QtGui.QPalette.ColorGroup.Inactive, role, color)
+            palette.setColor(QtGui.QPalette.ColorGroup.Disabled, role, disabled)
+
+        app.setPalette(palette)
+
+        app.setStyleSheet(
+            """
+            QWidget { background-color: #0f172a; color: #e2e8f0; }
+            QGroupBox { border: 1px solid #1f3b63; border-radius: 10px; margin-top: 18px; }
+            QGroupBox::title { subcontrol-origin: margin; left: 14px; padding: 0 8px; background-color: #0f172a; }
+            QPushButton { background-color: #1d4ed8; border-radius: 6px; padding: 6px 14px; color: #f8fafc; }
+            QPushButton:disabled { background-color: #334155; color: #64748b; }
+            QPushButton:hover { background-color: #2563eb; }
+            QPushButton:pressed { background-color: #1e40af; }
+            QLineEdit, QSpinBox, QDoubleSpinBox, QDateTimeEdit, QComboBox, QTextEdit, QPlainTextEdit {
+                background-color: #0b1120; border: 1px solid #1f3b63; border-radius: 6px; padding: 4px 6px;
+                selection-background-color: #2563eb; selection-color: #f8fafc;
+            }
+            QListWidget { border: 1px solid #1f3b63; border-radius: 10px; background-color: #050b16; color: #e2e8f0; }
+            QTabWidget::pane { border: 1px solid #1f3b63; border-radius: 10px; margin-top: -4px; }
+            QTabBar::tab { background: #0b1120; border: 1px solid #1f3b63; padding: 6px 12px; margin-right: 4px;
+                           border-top-left-radius: 6px; border-top-right-radius: 6px; }
+            QTabBar::tab:selected { background: #1d4ed8; color: #f8fafc; }
+            QTabBar::tab:hover { background: #2563eb; }
+            QLabel#statusBanner { font-size: 15px; }
+            QTextBrowser { background-color: #050b16; border: 1px solid #1f3b63; border-radius: 8px; padding: 8px; }
+            QScrollArea { border: none; }
+            """
+        )
+
     def _notify(self, title: str, message: str):
         try:
             self.tray.showMessage(title, message, QtWidgets.QSystemTrayIcon.MessageIcon.Information, 5000)
@@ -516,7 +583,13 @@ class MainWindow(QtWidgets.QMainWindow):
         v = QtWidgets.QVBoxLayout(central)
 
         banner = QtWidgets.QLabel("<b>Sora Suite</b>: выбери шаги и запусти сценарий. Уведомления появятся в системном трее.")
-        banner.setStyleSheet("QLabel{padding:8px;background:#eef;border:1px solid #cde;}")
+        banner.setObjectName("statusBanner")
+        banner.setWordWrap(True)
+        banner.setStyleSheet(
+            "QLabel#statusBanner{padding:12px 18px;border-radius:12px;"
+            "background:qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #1d4ed8,stop:1 #1e40af);"
+            "color:#f8fafc;font-weight:600;letter-spacing:0.3px;}"
+        )
         v.addWidget(banner)
 
         tb = QtWidgets.QHBoxLayout()
@@ -555,12 +628,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lst_activity.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
         self.lst_activity.setUniformItemSizes(False)
         self.lst_activity.setWordWrap(True)
-        self.lst_activity.setAlternatingRowColors(True)
+        self.lst_activity.setAlternatingRowColors(False)
+        self.lst_activity.setSpacing(2)
+        self.lst_activity.setStyleSheet(
+            "QListWidget{background:#050b16;border:1px solid #1f3b63;border-radius:10px;padding:6px;}"
+            "QListWidget::item{margin:2px;padding:6px 8px;border-radius:6px;}"
+        )
         act_layout.addWidget(self.lst_activity, 1)
 
         self.lbl_activity_hint = QtWidgets.QLabel("Здесь отображаются ключевые шаги процессов: скачка, блюр, склейка, загрузка.")
         self.lbl_activity_hint.setWordWrap(True)
-        self.lbl_activity_hint.setStyleSheet("QLabel{color:#666;font-size:11px;}")
+        self.lbl_activity_hint.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
         act_layout.addWidget(self.lbl_activity_hint)
 
         split.addWidget(self.panel_activity)
@@ -668,7 +746,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lbl_stat_upload = QtWidgets.QLabel("0")
         for w in (self.lbl_stat_raw, self.lbl_stat_blur, self.lbl_stat_merge, self.lbl_stat_upload):
             w.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-            w.setStyleSheet("QLabel{font: 700 16px 'Menlo'; padding:4px; border:1px solid #ddd; background:#fafafa;}")
+            w.setStyleSheet(
+                "QLabel{font: 700 16px 'Menlo'; padding:6px; border:1px solid #1f3b63; "
+                "background:#111c2f; border-radius:8px;}"
+            )
         grid_stat.addWidget(self.lbl_stat_raw, 1, 0)
         grid_stat.addWidget(self.lbl_stat_blur, 1, 1)
         grid_stat.addWidget(self.lbl_stat_merge, 1, 2)
@@ -995,6 +1076,13 @@ class MainWindow(QtWidgets.QMainWindow):
         ff_layout.addWidget(self.grp_portrait)
         ff_layout.addWidget(self.grp_landscape)
 
+        auto_row = QtWidgets.QHBoxLayout()
+        auto_row.addStretch(1)
+        self.btn_auto_detect_watermark = QtWidgets.QPushButton("Автодетект водяного знака")
+        self.btn_auto_detect_watermark.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_FileDialogDetailedView))
+        auto_row.addWidget(self.btn_auto_detect_watermark)
+        ff_layout.addLayout(auto_row)
+
         self.settings_tabs.addTab(page_ff, "FFmpeg")
 
         # --- YouTube дефолты ---
@@ -1065,6 +1153,20 @@ class MainWindow(QtWidgets.QMainWindow):
         auto_layout.addWidget(grp_auto)
         auto_layout.addStretch(1)
         self.settings_tabs.addTab(page_auto, "Автоген")
+
+        page_docs = QtWidgets.QWidget()
+        docs_layout = QtWidgets.QVBoxLayout(page_docs)
+        docs_layout.setContentsMargins(8, 8, 8, 8)
+        self.txt_readme = QtWidgets.QTextBrowser()
+        self.txt_readme.setOpenExternalLinks(True)
+        self.txt_readme.setPlaceholderText("README.md не найден")
+        docs_layout.addWidget(self.txt_readme, 1)
+        docs_btn_row = QtWidgets.QHBoxLayout()
+        docs_btn_row.addStretch(1)
+        self.btn_reload_readme = QtWidgets.QPushButton("Обновить README")
+        docs_btn_row.addWidget(self.btn_reload_readme)
+        docs_layout.addLayout(docs_btn_row)
+        self.settings_tabs.addTab(page_docs, "Документация")
 
         self._refresh_path_fields()
     def _refresh_path_fields(self):
@@ -1152,6 +1254,140 @@ class MainWindow(QtWidgets.QMainWindow):
             edits.append((x, y, w, h))
         return edits
 
+    def _auto_detect_watermark(self):
+        if Image is None or ImageFilter is None or ImageStat is None:
+            tip = "Автодетект требует Pillow: pip install Pillow"
+            self._post_status(tip, state="error")
+            self._append_activity(tip, kind="error")
+            return
+
+        src_raw = self.ed_blur_src.text().strip() or self.cfg.get("blur_src_dir", self.cfg.get("downloads_dir", str(DL_DIR)))
+        src_dir = Path(os.path.expandvars(src_raw)).expanduser()
+        if not src_dir.exists():
+            self._post_status(f"Источник BLUR не найден: {src_dir}", state="error")
+            self._append_activity(f"Автодетект: нет папки {src_dir}", kind="error")
+            return
+
+        candidates: List[Path] = []
+        for pattern in ("*.mp4", "*.mov", "*.m4v", "*.webm", "*.mkv"):
+            candidates.extend(sorted(src_dir.glob(pattern)))
+        if not candidates:
+            self._post_status("Нет видео в источнике BLUR", state="error")
+            self._append_activity("Автодетект: не найдено видео для анализа", kind="error")
+            return
+
+        candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        sample = candidates[0]
+
+        ff_cfg = self.cfg.get("ffmpeg", {}) or {}
+        ffbin = self.ed_ff_bin.text().strip() or ff_cfg.get("binary", "ffmpeg")
+
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                frame_path = Path(tmp) / "probe_frame.jpg"
+                cmd = [
+                    ffbin,
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-y",
+                    "-i",
+                    str(sample),
+                    "-frames:v",
+                    "1",
+                    "-q:v",
+                    "2",
+                    str(frame_path),
+                ]
+                res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                if res.returncode != 0 or not frame_path.exists():
+                    stderr = (res.stderr or "ffmpeg error").strip()
+                    raise RuntimeError(stderr or "ffmpeg вернул ошибку")
+                with Image.open(frame_path) as img_raw:
+                    img = img_raw.convert("RGB")
+        except Exception as exc:
+            msg = f"Автодетект: не удалось извлечь кадр ({exc})"
+            self._post_status(msg, state="error")
+            self._append_activity(msg, kind="error")
+            return
+
+        zones = self._detect_watermark_boxes(img)
+        if not zones:
+            msg = f"Автодетект: водяной знак не найден в {sample.name}"
+            self._post_status(msg, state="error")
+            self._append_activity(msg, kind="error")
+            return
+
+        orientation = "portrait_9x16" if img.height >= img.width else "landscape_16x9"
+        edits = self.p_edits if orientation == "portrait_9x16" else self.l_edits
+        for idx in range(len(edits)):
+            zone = zones[idx] if idx < len(zones) else zones[-1]
+            widgets = edits[idx]
+            for widget, value in zip(widgets, [zone["x"], zone["y"], zone["w"], zone["h"]]):
+                widget.blockSignals(True)
+                widget.setValue(int(value))
+                widget.blockSignals(False)
+
+        self.cmb_aspect.setCurrentText(orientation)
+        self._mark_settings_dirty()
+        msg = f"Автодетект: обновлены зоны для {sample.name} ({orientation})"
+        self._post_status("Зоны delogo обновлены", state="ok")
+        self._append_activity(msg, kind="success")
+
+    @staticmethod
+    def _detect_watermark_boxes(image):  # type: ignore[no-untyped-def]
+        try:
+            edges = image.convert("L").filter(ImageFilter.FIND_EDGES)
+        except Exception:
+            return []
+
+        w, h = edges.size
+        patch_w = max(int(w * 0.22), 80)
+        patch_h = max(int(h * 0.18), 60)
+
+        center_box = (
+            max(0, w // 2 - patch_w // 2),
+            max(0, h // 2 - patch_h // 2),
+            min(w, w // 2 + patch_w // 2),
+            min(h, h // 2 + patch_h // 2),
+        )
+        baseline = ImageStat.Stat(edges.crop(center_box)).mean[0] if ImageStat else 0
+
+        positions = []
+        offsets_x = [0, max(0, w - patch_w), max(0, w // 2 - patch_w // 2)]
+        offsets_y = [0, max(0, h - patch_h), max(0, h // 2 - patch_h // 2)]
+
+        for x in offsets_x:
+            for y in offsets_y:
+                near_border = (x in (0, w - patch_w)) or (y in (0, h - patch_h))
+                if not near_border:
+                    continue
+                box = (int(x), int(y), int(min(w, x + patch_w)), int(min(h, y + patch_h)))
+                crop = edges.crop(box)
+                score = ImageStat.Stat(crop).mean[0] if ImageStat else 0
+                positions.append((score, box))
+
+        if not positions:
+            return []
+
+        threshold = max(baseline * 1.25, baseline + 10)
+        good = [p for p in positions if p[0] >= threshold]
+        if not good:
+            good = sorted(positions, key=lambda item: item[0], reverse=True)[:1]
+
+        good = sorted(good, key=lambda item: item[0], reverse=True)[:3]
+
+        zones = []
+        for _, box in good:
+            x0, y0, x1, y1 = box
+            zones.append({
+                "x": max(0, int(x0)),
+                "y": max(0, int(y0)),
+                "w": max(1, int(x1 - x0)),
+                "h": max(1, int(y1 - y0)),
+            })
+        return zones
+
     def _load_zones_into_ui(self):
         ff = self.cfg.get("ffmpeg", {})
         pr = ff.get("presets", {})
@@ -1169,6 +1405,26 @@ class MainWindow(QtWidgets.QMainWindow):
                 edits[i][3].setValue(int(h))
         fill(self.p_edits, pz)
         fill(self.l_edits, lz)
+
+    def _load_readme_preview(self):
+        if not hasattr(self, "txt_readme"):
+            return
+
+        for path in [APP_DIR / "README.md", PROJECT_ROOT / "README.md"]:
+            if path.exists():
+                try:
+                    text = path.read_text(encoding="utf-8")
+                    self.txt_readme.setMarkdown(text)
+                except Exception:
+                    self.txt_readme.setPlainText(path.read_text(encoding="utf-8", errors="ignore"))
+                self.txt_readme.verticalScrollBar().setValue(0)
+                if hasattr(self, "lst_activity"):
+                    self._append_activity(f"README загружен: {path.name}", kind="info")
+                return
+
+        self.txt_readme.setPlainText("README.md не найден в папке приложения")
+        if hasattr(self, "lst_activity"):
+            self._append_activity("README.md не найден", kind="error")
 
     def _wire(self):
         # статусы/лог — безопасные слоты GUI-потока
@@ -1197,6 +1453,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_reload_history.clicked.connect(self._reload_history)
         self.btn_save_settings.clicked.connect(self._save_settings_clicked)
         self.btn_save_autogen_cfg.clicked.connect(self._save_autogen_cfg)
+        self.btn_auto_detect_watermark.clicked.connect(self._auto_detect_watermark)
+        self.btn_reload_readme.clicked.connect(self._load_readme_preview)
 
         self.btn_youtube_src_browse.clicked.connect(lambda: self._browse_dir(self.ed_youtube_src, "Выбери папку с клипами"))
         self.cb_youtube_draft_only.toggled.connect(self._toggle_youtube_schedule)
@@ -1278,10 +1536,10 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         item = QtWidgets.QListWidgetItem(text)
         palette = {
-            "info": ("#2c3e50", "#f4f6f8"),
-            "running": ("#8e44ad", "#f7f1ff"),
-            "success": ("#1b9c5d", "#ecf9f1"),
-            "error": ("#c0392b", "#fdecea"),
+            "info": ("#93c5fd", "#15223c"),
+            "running": ("#facc15", "#352b0b"),
+            "success": ("#34d399", "#0f2f24"),
+            "error": ("#f87171", "#3a0d15"),
         }
         fg, bg = palette.get(kind, palette["info"])
         brush_fg = QtGui.QBrush(QtGui.QColor(fg))
