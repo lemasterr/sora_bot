@@ -535,6 +535,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_procs: set[subprocess.Popen] = set()
         self._procs_lock = Lock()
 
+        self._current_step_started: Optional[float] = None
+        self._current_step_state: str = "idle"
+        self._current_step_timer = QtCore.QTimer(self)
+        self._current_step_timer.setInterval(1000)
+        self._current_step_timer.timeout.connect(self._tick_step_timer)
+
         self._build_ui()
         self._wire()
         self._init_state()
@@ -554,12 +560,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._preset_cache: Dict[str, List[Dict[str, int]]] = {}
         self._preset_tables: Dict[str, QtWidgets.QTableWidget] = {}
         self._autogen_instance_runners: Dict[str, ProcRunner] = {}
-
-        self._current_step_started: Optional[float] = None
-        self._current_step_state: str = "idle"
-        self._current_step_timer = QtCore.QTimer(self)
-        self._current_step_timer.setInterval(1000)
-        self._current_step_timer.timeout.connect(self._tick_step_timer)
 
     # ----- helpers -----
     def _perform_delayed_startup(self):
