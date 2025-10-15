@@ -9,6 +9,8 @@
 - YOUTUBE_PUBLISH_AT — опциональная дата/время (ISO) публикации;
 - YOUTUBE_DRAFT_ONLY — "1" чтобы оставить как приват без расписания;
 - YOUTUBE_ARCHIVE_DIR — куда перемещать успешно загруженные файлы.
+- YOUTUBE_BATCH_STEP_MINUTES — шаг между роликами при пакетном расписании;
+- YOUTUBE_BATCH_LIMIT — сколько роликов брать за один запуск (0 = все).
 """
 from __future__ import annotations
 
@@ -117,7 +119,7 @@ def to_rfc3339(iso_value: Optional[str]) -> Optional[str]:
         return None
 
 
-def move_to_archive(video: Path, archive: Path):
+def move_to_archive(video: Path, archive: Path) -> Tuple[Path, ...]:
     archive.mkdir(parents=True, exist_ok=True)
     target = archive / video.name
     i = 1
@@ -125,6 +127,8 @@ def move_to_archive(video: Path, archive: Path):
         target = archive / f"{video.stem}_{i}{video.suffix}"
         i += 1
     shutil.move(str(video), str(target))
+
+    moved: Tuple[Path, ...] = (target,)
 
     for ext in (".json", ".yaml", ".yml"):
         meta = video.with_suffix(ext)
@@ -135,6 +139,9 @@ def move_to_archive(video: Path, archive: Path):
                 target_meta = archive / f"{meta.stem}_{j}{meta.suffix}"
                 j += 1
             shutil.move(str(meta), str(target_meta))
+            moved += (target_meta,)
+
+    return moved
 
 
 def upload_video(service, video: Path, body: Dict[str, Any]):
@@ -180,10 +187,20 @@ def main() -> int:
     draft_only = os.environ.get("YOUTUBE_DRAFT_ONLY", "0") == "1"
     publish_at_env = None if draft_only else os.environ.get("YOUTUBE_PUBLISH_AT")
     publish_at_global = to_rfc3339(publish_at_env)
+    try:
+        step_minutes = max(0, int(os.environ.get("YOUTUBE_BATCH_STEP_MINUTES", "0") or 0))
+    except ValueError:
+        step_minutes = 0
+    try:
+        batch_limit = int(os.environ.get("YOUTUBE_BATCH_LIMIT", "0") or 0)
+    except ValueError:
+        batch_limit = 0
 
     archive_dir = Path(os.environ.get("YOUTUBE_ARCHIVE_DIR", yt_cfg.get("archive_dir", src_dir / "uploaded")) ).expanduser().resolve()
 
     videos = collect_videos(src_dir)
+    if batch_limit > 0:
+        videos = videos[:batch_limit]
     if not videos:
         log("Нет файлов для загрузки")
         return 0
@@ -191,8 +208,16 @@ def main() -> int:
     creds = ensure_credentials(channel_cfg, config_path.parent)
     service = build("youtube", "v3", credentials=creds, cache_discovery=False)
 
+    base_dt = None
+    if publish_at_global:
+        try:
+            base_dt = dt.datetime.fromisoformat(publish_at_global.replace("Z", "+00:00"))
+        except ValueError:
+            err(f"Неверный publish_at: {publish_at_global}")
+            publish_at_global = None
+
     uploaded = 0
-    for video in videos:
+    for idx, video in enumerate(videos):
         log(f"Загружаем {video.name}")
         meta = load_metadata(video)
         title = meta.get("title") or video.stem
@@ -203,6 +228,9 @@ def main() -> int:
 
         publish_at_video = to_rfc3339(meta.get("publishAt") or meta.get("publish_at") or publish_at_env)
         publish_at = publish_at_video or publish_at_global
+        if not publish_at_video and publish_at_global and base_dt and step_minutes > 0:
+            scheduled_dt = base_dt + dt.timedelta(minutes=step_minutes * idx)
+            publish_at = scheduled_dt.astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z")
 
         privacy = (meta.get("privacy") or meta.get("privacyStatus") or meta.get("privacy_status") or channel_cfg.get("default_privacy") or "private").lower()
         status: Dict[str, Any] = {
@@ -211,6 +239,9 @@ def main() -> int:
         }
         if publish_at and not draft_only:
             status["publishAt"] = publish_at
+            log(f"→ расписано на {publish_at}")
+        elif draft_only:
+            log("→ сохранится как приватный черновик")
         body = {
             "snippet": {
                 "title": title,
@@ -226,7 +257,11 @@ def main() -> int:
             response = upload_video(service, video, body)
             video_id = response.get("id") if isinstance(response, dict) else None
             log(f"✓ Загружено: {video.name} → https://youtube.com/watch?v={video_id}" if video_id else f"✓ Загружено: {video.name}")
-            move_to_archive(video, archive_dir)
+            moved = move_to_archive(video, archive_dir)
+            if moved:
+                log(f"Файл перемещён в архив: {moved[0]}")
+                for extra in moved[1:]:
+                    log(f"↳ также перенесено: {extra}")
             uploaded += 1
             time.sleep(1.0)
         except Exception as exc:

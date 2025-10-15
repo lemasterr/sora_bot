@@ -128,6 +128,8 @@ def load_cfg() -> dict:
     youtube.setdefault("schedule_minutes_from_now", 60)
     youtube.setdefault("draft_only", False)
     youtube.setdefault("archive_dir", str(PROJECT_ROOT / "uploaded"))
+    youtube.setdefault("batch_step_minutes", 60)
+    youtube.setdefault("batch_limit", 0)
 
     return data
 
@@ -448,6 +450,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _toggle_youtube_schedule(self):
         enable = self.cb_youtube_schedule.isChecked() and not self.cb_youtube_draft_only.isChecked()
         self.dt_youtube_publish.setEnabled(enable)
+        self.sb_youtube_interval.setEnabled(enable)
+        self._update_youtube_queue_label()
 
     def _sync_draft_checkbox(self):
         self.cb_youtube_draft_only.blockSignals(True)
@@ -488,19 +492,38 @@ class MainWindow(QtWidgets.QMainWindow):
         split = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
         v.addWidget(split, 1)
 
-        # слева — логи
-        self.tabs_left = QtWidgets.QTabWidget()
-        self.page_logs = QtWidgets.QWidget(); gl = QtWidgets.QVBoxLayout(self.page_logs)
-        self.txt_logs = QtWidgets.QPlainTextEdit()
-        self.txt_logs.setReadOnly(True)
-        self.txt_logs.setMaximumBlockCount(3000)  # ограничение роста буфера логов
-        gl.addWidget(self.txt_logs, 1)
-        self.tabs_left.addTab(self.page_logs, "Логи")
-        split.addWidget(self.tabs_left)
+        # слева — информационная панель
+        self.panel_activity = QtWidgets.QWidget()
+        act_layout = QtWidgets.QVBoxLayout(self.panel_activity)
+        act_layout.setContentsMargins(8, 8, 8, 8)
+        act_header = QtWidgets.QHBoxLayout()
+        self.lbl_activity = QtWidgets.QLabel("<b>Текущие события</b>")
+        self.btn_activity_clear = QtWidgets.QPushButton("Очистить")
+        self.btn_activity_clear.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DialogResetButton))
+        act_header.addWidget(self.lbl_activity)
+        act_header.addStretch(1)
+        act_header.addWidget(self.btn_activity_clear)
+        act_layout.addLayout(act_header)
+
+        self.lst_activity = QtWidgets.QListWidget()
+        self.lst_activity.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
+        self.lst_activity.setUniformItemSizes(False)
+        self.lst_activity.setWordWrap(True)
+        self.lst_activity.setAlternatingRowColors(True)
+        act_layout.addWidget(self.lst_activity, 1)
+
+        self.lbl_activity_hint = QtWidgets.QLabel("Здесь отображаются ключевые шаги процессов: скачка, блюр, склейка, загрузка.")
+        self.lbl_activity_hint.setWordWrap(True)
+        self.lbl_activity_hint.setStyleSheet("QLabel{color:#666;font-size:11px;}")
+        act_layout.addWidget(self.lbl_activity_hint)
+
+        split.addWidget(self.panel_activity)
 
         # справа — вкладки
         self.tabs = QtWidgets.QTabWidget()
         split.addWidget(self.tabs)
+        split.setStretchFactor(0, 1)
+        split.setStretchFactor(1, 3)
 
         # TAB: Задачи
         self.tab_tasks = QtWidgets.QWidget(); lt = QtWidgets.QVBoxLayout(self.tab_tasks)
@@ -571,35 +594,6 @@ class MainWindow(QtWidgets.QMainWindow):
         mg.addStretch(1)
         lt.addWidget(grp_merge)
 
-        # --- YouTube загрузка ---
-        grp_yt = QtWidgets.QGroupBox("YouTube")
-        yt_layout = QtWidgets.QFormLayout(grp_yt)
-        self.cmb_youtube_channel = QtWidgets.QComboBox()
-        yt_layout.addRow("Канал:", self.cmb_youtube_channel)
-
-        schedule_box = QtWidgets.QWidget()
-        sb_l = QtWidgets.QHBoxLayout(schedule_box); sb_l.setContentsMargins(0, 0, 0, 0)
-        self.cb_youtube_schedule = QtWidgets.QCheckBox("Планировать публикацию")
-        self.cb_youtube_schedule.setChecked(True)
-        self.dt_youtube_publish = QtWidgets.QDateTimeEdit(QtCore.QDateTime.currentDateTime())
-        self.dt_youtube_publish.setDisplayFormat("yyyy-MM-dd HH:mm")
-        self.dt_youtube_publish.setCalendarPopup(True)
-        sb_l.addWidget(self.cb_youtube_schedule)
-        sb_l.addWidget(self.dt_youtube_publish, 1)
-        yt_layout.addRow(schedule_box)
-
-        self.cb_youtube_draft_only = QtWidgets.QCheckBox("Только загрузить как приватный черновик")
-        yt_layout.addRow(self.cb_youtube_draft_only)
-
-        src_wrap = QtWidgets.QWidget(); src_l = QtWidgets.QHBoxLayout(src_wrap); src_l.setContentsMargins(0, 0, 0, 0)
-        self.ed_youtube_src = QtWidgets.QLineEdit(self.cfg.get("youtube", {}).get("upload_src_dir", self.cfg.get("merged_dir", str(MERG_DIR))))
-        self.btn_youtube_src_browse = QtWidgets.QPushButton("…")
-        src_l.addWidget(self.ed_youtube_src, 1)
-        src_l.addWidget(self.btn_youtube_src_browse)
-        yt_layout.addRow("Источник клипов:", src_wrap)
-
-        lt.addWidget(grp_yt)
-
         # --- Запуск сценария ---
         grp_run = QtWidgets.QGroupBox("Запуск")
         hb2 = QtWidgets.QHBoxLayout(grp_run)
@@ -637,6 +631,122 @@ class MainWindow(QtWidgets.QMainWindow):
 
         lt.addWidget(grp_stat)
         self.tabs.addTab(self.tab_tasks, "Задачи")
+
+        # TAB: YouTube uploader
+        yt_cfg = self.cfg.get("youtube", {}) or {}
+        self.tab_youtube = QtWidgets.QWidget()
+        ty = QtWidgets.QVBoxLayout(self.tab_youtube)
+
+        grp_channels = QtWidgets.QGroupBox("Каналы и доступы")
+        gc_layout = QtWidgets.QHBoxLayout(grp_channels)
+        gc_layout.setSpacing(12)
+
+        self.lst_youtube_channels = QtWidgets.QListWidget()
+        self.lst_youtube_channels.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        gc_layout.addWidget(self.lst_youtube_channels, 1)
+
+        ch_form = QtWidgets.QFormLayout()
+        self.ed_yt_name = QtWidgets.QLineEdit()
+
+        client_wrap = QtWidgets.QWidget(); client_l = QtWidgets.QHBoxLayout(client_wrap); client_l.setContentsMargins(0,0,0,0)
+        self.ed_yt_client = QtWidgets.QLineEdit()
+        self.btn_yt_client_browse = QtWidgets.QPushButton("…")
+        client_l.addWidget(self.ed_yt_client, 1)
+        client_l.addWidget(self.btn_yt_client_browse)
+
+        cred_wrap = QtWidgets.QWidget(); cred_l = QtWidgets.QHBoxLayout(cred_wrap); cred_l.setContentsMargins(0,0,0,0)
+        self.ed_yt_credentials = QtWidgets.QLineEdit()
+        self.btn_yt_credentials_browse = QtWidgets.QPushButton("…")
+        cred_l.addWidget(self.ed_yt_credentials, 1)
+        cred_l.addWidget(self.btn_yt_credentials_browse)
+
+        self.cmb_yt_privacy = QtWidgets.QComboBox(); self.cmb_yt_privacy.addItems(["private", "unlisted", "public"])
+
+        ch_form.addRow("Имя канала:", self.ed_yt_name)
+        ch_form.addRow("client_secret.json:", client_wrap)
+        ch_form.addRow("credentials.json:", cred_wrap)
+        ch_form.addRow("Приватность по умолчанию:", self.cmb_yt_privacy)
+
+        btn_row = QtWidgets.QHBoxLayout()
+        self.btn_yt_add = QtWidgets.QPushButton("Сохранить")
+        self.btn_yt_delete = QtWidgets.QPushButton("Удалить")
+        self.btn_yt_set_active = QtWidgets.QPushButton("Назначить активным")
+        btn_row.addWidget(self.btn_yt_add)
+        btn_row.addWidget(self.btn_yt_delete)
+        btn_row.addWidget(self.btn_yt_set_active)
+        ch_form.addRow(btn_row)
+
+        self.lbl_yt_active = QtWidgets.QLabel("—")
+        ch_form.addRow("Активный канал:", self.lbl_yt_active)
+
+        gc_layout.addLayout(ch_form, 2)
+        ty.addWidget(grp_channels)
+
+        grp_run = QtWidgets.QGroupBox("Публикация и расписание")
+        gr_form = QtWidgets.QGridLayout(grp_run)
+        row = 0
+
+        self.cmb_youtube_channel = QtWidgets.QComboBox()
+        gr_form.addWidget(QtWidgets.QLabel("Канал для загрузки:"), row, 0)
+        gr_form.addWidget(self.cmb_youtube_channel, row, 1, 1, 2)
+        row += 1
+
+        self.cb_youtube_draft_only = QtWidgets.QCheckBox("Создавать приватные черновики")
+        gr_form.addWidget(self.cb_youtube_draft_only, row, 0, 1, 3)
+        row += 1
+
+        self.cb_youtube_schedule = QtWidgets.QCheckBox("Запланировать публикации")
+        self.cb_youtube_schedule.setChecked(True)
+        gr_form.addWidget(self.cb_youtube_schedule, row, 0, 1, 3)
+        row += 1
+
+        self.dt_youtube_publish = QtWidgets.QDateTimeEdit(QtCore.QDateTime.currentDateTime())
+        self.dt_youtube_publish.setDisplayFormat("yyyy-MM-dd HH:mm")
+        self.dt_youtube_publish.setCalendarPopup(True)
+        gr_form.addWidget(QtWidgets.QLabel("Стартовая дата публикации:"), row, 0)
+        gr_form.addWidget(self.dt_youtube_publish, row, 1, 1, 2)
+        row += 1
+
+        self.sb_youtube_interval = QtWidgets.QSpinBox()
+        self.sb_youtube_interval.setRange(0, 7 * 24 * 60)
+        self.sb_youtube_interval.setValue(int(yt_cfg.get("batch_step_minutes", 60)))
+        gr_form.addWidget(QtWidgets.QLabel("Интервал между видео (мин):"), row, 0)
+        gr_form.addWidget(self.sb_youtube_interval, row, 1)
+        row += 1
+
+        self.sb_youtube_batch_limit = QtWidgets.QSpinBox()
+        self.sb_youtube_batch_limit.setRange(0, 999)
+        self.sb_youtube_batch_limit.setSpecialValueText("без ограничений")
+        self.sb_youtube_batch_limit.setValue(int(yt_cfg.get("batch_limit", 0)))
+        gr_form.addWidget(QtWidgets.QLabel("Сколько видео за один запуск:"), row, 0)
+        gr_form.addWidget(self.sb_youtube_batch_limit, row, 1)
+        row += 1
+
+        src_wrap = QtWidgets.QWidget(); src_l = QtWidgets.QHBoxLayout(src_wrap); src_l.setContentsMargins(0,0,0,0)
+        self.ed_youtube_src = QtWidgets.QLineEdit(yt_cfg.get("upload_src_dir", self.cfg.get("merged_dir", str(MERG_DIR))))
+        self.btn_youtube_src_browse = QtWidgets.QPushButton("…")
+        src_l.addWidget(self.ed_youtube_src, 1)
+        src_l.addWidget(self.btn_youtube_src_browse)
+        gr_form.addWidget(QtWidgets.QLabel("Папка с клипами:"), row, 0)
+        gr_form.addWidget(src_wrap, row, 1, 1, 2)
+        row += 1
+
+        self.lbl_youtube_queue = QtWidgets.QLabel("Очередь: —")
+        self.lbl_youtube_queue.setStyleSheet("QLabel{font-weight:600;}")
+        gr_form.addWidget(self.lbl_youtube_queue, row, 0, 1, 3)
+        row += 1
+
+        btn_run_row = QtWidgets.QHBoxLayout()
+        self.btn_youtube_refresh = QtWidgets.QPushButton("Показать очередь")
+        self.btn_youtube_start = QtWidgets.QPushButton("Запустить загрузку")
+        btn_run_row.addWidget(self.btn_youtube_refresh)
+        btn_run_row.addWidget(self.btn_youtube_start)
+        btn_run_row.addStretch(1)
+        gr_form.addLayout(btn_run_row, row, 0, 1, 3)
+
+        ty.addWidget(grp_run)
+        ty.addStretch(1)
+        self.tabs.addTab(self.tab_youtube, "YouTube")
 
         # TAB: Промпты
         self.tab_prompts = QtWidgets.QWidget(); pp = QtWidgets.QVBoxLayout(self.tab_prompts)
@@ -717,52 +827,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         s.addRow(grp_prof)
 
-        # --- YouTube аккаунты ---
-        grp_yt_cfg = QtWidgets.QGroupBox("YouTube аккаунты")
-        vlyt = QtWidgets.QVBoxLayout(grp_yt_cfg)
-
-        yt_top = QtWidgets.QHBoxLayout()
-        self.lst_youtube_channels = QtWidgets.QListWidget()
-        yt_top.addWidget(self.lst_youtube_channels, 1)
-
-        yt_form = QtWidgets.QFormLayout()
-        self.ed_yt_name = QtWidgets.QLineEdit()
-        client_wrap = QtWidgets.QWidget(); client_l = QtWidgets.QHBoxLayout(client_wrap); client_l.setContentsMargins(0,0,0,0)
-        self.ed_yt_client = QtWidgets.QLineEdit()
-        self.btn_yt_client_browse = QtWidgets.QPushButton("…")
-        client_l.addWidget(self.ed_yt_client, 1); client_l.addWidget(self.btn_yt_client_browse)
-
-        cred_wrap = QtWidgets.QWidget(); cred_l = QtWidgets.QHBoxLayout(cred_wrap); cred_l.setContentsMargins(0,0,0,0)
-        self.ed_yt_credentials = QtWidgets.QLineEdit()
-        self.btn_yt_credentials_browse = QtWidgets.QPushButton("…")
-        cred_l.addWidget(self.ed_yt_credentials, 1); cred_l.addWidget(self.btn_yt_credentials_browse)
-
-        self.cmb_yt_privacy = QtWidgets.QComboBox(); self.cmb_yt_privacy.addItems(["private", "unlisted", "public"])
-
-        yt_form.addRow("Имя канала:", self.ed_yt_name)
-        yt_form.addRow("client_secret.json:", client_wrap)
-        yt_form.addRow("credentials.json:", cred_wrap)
-        yt_form.addRow("Приватность по умолчанию:", self.cmb_yt_privacy)
-
-        yt_buttons = QtWidgets.QHBoxLayout()
-        self.btn_yt_add = QtWidgets.QPushButton("Добавить/Обновить")
-        self.btn_yt_delete = QtWidgets.QPushButton("Удалить")
-        self.btn_yt_set_active = QtWidgets.QPushButton("Сделать активным")
-        yt_buttons.addWidget(self.btn_yt_add)
-        yt_buttons.addWidget(self.btn_yt_delete)
-        yt_buttons.addWidget(self.btn_yt_set_active)
-        yt_form.addRow(yt_buttons)
-
-        yt_top.addLayout(yt_form, 2)
-        vlyt.addLayout(yt_top)
-
-        yt_info = QtWidgets.QHBoxLayout()
-        yt_info.addWidget(QtWidgets.QLabel("Активный канал:"))
-        self.lbl_yt_active = QtWidgets.QLabel("—")
-        yt_info.addWidget(self.lbl_yt_active)
-        yt_info.addStretch(1)
-        vlyt.addLayout(yt_info)
-
+        # --- YouTube дефолты ---
         grid_yt = QtWidgets.QGridLayout()
         self.sb_youtube_default_delay = QtWidgets.QSpinBox(); self.sb_youtube_default_delay.setRange(0, 7 * 24 * 60)
         self.sb_youtube_default_delay.setValue(int(yt_cfg.get("schedule_minutes_from_now", 60)))
@@ -781,8 +846,18 @@ class MainWindow(QtWidgets.QMainWindow):
         grid_yt.addWidget(QtWidgets.QLabel("Архив загруженных:"), 2, 0)
         grid_yt.addWidget(archive_wrap, 2, 1)
 
-        vlyt.addLayout(grid_yt)
+        grid_yt.addWidget(QtWidgets.QLabel("Интервал для пакетов (мин):"), 3, 0)
+        self.sb_youtube_interval_default = QtWidgets.QSpinBox(); self.sb_youtube_interval_default.setRange(0, 7 * 24 * 60)
+        self.sb_youtube_interval_default.setValue(int(yt_cfg.get("batch_step_minutes", 60)))
+        grid_yt.addWidget(self.sb_youtube_interval_default, 3, 1)
 
+        grid_yt.addWidget(QtWidgets.QLabel("Ограничение пакета (0 = все):"), 4, 0)
+        self.sb_youtube_limit_default = QtWidgets.QSpinBox(); self.sb_youtube_limit_default.setRange(0, 999)
+        self.sb_youtube_limit_default.setValue(int(yt_cfg.get("batch_limit", 0)))
+        grid_yt.addWidget(self.sb_youtube_limit_default, 4, 1)
+
+        grp_yt_cfg = QtWidgets.QGroupBox("YouTube — значения по умолчанию")
+        grp_yt_cfg.setLayout(grid_yt)
         s.addRow(grp_yt_cfg)
 
         # --- Пути проекта (с кнопками выбора)
@@ -923,6 +998,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_open_blur.clicked.connect(lambda: open_in_finder(self.cfg.get("blurred_dir", BLUR_DIR)))
         self.btn_open_merge.clicked.connect(lambda: open_in_finder(self.cfg.get("merged_dir", MERG_DIR)))
         self.btn_stop_all.clicked.connect(self._stop_all)
+        self.btn_activity_clear.clicked.connect(self._clear_activity)
 
         self.btn_load_prompts.clicked.connect(self._load_prompts)
         self.btn_save_prompts.clicked.connect(self._save_prompts)
@@ -941,7 +1017,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.btn_youtube_src_browse.clicked.connect(lambda: self._browse_dir(self.ed_youtube_src, "Выбери папку с клипами"))
         self.cb_youtube_draft_only.toggled.connect(self._toggle_youtube_schedule)
+        self.cb_youtube_draft_only.toggled.connect(lambda _: self._update_youtube_queue_label())
         self.cb_youtube_schedule.toggled.connect(self._toggle_youtube_schedule)
+        self.cb_youtube_schedule.toggled.connect(lambda _: self._update_youtube_queue_label())
         self.lst_youtube_channels.itemSelectionChanged.connect(self._on_youtube_selected)
         self.btn_yt_add.clicked.connect(self._on_youtube_add_update)
         self.btn_yt_delete.clicked.connect(self._on_youtube_delete)
@@ -951,6 +1029,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_youtube_archive_browse.clicked.connect(lambda: self._browse_dir(self.ed_youtube_archive, "Выбери папку архива"))
         self.cb_youtube_default_draft.toggled.connect(self._sync_draft_checkbox)
         self.sb_youtube_default_delay.valueChanged.connect(self._apply_default_delay)
+        self.sb_youtube_interval_default.valueChanged.connect(lambda val: self.sb_youtube_interval.setValue(int(val)))
+        self.sb_youtube_limit_default.valueChanged.connect(lambda val: self.sb_youtube_batch_limit.setValue(int(val)))
+        self.sb_youtube_interval.valueChanged.connect(lambda _: self._update_youtube_queue_label())
+        self.sb_youtube_batch_limit.valueChanged.connect(lambda _: self._update_youtube_queue_label())
+        self.btn_youtube_refresh.clicked.connect(self._update_youtube_queue_label)
+        self.btn_youtube_start.clicked.connect(self._start_youtube_single)
+        self.ed_youtube_src.textChanged.connect(lambda _: self._update_youtube_queue_label())
 
         # rename
         self.btn_ren_browse.clicked.connect(self._ren_browse)
@@ -1004,17 +1089,40 @@ class MainWindow(QtWidgets.QMainWindow):
         if state == "error": color = "#d74c4c"
         self.pb_global.setStyleSheet(f"QProgressBar::chunk {{ background-color: {color}; }}")
 
+    def _append_activity(self, text: str, kind: str = "info"):
+        if not text:
+            return
+        item = QtWidgets.QListWidgetItem(text)
+        palette = {
+            "info": ("#2c3e50", "#f4f6f8"),
+            "running": ("#8e44ad", "#f7f1ff"),
+            "success": ("#1b9c5d", "#ecf9f1"),
+            "error": ("#c0392b", "#fdecea"),
+        }
+        fg, bg = palette.get(kind, palette["info"])
+        brush_fg = QtGui.QBrush(QtGui.QColor(fg))
+        brush_bg = QtGui.QBrush(QtGui.QColor(bg))
+        item.setForeground(brush_fg)
+        item.setBackground(brush_bg)
+        item.setTextAlignment(int(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter))
+        self.lst_activity.addItem(item)
+        while self.lst_activity.count() > 200:
+            self.lst_activity.takeItem(0)
+        self.lst_activity.scrollToBottom()
+
     @QtCore.pyqtSlot(str)
     def _slot_log(self, text: str):
-        self.txt_logs.appendPlainText(text.rstrip("\n"))
-        self.txt_logs.verticalScrollBar().setValue(self.txt_logs.verticalScrollBar().maximum())
+        clean = text.rstrip("\n")
+        if not clean:
+            return
+
         # прогресс по скачиванию
-        if "Найдено карточек:" in text or "Собрано ссылок:" in text:
-            m = re.search(r"(Найдено карточек|Собрано ссылок):\s*(\d+)", text)
+        if "Найдено карточек:" in clean or "Собрано ссылок:" in clean:
+            m = re.search(r"(Найдено карточек|Собрано ссылок):\s*(\d+)", clean)
             if m:
                 total = int(m.group(2))
                 self._post_status("Скачивание запущено…", progress=0, total=total, state="running")
-        if "Скачано:" in text:
+        if "Скачано:" in clean:
             fmt = self.pb_global.format()
             try:
                 done, total = map(int, fmt.split("/"))
@@ -1024,20 +1132,46 @@ class MainWindow(QtWidgets.QMainWindow):
             self._post_status("Скачивание…", progress=done, total=total, state="running")
 
         # лёгкие нотификации по маркерам
-        if text.strip() == "[NOTIFY] AUTOGEN_START":
-            self._notify("Autogen", "Началась вставка промптов")
-        if text.strip() == "[NOTIFY] AUTOGEN_FINISH_OK":
-            self._notify("Autogen", "Вставка промптов — успешно")
-        if text.strip() == "[NOTIFY] AUTOGEN_FINISH_PARTIAL":
-            self._notify("Autogen", "Вставка промптов — частично (были отказы)")
-        if text.strip() == "[NOTIFY] DOWNLOAD_START":
-            self._notify("Downloader", "Началась автоскачка")
-        if text.strip() == "[NOTIFY] DOWNLOAD_FINISH":
-            self._notify("Downloader", "Автоскачка завершена")
+        markers = {
+            "[NOTIFY] AUTOGEN_START": ("Autogen", "Началась вставка промптов"),
+            "[NOTIFY] AUTOGEN_FINISH_OK": ("Autogen", "Вставка промптов — успешно"),
+            "[NOTIFY] AUTOGEN_FINISH_PARTIAL": ("Autogen", "Вставка промптов — частично (были отказы)"),
+            "[NOTIFY] DOWNLOAD_START": ("Downloader", "Началась автоскачка"),
+            "[NOTIFY] DOWNLOAD_FINISH": ("Downloader", "Автоскачка завершена"),
+        }
+        notif = markers.get(clean.strip())
+        if notif:
+            self._notify(*notif)
+            return
+
+        # форматируем строку для панели событий
+        label_match = re.match(r"^\[(?P<tag>[^\]]+)\]\s*(?P<body>.*)$", clean)
+        if label_match:
+            tag = label_match.group("tag").replace(":", " · ")
+            body = label_match.group("body")
+            clean = f"{tag}: {body}" if body else tag
+
+        normalized = clean.strip()
+        kind = "info"
+        lowered = normalized.lower()
+        if any(token in lowered for token in ["ошиб", "fail", "error", "не найден", "прервана"]):
+            kind = "error"
+        elif any(token in normalized for token in ["✓", "успеш", "готово", "завершено", "ok"]):
+            kind = "success"
+        elif any(token in lowered for token in ["запуск", "старт", "загружа", "обрабаты", "выполня"]):
+            kind = "running"
+
+        timestamp = time.strftime("%H:%M:%S")
+        pretty = f"[{timestamp}] {normalized}"
+        self._append_activity(pretty, kind=kind)
 
     # helper для статуса
     def _post_status(self, text: str, progress: int = 0, total: int = 0, state: str = "idle"):
         self.sig_set_status.emit(text, progress, total, state)
+
+    def _clear_activity(self):
+        self.lst_activity.clear()
+        self._post_status("Лента событий очищена", state="idle")
 
     # ----- обработчик завершения подпроцессов -----
     @QtCore.pyqtSlot(int, str)
@@ -1060,6 +1194,7 @@ class MainWindow(QtWidgets.QMainWindow):
             append_history(self.cfg, {"event": "youtube_finish", "rc": rc})
             if rc == 0:
                 send_tg(self.cfg, "YOUTUBE: ok")
+            self.ui(self._update_youtube_queue_label)
         self._refresh_stats()
 
     # ----- Chrome (через тень профиля) -----
@@ -1552,6 +1687,8 @@ class MainWindow(QtWidgets.QMainWindow):
         env["YOUTUBE_SRC_DIR"] = str(src_dir)
         env["YOUTUBE_DRAFT_ONLY"] = "1" if self.cb_youtube_draft_only.isChecked() else "0"
         env["YOUTUBE_ARCHIVE_DIR"] = yt_cfg.get("archive_dir", str(PROJECT_ROOT / "uploaded"))
+        env["YOUTUBE_BATCH_LIMIT"] = str(int(self.sb_youtube_batch_limit.value()))
+        env["YOUTUBE_BATCH_STEP_MINUTES"] = str(int(self.sb_youtube_interval.value()))
         if publish_at:
             env["YOUTUBE_PUBLISH_AT"] = publish_at
 
@@ -1568,6 +1705,9 @@ class MainWindow(QtWidgets.QMainWindow):
         done.wait()
         self.runner_upload.finished.disconnect(on_finish)
         return rc_holder["rc"] == 0
+
+    def _start_youtube_single(self):
+        threading.Thread(target=self._run_upload_sync, daemon=True).start()
 
 
     # ----- ПЕРЕИМЕНОВАНИЕ -----
@@ -1751,9 +1891,12 @@ class MainWindow(QtWidgets.QMainWindow):
         yt_cfg["schedule_minutes_from_now"] = int(self.sb_youtube_default_delay.value())
         yt_cfg["draft_only"] = bool(self.cb_youtube_default_draft.isChecked())
         yt_cfg["archive_dir"] = self.ed_youtube_archive.text().strip() or yt_cfg.get("archive_dir", str(PROJECT_ROOT / "uploaded"))
+        yt_cfg["batch_step_minutes"] = int(self.sb_youtube_interval_default.value())
+        yt_cfg["batch_limit"] = int(self.sb_youtube_limit_default.value())
 
         save_cfg(self.cfg)
         ensure_dirs(self.cfg)
+        self._refresh_youtube_ui()
         if not silent:
             self._post_status("Настройки сохранены", state="ok")
 
@@ -1960,12 +2103,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sb_youtube_default_delay.setValue(minutes)
         self.dt_youtube_publish.setDateTime(QtCore.QDateTime.currentDateTime().addSecs(minutes * 60))
 
-        self.cb_youtube_default_draft.setChecked(bool(yt.get("draft_only", False)))
+        draft_default = bool(yt.get("draft_only", False))
+        self.cb_youtube_default_draft.setChecked(draft_default)
+        self.cb_youtube_draft_only.setChecked(draft_default)
         self._sync_draft_checkbox()
         self.cb_youtube_schedule.blockSignals(True)
-        self.cb_youtube_schedule.setChecked(not self.cb_youtube_default_draft.isChecked())
+        self.cb_youtube_schedule.setChecked(not draft_default)
         self.cb_youtube_schedule.blockSignals(False)
         self._toggle_youtube_schedule()
+
+        step = int(yt.get("batch_step_minutes", 60) or 0)
+        limit = int(yt.get("batch_limit", 0) or 0)
+        self.sb_youtube_interval_default.setValue(step)
+        self.sb_youtube_limit_default.setValue(limit)
+        self.sb_youtube_interval.setValue(step)
+        self.sb_youtube_batch_limit.setValue(limit)
 
         if idx >= 0:
             self._on_youtube_selected()
@@ -1974,6 +2126,32 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ed_yt_client.clear()
             self.ed_yt_credentials.clear()
             self.cmb_yt_privacy.setCurrentText("private")
+
+        self._update_youtube_queue_label()
+
+    def _update_youtube_queue_label(self):
+        src_text = self.ed_youtube_src.text().strip() or self.cfg.get("youtube", {}).get("upload_src_dir", "")
+        src = Path(src_text)
+        if not src.exists():
+            self.lbl_youtube_queue.setText("Очередь: папка не найдена")
+            return
+
+        videos = self._iter_videos(src)
+        count = len(videos)
+        limit = int(self.sb_youtube_batch_limit.value())
+        effective = min(count, limit) if limit > 0 else count
+        interval = int(self.sb_youtube_interval.value())
+
+        if count == 0:
+            self.lbl_youtube_queue.setText("Очередь: нет видео в папке")
+            return
+
+        parts = [f"найдено {count}"]
+        if limit > 0:
+            parts.append(f"будет загружено {effective}")
+        if not self.cb_youtube_draft_only.isChecked() and self.cb_youtube_schedule.isChecked() and interval > 0 and effective > 1:
+            parts.append(f"шаг {interval} мин")
+        self.lbl_youtube_queue.setText("Очередь: " + ", ".join(parts))
 
     def _on_youtube_selected(self):
         items = self.lst_youtube_channels.selectedItems()
