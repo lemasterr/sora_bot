@@ -2115,7 +2115,14 @@ class MainWindow(QtWidgets.QMainWindow):
         ff = self.cfg.get("ffmpeg", {})
         ffbin = self.ed_ff_bin.text().strip() or "ffmpeg"
         post = self.ed_post.text().strip()
-        vcodec = self.cmb_vcodec.currentText().strip()
+        vcodec_choice = self.cmb_vcodec.currentText().strip()
+        if vcodec_choice == "copy":
+            self.sig_log.emit("[BLUR] vcodec=copy несовместим с delogo — переключаю на libx264")
+            self.cmb_vcodec.blockSignals(True)
+            self.cmb_vcodec.setCurrentText("libx264")
+            self.cmb_vcodec.blockSignals(False)
+            self._mark_settings_dirty()
+            vcodec_choice = "libx264"
         crf = str(self.ed_crf.value())
         preset = self.cmb_preset.currentText()
         fmt = self.cmb_format.currentText()
@@ -2153,55 +2160,61 @@ class MainWindow(QtWidgets.QMainWindow):
             delogos = ",".join([f"delogo=x={z['x']}:y={z['y']}:w={z['w']}:h={z['h']}:show=0" for z in zones])
             vf = delogos + (f",{post}" if post else "") + ",format=yuv420p"
 
-            # Нельзя -c:v copy при фильтрах. Пробуем HW (mac) -> SW.
-            def _cmd_hw():
-                c = [ffbin, "-hide_banner", "-loglevel", "verbose", "-y"]
-                if sys.platform == "darwin":
-                    c += ["-hwaccel", "videotoolbox"]
-                c += ["-i", str(v), "-vf", vf, "-map", "0:v", "-map", "0:a?"]
-                if sys.platform == "darwin":
-                    c += ["-c:v", "h264_videotoolbox", "-b:v", "0", "-crf", crf]
+            def _build_cmd(use_hw: bool, audio_copy: bool) -> List[str]:
+                cmd = [ffbin, "-hide_banner", "-loglevel", "info", "-y"]
+                if use_hw and sys.platform == "darwin":
+                    cmd += ["-hwaccel", "videotoolbox"]
+                cmd += ["-i", str(v), "-vf", vf, "-map", "0:v", "-map", "0:a?"]
+                if use_hw and sys.platform == "darwin":
+                    cmd += ["-c:v", "h264_videotoolbox", "-b:v", "0", "-crf", crf]
                 else:
-                    c += ["-c:v", "libx264", "-crf", crf, "-preset", preset]
-                if copy_audio:
-                    c += ["-c:a", "copy"]
+                    codec = "libx264" if vcodec_choice in {"auto_hw", "libx264"} else vcodec_choice
+                    cmd += ["-c:v", codec, "-crf", crf, "-preset", preset]
+                if audio_copy:
+                    cmd += ["-c:a", "copy"]
                 else:
-                    c += ["-c:a", "aac", "-b:a", "192k"]
+                    cmd += ["-c:a", "aac", "-b:a", "192k"]
                 if fmt.lower() == "mp4":
-                    c += ["-movflags", "+faststart"]
-                c += [str(out)]
-                return c
+                    cmd += ["-movflags", "+faststart"]
+                cmd += [str(out)]
+                return cmd
 
-            def _cmd_sw():
-                c = [ffbin, "-hide_banner", "-loglevel", "verbose", "-y",
-                     "-i", str(v), "-vf", vf, "-map", "0:v", "-map", "0:a?",
-                     "-c:v", "libx264", "-crf", crf, "-preset", preset]
+            def _register_attempt(label: str, use_hw: bool, audio_copy: bool, bucket: List[Tuple[str, bool, bool]]):
+                for _, hw_flag, copy_flag in bucket:
+                    if hw_flag == use_hw and copy_flag == audio_copy:
+                        return
+                bucket.append((label, use_hw, audio_copy))
+
+            attempts: List[Tuple[str, bool, bool]] = []
+            use_hw_pref = (vcodec_choice == "auto_hw" and sys.platform == "darwin")
+            if use_hw_pref:
+                _register_attempt("HW", True, copy_audio, attempts)
                 if copy_audio:
-                    c += ["-c:a", "copy"]
-                else:
-                    c += ["-c:a", "aac", "-b:a", "192k"]
-                if fmt.lower() == "mp4":
-                    c += ["-movflags", "+faststart"]
-                c += [str(out)]
-                return c
-
-            tried = []
-            if vcodec == "auto_hw" and sys.platform == "darwin":
-                cmd = _cmd_hw(); tried.append("HW")
-                rc = _run_ffmpeg(cmd, log_prefix=f"BLUR:{v.name}")
-                if rc != 0:
-                    self.sig_log.emit(f"[BLUR] HW кодек не сработал для {v.name}, пробуем libx264…")
-                    cmd = _cmd_sw(); tried.append("SW")
-                    rc = _run_ffmpeg(cmd, log_prefix=f"BLUR:{v.name}")
+                    _register_attempt("HW+aac", True, False, attempts)
+                _register_attempt("SW", False, copy_audio, attempts)
+                _register_attempt("SW+aac", False, False, attempts)
             else:
-                cmd = _cmd_sw(); tried.append("SW")
-                rc = _run_ffmpeg(cmd, log_prefix=f"BLUR:{v.name}")
+                _register_attempt("SW", False, copy_audio, attempts)
+                if copy_audio:
+                    _register_attempt("SW+aac", False, False, attempts)
 
+            tried_labels: List[str] = []
+            rc = 1
+            final_audio_copy = copy_audio
+            for label, use_hw, audio_copy_flag in attempts:
+                tried_labels.append(label)
+                rc = _run_ffmpeg(_build_cmd(use_hw, audio_copy_flag), log_prefix=f"BLUR:{v.name}")
+                if rc == 0:
+                    final_audio_copy = audio_copy_flag
+                    break
             ok = (rc == 0)
             with lock:
                 counter["done"] += 1
                 self._post_status("Блюр…", progress=counter["done"], total=total, state="running")
-                self.sig_log.emit(f"[BLUR] {'OK' if ok else 'FAIL'} ({'→'.join(tried)}): {v.name}")
+                detail = "→".join(tried_labels) if tried_labels else ""
+                self.sig_log.emit(f"[BLUR] {'OK' if ok else 'FAIL'} ({detail}): {v.name}")
+                if ok and copy_audio and not final_audio_copy:
+                    self.sig_log.emit(f"[BLUR] {v.name}: аудио сконвертировано в AAC для совместимости")
             return ok
 
         with ThreadPoolExecutor(max_workers=max(1, threads)) as ex:
