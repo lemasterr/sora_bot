@@ -20,6 +20,7 @@ youtube:
   schedule_minutes_from_now: 60
   draft_only: false
   archive_dir: ./uploaded
+  last_publish_at: ''
 ffmpeg:
   binary: ffmpeg
   post_chain: boxblur=1:1,noise=alls=2:allf=t,unsharp=3:3:0.5:3:3:0.0
@@ -79,3 +80,7 @@ chrome:
   user_data_dir: ''
 blur_src_dir: ./downloads
 merge_src_dir: ./blurred
+telegram:
+  enabled: false
+  bot_token: ''
+  chat_id: ''
