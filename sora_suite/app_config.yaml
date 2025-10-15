@@ -1,7 +1,7 @@
 project_root: .
 downloads_dir: ./downloads
 blurred_dir: ./blurred
-merged_dir: /Users/lemaster/Documents/sora_app/sora_suite_complete/merged
+merged_dir: ./merged
 history_file: ./history.jsonl
 titles_file: ./titles.txt
 autogen:
@@ -11,6 +11,15 @@ autogen:
 downloader:
   workdir: ./workers/downloader
   entry: download_all.py
+youtube:
+  workdir: ./workers/uploader
+  entry: upload_queue.py
+  channels: []
+  active_channel: ''
+  upload_src_dir: ./merged
+  schedule_minutes_from_now: 60
+  draft_only: false
+  archive_dir: ./uploaded
 ffmpeg:
   binary: ffmpeg
   post_chain: boxblur=1:1,noise=alls=2:allf=t,unsharp=3:3:0.5:3:3:0.0
@@ -55,21 +64,18 @@ merge:
   pattern: '*.mp4'
 chrome:
   cdp_port: 9222
-  binary: /Applications/Google Chrome.app/Contents/MacOS/Google Chrome
+  binary: ''
   profiles:
-  - name: Default
-    user_data_dir: /Users/lemaster/Library/Application Support/Google/Chrome
+  - name: Default (Windows)
+    user_data_dir: "%LOCALAPPDATA%/Google/Chrome/User Data"
     profile_directory: Default
-  - name: Profile 1
-    user_data_dir: /Users/lemaster/Library/Application Support/Google/Chrome
-    profile_directory: Profile 1
-  - name: Profile 2
-    user_data_dir: /Users/lemaster/Library/Application Support/Google/Chrome
-    profile_directory: Profile 2
-  - name: Profile 4
-    user_data_dir: /Users/lemaster/Library/Application Support/Google/Chrome
-    profile_directory: Profile 4
-  active_profile: Profile 4
+  - name: Default (macOS)
+    user_data_dir: "~/Library/Application Support/Google/Chrome"
+    profile_directory: Default
+  - name: Default (Linux)
+    user_data_dir: "~/.config/google-chrome"
+    profile_directory: Default
+  active_profile: ''
   user_data_dir: ''
 blur_src_dir: ./downloads
 merge_src_dir: ./blurred

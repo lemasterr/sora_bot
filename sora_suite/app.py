@@ -93,7 +93,17 @@ def load_cfg() -> dict:
     # --- chrome + профили ---
     ch = data.setdefault("chrome", {})
     ch.setdefault("cdp_port", 9222)
-    ch.setdefault("binary", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+    if sys.platform == "darwin":
+        default_chrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+    elif sys.platform.startswith("win"):
+        default_chrome = r"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+    else:
+        default_chrome = "google-chrome"
+    ch.setdefault("binary", default_chrome)
+    if not ch.get("binary"):
+        ch["binary"] = default_chrome
+    else:
+        ch["binary"] = os.path.expandvars(ch["binary"])  # поддержка Windows %LOCALAPPDATA%
     ch.setdefault("profiles", [])
     ch.setdefault("active_profile", "")
 
@@ -109,6 +119,16 @@ def load_cfg() -> dict:
         }]
         ch["active_profile"] = "Imported"
 
+    youtube = data.setdefault("youtube", {})
+    youtube.setdefault("workdir", str(WORKERS_DIR / "uploader"))
+    youtube.setdefault("entry", "upload_queue.py")
+    youtube.setdefault("channels", [])
+    youtube.setdefault("active_channel", "")
+    youtube.setdefault("upload_src_dir", data.get("merged_dir", str(MERG_DIR)))
+    youtube.setdefault("schedule_minutes_from_now", 60)
+    youtube.setdefault("draft_only", False)
+    youtube.setdefault("archive_dir", str(PROJECT_ROOT / "uploaded"))
+
     return data
 
 
@@ -119,7 +139,16 @@ def save_cfg(cfg: dict):
 
 def ensure_dirs(cfg: dict):
     for key in ["downloads_dir", "blurred_dir", "merged_dir"]:
-        Path(cfg.get(key, "")).mkdir(parents=True, exist_ok=True)
+        raw = cfg.get(key, "") or ""
+        path = Path(os.path.expandvars(raw)).expanduser()
+        path.mkdir(parents=True, exist_ok=True)
+        cfg[key] = str(path)
+    yt = cfg.get("youtube", {}) or {}
+    archive = yt.get("archive_dir")
+    if archive:
+        archive_path = Path(os.path.expandvars(archive)).expanduser()
+        archive_path.mkdir(parents=True, exist_ok=True)
+        yt["archive_dir"] = str(archive_path)
 
 
 def port_in_use(port: int) -> bool:
@@ -234,7 +263,9 @@ def _prepare_shadow_profile(active_profile: dict, shadow_base: Path) -> Path:
     Готовит корень теневого профиля (user-data-dir), в нём лежит папка профиля
     с таким же именем (например, 'Profile 1' или 'Default').
     """
-    root = Path(active_profile.get("user_data_dir", ""))
+    raw_root = active_profile.get("user_data_dir", "") or ""
+    root = Path(os.path.expandvars(raw_root)).expanduser()
+    active_profile["user_data_dir"] = str(root)
     prof_dir = active_profile.get("profile_directory", "Default")
     if not root or not (root / prof_dir).is_dir():
         raise RuntimeError("Неверно задан profile root/profile_directory")
@@ -374,6 +405,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_stats()
         self._reload_history()
         self._refresh_profiles_ui()
+        self._refresh_youtube_ui()
         self._load_autogen_cfg_ui()
 
         # дать раннеру ffmpeg доступ к self для логов
@@ -400,6 +432,32 @@ class MainWindow(QtWidgets.QMainWindow):
             sel = dlg.selectedFiles()
             if sel:
                 line.setText(sel[0])
+
+    def _browse_file(self, line: QtWidgets.QLineEdit, title: str, filter_str: str = "Все файлы (*.*)"):
+        base = line.text().strip()
+        dlg = QtWidgets.QFileDialog(self, title)
+        dlg.setFileMode(QtWidgets.QFileDialog.FileMode.ExistingFile)
+        dlg.setNameFilter(filter_str)
+        if base and os.path.isfile(base):
+            dlg.selectFile(base)
+        if dlg.exec():
+            sel = dlg.selectedFiles()
+            if sel:
+                line.setText(sel[0])
+
+    def _toggle_youtube_schedule(self):
+        enable = self.cb_youtube_schedule.isChecked() and not self.cb_youtube_draft_only.isChecked()
+        self.dt_youtube_publish.setEnabled(enable)
+
+    def _sync_draft_checkbox(self):
+        self.cb_youtube_draft_only.blockSignals(True)
+        self.cb_youtube_draft_only.setChecked(self.cb_youtube_default_draft.isChecked())
+        self.cb_youtube_draft_only.blockSignals(False)
+        self._toggle_youtube_schedule()
+
+    def _apply_default_delay(self):
+        minutes = int(self.sb_youtube_default_delay.value())
+        self.dt_youtube_publish.setDateTime(QtCore.QDateTime.currentDateTime().addSecs(minutes * 60))
 
     # ----- UI -----
     def _build_ui(self):
@@ -453,8 +511,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cb_do_download = QtWidgets.QCheckBox("Авто-скачка видео")
         self.cb_do_blur = QtWidgets.QCheckBox("Блюр водяного знака (ffmpeg, пресеты 9:16 / 16:9)")
         self.cb_do_merge = QtWidgets.QCheckBox("Склейка группами N")
+        self.cb_do_upload = QtWidgets.QCheckBox("Загрузка на YouTube (отложенный постинг)")
         f.addRow(self.cb_do_autogen); f.addRow(self.cb_do_download)
         f.addRow(self.cb_do_blur); f.addRow(self.cb_do_merge)
+        f.addRow(self.cb_do_upload)
         lt.addWidget(grp_choose)
 
         # --- Скачка: лимит N ---
@@ -511,6 +571,35 @@ class MainWindow(QtWidgets.QMainWindow):
         mg.addStretch(1)
         lt.addWidget(grp_merge)
 
+        # --- YouTube загрузка ---
+        grp_yt = QtWidgets.QGroupBox("YouTube")
+        yt_layout = QtWidgets.QFormLayout(grp_yt)
+        self.cmb_youtube_channel = QtWidgets.QComboBox()
+        yt_layout.addRow("Канал:", self.cmb_youtube_channel)
+
+        schedule_box = QtWidgets.QWidget()
+        sb_l = QtWidgets.QHBoxLayout(schedule_box); sb_l.setContentsMargins(0, 0, 0, 0)
+        self.cb_youtube_schedule = QtWidgets.QCheckBox("Планировать публикацию")
+        self.cb_youtube_schedule.setChecked(True)
+        self.dt_youtube_publish = QtWidgets.QDateTimeEdit(QtCore.QDateTime.currentDateTime())
+        self.dt_youtube_publish.setDisplayFormat("yyyy-MM-dd HH:mm")
+        self.dt_youtube_publish.setCalendarPopup(True)
+        sb_l.addWidget(self.cb_youtube_schedule)
+        sb_l.addWidget(self.dt_youtube_publish, 1)
+        yt_layout.addRow(schedule_box)
+
+        self.cb_youtube_draft_only = QtWidgets.QCheckBox("Только загрузить как приватный черновик")
+        yt_layout.addRow(self.cb_youtube_draft_only)
+
+        src_wrap = QtWidgets.QWidget(); src_l = QtWidgets.QHBoxLayout(src_wrap); src_l.setContentsMargins(0, 0, 0, 0)
+        self.ed_youtube_src = QtWidgets.QLineEdit(self.cfg.get("youtube", {}).get("upload_src_dir", self.cfg.get("merged_dir", str(MERG_DIR))))
+        self.btn_youtube_src_browse = QtWidgets.QPushButton("…")
+        src_l.addWidget(self.ed_youtube_src, 1)
+        src_l.addWidget(self.btn_youtube_src_browse)
+        yt_layout.addRow("Источник клипов:", src_wrap)
+
+        lt.addWidget(grp_yt)
+
         # --- Запуск сценария ---
         grp_run = QtWidgets.QGroupBox("Запуск")
         hb2 = QtWidgets.QHBoxLayout(grp_run)
@@ -532,15 +621,18 @@ class MainWindow(QtWidgets.QMainWindow):
         grid_stat.addWidget(QtWidgets.QLabel("<b>RAW</b>"), 0, 0)
         grid_stat.addWidget(QtWidgets.QLabel("<b>BLURRED</b>"), 0, 1)
         grid_stat.addWidget(QtWidgets.QLabel("<b>MERGED</b>"), 0, 2)
+        grid_stat.addWidget(QtWidgets.QLabel("<b>UPLOAD</b>"), 0, 3)
         self.lbl_stat_raw = QtWidgets.QLabel("0")
         self.lbl_stat_blur = QtWidgets.QLabel("0")
         self.lbl_stat_merge = QtWidgets.QLabel("0")
-        for w in (self.lbl_stat_raw, self.lbl_stat_blur, self.lbl_stat_merge):
+        self.lbl_stat_upload = QtWidgets.QLabel("0")
+        for w in (self.lbl_stat_raw, self.lbl_stat_blur, self.lbl_stat_merge, self.lbl_stat_upload):
             w.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
             w.setStyleSheet("QLabel{font: 700 16px 'Menlo'; padding:4px; border:1px solid #ddd; background:#fafafa;}")
         grid_stat.addWidget(self.lbl_stat_raw, 1, 0)
         grid_stat.addWidget(self.lbl_stat_blur, 1, 1)
         grid_stat.addWidget(self.lbl_stat_merge, 1, 2)
+        grid_stat.addWidget(self.lbl_stat_upload, 1, 3)
         vb.addLayout(grid_stat)
 
         lt.addWidget(grp_stat)
@@ -579,6 +671,7 @@ class MainWindow(QtWidgets.QMainWindow):
         s = QtWidgets.QFormLayout(settings_body)
 
         ch = self.cfg.get("chrome", {})
+        yt_cfg = self.cfg.get("youtube", {})
         self.ed_cdp_port = QtWidgets.QLineEdit(str(ch.get("cdp_port", 9222)))
         self.ed_userdir = QtWidgets.QLineEdit(ch.get("user_data_dir", ""))
         self.ed_chrome_bin = QtWidgets.QLineEdit(ch.get("binary", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"))
@@ -623,6 +716,74 @@ class MainWindow(QtWidgets.QMainWindow):
         vlp.addLayout(hl)
 
         s.addRow(grp_prof)
+
+        # --- YouTube аккаунты ---
+        grp_yt_cfg = QtWidgets.QGroupBox("YouTube аккаунты")
+        vlyt = QtWidgets.QVBoxLayout(grp_yt_cfg)
+
+        yt_top = QtWidgets.QHBoxLayout()
+        self.lst_youtube_channels = QtWidgets.QListWidget()
+        yt_top.addWidget(self.lst_youtube_channels, 1)
+
+        yt_form = QtWidgets.QFormLayout()
+        self.ed_yt_name = QtWidgets.QLineEdit()
+        client_wrap = QtWidgets.QWidget(); client_l = QtWidgets.QHBoxLayout(client_wrap); client_l.setContentsMargins(0,0,0,0)
+        self.ed_yt_client = QtWidgets.QLineEdit()
+        self.btn_yt_client_browse = QtWidgets.QPushButton("…")
+        client_l.addWidget(self.ed_yt_client, 1); client_l.addWidget(self.btn_yt_client_browse)
+
+        cred_wrap = QtWidgets.QWidget(); cred_l = QtWidgets.QHBoxLayout(cred_wrap); cred_l.setContentsMargins(0,0,0,0)
+        self.ed_yt_credentials = QtWidgets.QLineEdit()
+        self.btn_yt_credentials_browse = QtWidgets.QPushButton("…")
+        cred_l.addWidget(self.ed_yt_credentials, 1); cred_l.addWidget(self.btn_yt_credentials_browse)
+
+        self.cmb_yt_privacy = QtWidgets.QComboBox(); self.cmb_yt_privacy.addItems(["private", "unlisted", "public"])
+
+        yt_form.addRow("Имя канала:", self.ed_yt_name)
+        yt_form.addRow("client_secret.json:", client_wrap)
+        yt_form.addRow("credentials.json:", cred_wrap)
+        yt_form.addRow("Приватность по умолчанию:", self.cmb_yt_privacy)
+
+        yt_buttons = QtWidgets.QHBoxLayout()
+        self.btn_yt_add = QtWidgets.QPushButton("Добавить/Обновить")
+        self.btn_yt_delete = QtWidgets.QPushButton("Удалить")
+        self.btn_yt_set_active = QtWidgets.QPushButton("Сделать активным")
+        yt_buttons.addWidget(self.btn_yt_add)
+        yt_buttons.addWidget(self.btn_yt_delete)
+        yt_buttons.addWidget(self.btn_yt_set_active)
+        yt_form.addRow(yt_buttons)
+
+        yt_top.addLayout(yt_form, 2)
+        vlyt.addLayout(yt_top)
+
+        yt_info = QtWidgets.QHBoxLayout()
+        yt_info.addWidget(QtWidgets.QLabel("Активный канал:"))
+        self.lbl_yt_active = QtWidgets.QLabel("—")
+        yt_info.addWidget(self.lbl_yt_active)
+        yt_info.addStretch(1)
+        vlyt.addLayout(yt_info)
+
+        grid_yt = QtWidgets.QGridLayout()
+        self.sb_youtube_default_delay = QtWidgets.QSpinBox(); self.sb_youtube_default_delay.setRange(0, 7 * 24 * 60)
+        self.sb_youtube_default_delay.setValue(int(yt_cfg.get("schedule_minutes_from_now", 60)))
+        grid_yt.addWidget(QtWidgets.QLabel("Отложить по умолчанию (мин):"), 0, 0)
+        grid_yt.addWidget(self.sb_youtube_default_delay, 0, 1)
+
+        self.cb_youtube_default_draft = QtWidgets.QCheckBox("По умолчанию только приватный черновик")
+        self.cb_youtube_default_draft.setChecked(bool(yt_cfg.get("draft_only", False)))
+        grid_yt.addWidget(self.cb_youtube_default_draft, 1, 0, 1, 2)
+
+        archive_wrap = QtWidgets.QWidget(); archive_l = QtWidgets.QHBoxLayout(archive_wrap); archive_l.setContentsMargins(0,0,0,0)
+        self.ed_youtube_archive = QtWidgets.QLineEdit(yt_cfg.get("archive_dir", str(PROJECT_ROOT / "uploaded")))
+        self.btn_youtube_archive_browse = QtWidgets.QPushButton("…")
+        archive_l.addWidget(self.ed_youtube_archive, 1)
+        archive_l.addWidget(self.btn_youtube_archive_browse)
+        grid_yt.addWidget(QtWidgets.QLabel("Архив загруженных:"), 2, 0)
+        grid_yt.addWidget(archive_wrap, 2, 1)
+
+        vlyt.addLayout(grid_yt)
+
+        s.addRow(grp_yt_cfg)
 
         # --- Пути проекта (с кнопками выбора)
         row_paths = QtWidgets.QGridLayout()
@@ -714,6 +875,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tabs.addTab(self.tab_history, "История")
 
         self._load_zones_into_ui()
+        self._toggle_youtube_schedule()
 
     def _make_zone_edits(self, grid: QtWidgets.QGridLayout):
         edits = []
@@ -777,6 +939,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_save_settings.clicked.connect(self._save_settings_clicked)
         self.btn_save_autogen_cfg.clicked.connect(self._save_autogen_cfg)
 
+        self.btn_youtube_src_browse.clicked.connect(lambda: self._browse_dir(self.ed_youtube_src, "Выбери папку с клипами"))
+        self.cb_youtube_draft_only.toggled.connect(self._toggle_youtube_schedule)
+        self.cb_youtube_schedule.toggled.connect(self._toggle_youtube_schedule)
+        self.lst_youtube_channels.itemSelectionChanged.connect(self._on_youtube_selected)
+        self.btn_yt_add.clicked.connect(self._on_youtube_add_update)
+        self.btn_yt_delete.clicked.connect(self._on_youtube_delete)
+        self.btn_yt_set_active.clicked.connect(self._on_youtube_set_active)
+        self.btn_yt_client_browse.clicked.connect(lambda: self._browse_file(self.ed_yt_client, "client_secret.json", "JSON (*.json);;Все файлы (*.*)"))
+        self.btn_yt_credentials_browse.clicked.connect(lambda: self._browse_file(self.ed_yt_credentials, "credentials.json", "JSON (*.json);;Все файлы (*.*)"))
+        self.btn_youtube_archive_browse.clicked.connect(lambda: self._browse_dir(self.ed_youtube_archive, "Выбери папку архива"))
+        self.cb_youtube_default_draft.toggled.connect(self._sync_draft_checkbox)
+        self.sb_youtube_default_delay.valueChanged.connect(self._apply_default_delay)
+
         # rename
         self.btn_ren_browse.clicked.connect(self._ren_browse)
         self.btn_ren_run.clicked.connect(self._ren_run)
@@ -802,12 +977,16 @@ class MainWindow(QtWidgets.QMainWindow):
     def _init_state(self):
         self.runner_autogen = ProcRunner("AUTOGEN")
         self.runner_dl = ProcRunner("DL")
+        self.runner_upload = ProcRunner("YT")
         self.runner_autogen.line.connect(self._slot_log)
         self.runner_dl.line.connect(self._slot_log)
+        self.runner_upload.line.connect(self._slot_log)
         self.runner_autogen.finished.connect(self._proc_done)
         self.runner_dl.finished.connect(self._proc_done)
+        self.runner_upload.finished.connect(self._proc_done)
         self.runner_autogen.notify.connect(self._notify)
         self.runner_dl.notify.connect(self._notify)
+        self.runner_upload.notify.connect(self._notify)
         self._post_status("Готово", state="idle")
 
     # ----- безопасные слоты GUI-потока -----
@@ -875,6 +1054,12 @@ class MainWindow(QtWidgets.QMainWindow):
             append_history(self.cfg, {"event": "download_finish", "rc": rc})
             if rc == 0:
                 send_tg(self.cfg, "DOWNLOAD: ok")
+        elif tag == "YT":
+            msg = "YouTube загрузка завершена" + (" ✓" if rc == 0 else " ✗")
+            self._post_status(msg, state=("ok" if rc == 0 else "error"))
+            append_history(self.cfg, {"event": "youtube_finish", "rc": rc})
+            if rc == 0:
+                send_tg(self.cfg, "YOUTUBE: ok")
         self._refresh_stats()
 
     # ----- Chrome (через тень профиля) -----
@@ -885,10 +1070,16 @@ class MainWindow(QtWidgets.QMainWindow):
             port = 9222
 
         ch = self.cfg.get("chrome", {})
-        chrome_bin = ch.get("binary", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+        if sys.platform == "darwin":
+            default_chrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+        elif sys.platform.startswith("win"):
+            default_chrome = r"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+        else:
+            default_chrome = "google-chrome"
+        chrome_bin = os.path.expandvars(ch.get("binary") or default_chrome)
         profiles = ch.get("profiles", [])
         active_name = ch.get("active_profile", "")
-        fallback_userdir = ch.get("user_data_dir", "")
+        fallback_userdir = os.path.expandvars(ch.get("user_data_dir", "") or "")
 
         # уже поднят CDP?
         if port_in_use(port) and cdp_ready(port):
@@ -1033,6 +1224,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.cb_do_download.isChecked(): steps.append("download")
         if self.cb_do_blur.isChecked(): steps.append("blur")
         if self.cb_do_merge.isChecked(): steps.append("merge")
+        if self.cb_do_upload.isChecked(): steps.append("upload")
         if not steps:
             self._post_status("Ничего не выбрано", state="error"); return
 
@@ -1058,6 +1250,11 @@ class MainWindow(QtWidgets.QMainWindow):
                     return
             if "merge" in steps:
                 ok = self._run_merge_sync(); ok_all = ok_all and ok
+                if not ok:
+                    self._post_status("Склейка завершена с ошибкой", state="error")
+                    return
+            if "upload" in steps:
+                ok = self._run_upload_sync(); ok_all = ok_all and ok
             self._post_status("Сценарий завершён", state=("ok" if ok_all else "error"))
             append_history(self.cfg, {"event":"scenario_finish","ok":ok_all})
             self._refresh_stats()
@@ -1314,6 +1511,65 @@ class MainWindow(QtWidgets.QMainWindow):
         return ok_all
 
 
+    # ----- YOUTUBE UPLOAD -----
+    def _run_upload_sync(self) -> bool:
+        self._save_settings_clicked(silent=True)
+
+        yt_cfg = self.cfg.get("youtube", {}) or {}
+        channel = self.cmb_youtube_channel.currentText().strip()
+        if not channel:
+            self._post_status("Не выбран YouTube канал", state="error")
+            return False
+
+        channels_available = [c.get("name") for c in (yt_cfg.get("channels") or []) if c.get("name")]
+        if channel not in channels_available:
+            self._post_status("Выбери YouTube канал в Настройках", state="error")
+            return False
+
+        src_dir = Path(self.ed_youtube_src.text().strip() or yt_cfg.get("upload_src_dir", self.cfg.get("merged_dir", str(MERG_DIR))))
+        if not src_dir.exists():
+            self._post_status(f"Папка для загрузки не найдена: {src_dir}", state="error")
+            return False
+
+        videos = [*src_dir.glob("*.mp4"), *src_dir.glob("*.mov"), *src_dir.glob("*.m4v"), *src_dir.glob("*.webm")]
+        if not videos:
+            self._post_status("Нет файлов для загрузки", state="error")
+            return False
+
+        publish_at = ""
+        if self.cb_youtube_schedule.isChecked() and not self.cb_youtube_draft_only.isChecked():
+            publish_at = self.dt_youtube_publish.dateTime().toString(QtCore.Qt.DateFormat.ISODate)
+
+        workdir = yt_cfg.get("workdir", str(WORKERS_DIR / "uploader"))
+        entry = yt_cfg.get("entry", "upload_queue.py")
+        python = sys.executable
+        cmd = [python, entry]
+
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
+        env["APP_CONFIG_PATH"] = str(CFG_PATH)
+        env["YOUTUBE_CHANNEL_NAME"] = channel
+        env["YOUTUBE_SRC_DIR"] = str(src_dir)
+        env["YOUTUBE_DRAFT_ONLY"] = "1" if self.cb_youtube_draft_only.isChecked() else "0"
+        env["YOUTUBE_ARCHIVE_DIR"] = yt_cfg.get("archive_dir", str(PROJECT_ROOT / "uploaded"))
+        if publish_at:
+            env["YOUTUBE_PUBLISH_AT"] = publish_at
+
+        done = threading.Event(); rc_holder = {"rc": 1}
+
+        def on_finish(rc, tag):
+            if tag == "YT":
+                rc_holder["rc"] = rc
+                done.set()
+
+        self.runner_upload.finished.connect(on_finish)
+        self.runner_upload.run(cmd, cwd=workdir, env=env)
+        self._post_status("Загрузка на YouTube…", state="running")
+        done.wait()
+        self.runner_upload.finished.disconnect(on_finish)
+        return rc_holder["rc"] == 0
+
+
     # ----- ПЕРЕИМЕНОВАНИЕ -----
     def _ren_browse(self):
         base = self.ed_ren_dir.text().strip() or self.cfg.get("downloads_dir", str(DL_DIR))
@@ -1405,6 +1661,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _stop_all(self):
         self.runner_autogen.stop()
         self.runner_dl.stop()
+        self.runner_upload.stop()
         # стоп ffmpeg / любые активные
         with self._procs_lock:
             procs = list(self._active_procs)
@@ -1489,6 +1746,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.cfg.setdefault("merge", {})["group_size"] = int(self.sb_merge_group.value())
 
+        yt_cfg = self.cfg.setdefault("youtube", {})
+        yt_cfg["upload_src_dir"] = self.ed_youtube_src.text().strip() or self.cfg.get("merged_dir", str(MERG_DIR))
+        yt_cfg["schedule_minutes_from_now"] = int(self.sb_youtube_default_delay.value())
+        yt_cfg["draft_only"] = bool(self.cb_youtube_default_draft.isChecked())
+        yt_cfg["archive_dir"] = self.ed_youtube_archive.text().strip() or yt_cfg.get("archive_dir", str(PROJECT_ROOT / "uploaded"))
+
         save_cfg(self.cfg)
         ensure_dirs(self.cfg)
         if not silent:
@@ -1535,12 +1798,14 @@ class MainWindow(QtWidgets.QMainWindow):
             raw  = _count_vids(Path(self.cfg.get("downloads_dir", str(DL_DIR))))
             blur = _count_vids(Path(self.cfg.get("blurred_dir", str(BLUR_DIR))))
             merg = _count_vids(Path(self.cfg.get("merged_dir", str(MERG_DIR))))
-            self.sig_log.emit(f"[STAT] RAW={raw} BLURRED={blur} MERGED={merg}")
+            upload_src = _count_vids(Path(self.cfg.get("youtube", {}).get("upload_src_dir", self.cfg.get("merged_dir", str(MERG_DIR)))))
+            self.sig_log.emit(f"[STAT] RAW={raw} BLURRED={blur} MERGED={merg} YT={upload_src}")
 
             # обновляем визуальные счетчики
             self.lbl_stat_raw.setText(str(raw))
             self.lbl_stat_blur.setText(str(blur))
             self.lbl_stat_merge.setText(str(merg))
+            self.lbl_stat_upload.setText(str(upload_src))
         except Exception as e:
             self.sig_log.emit(f"[STAT] ошибка: {e}")
 
@@ -1647,6 +1912,148 @@ class MainWindow(QtWidgets.QMainWindow):
         save_cfg(self.cfg)
         self._refresh_profiles_ui()
         self._post_status(f"Найдено профилей: {len(found)}", state="ok")
+
+
+# ----- YouTube: UI/логика -----
+    def _refresh_youtube_ui(self):
+        yt = self.cfg.get("youtube", {}) or {}
+        channels = [c for c in (yt.get("channels") or []) if isinstance(c, dict)]
+        active = yt.get("active_channel", "") or ""
+
+        self.lst_youtube_channels.blockSignals(True)
+        self.lst_youtube_channels.clear()
+        for ch in channels:
+            name = ch.get("name", "")
+            if name:
+                self.lst_youtube_channels.addItem(name)
+        self.lst_youtube_channels.blockSignals(False)
+
+        channel_names = [c.get("name", "") for c in channels if c.get("name")]
+        self.cmb_youtube_channel.blockSignals(True)
+        self.cmb_youtube_channel.clear()
+        for name in channel_names:
+            self.cmb_youtube_channel.addItem(name)
+        self.cmb_youtube_channel.setEnabled(bool(channel_names))
+        self.cmb_youtube_channel.blockSignals(False)
+
+        idx = -1
+        if active and active in channel_names:
+            idx = channel_names.index(active)
+        elif channel_names:
+            idx = 0
+            active = channel_names[0]
+
+        if idx >= 0:
+            self.lst_youtube_channels.setCurrentRow(idx)
+            self.cmb_youtube_channel.setCurrentIndex(idx)
+            self.lbl_yt_active.setText(active)
+        else:
+            self.lst_youtube_channels.clearSelection()
+            self.cmb_youtube_channel.setCurrentIndex(-1)
+            self.lbl_yt_active.setText("—")
+
+        upload_src = yt.get("upload_src_dir", self.cfg.get("merged_dir", str(MERG_DIR)))
+        self.ed_youtube_src.setText(upload_src)
+        self.ed_youtube_archive.setText(yt.get("archive_dir", str(PROJECT_ROOT / "uploaded")))
+
+        minutes = int(yt.get("schedule_minutes_from_now", 60) or 0)
+        self.sb_youtube_default_delay.setValue(minutes)
+        self.dt_youtube_publish.setDateTime(QtCore.QDateTime.currentDateTime().addSecs(minutes * 60))
+
+        self.cb_youtube_default_draft.setChecked(bool(yt.get("draft_only", False)))
+        self._sync_draft_checkbox()
+        self.cb_youtube_schedule.blockSignals(True)
+        self.cb_youtube_schedule.setChecked(not self.cb_youtube_default_draft.isChecked())
+        self.cb_youtube_schedule.blockSignals(False)
+        self._toggle_youtube_schedule()
+
+        if idx >= 0:
+            self._on_youtube_selected()
+        else:
+            self.ed_yt_name.clear()
+            self.ed_yt_client.clear()
+            self.ed_yt_credentials.clear()
+            self.cmb_yt_privacy.setCurrentText("private")
+
+    def _on_youtube_selected(self):
+        items = self.lst_youtube_channels.selectedItems()
+        if not items:
+            self.ed_yt_name.clear()
+            self.ed_yt_client.clear()
+            self.ed_yt_credentials.clear()
+            self.cmb_yt_privacy.setCurrentText("private")
+            return
+        name = items[0].text()
+        channels = self.cfg.get("youtube", {}).get("channels", []) or []
+        for ch in channels:
+            if ch.get("name") == name:
+                self.ed_yt_name.setText(ch.get("name", ""))
+                self.ed_yt_client.setText(ch.get("client_secret", ""))
+                self.ed_yt_credentials.setText(ch.get("credentials", ""))
+                self.cmb_yt_privacy.setCurrentText(ch.get("default_privacy", "private"))
+                break
+        self.cmb_youtube_channel.blockSignals(True)
+        idx = self.cmb_youtube_channel.findText(name)
+        if idx >= 0:
+            self.cmb_youtube_channel.setCurrentIndex(idx)
+        self.cmb_youtube_channel.blockSignals(False)
+
+    def _on_youtube_add_update(self):
+        name = self.ed_yt_name.text().strip()
+        client = self.ed_yt_client.text().strip()
+        creds = self.ed_yt_credentials.text().strip()
+        privacy = self.cmb_yt_privacy.currentText().strip() or "private"
+        if not name or not client:
+            self._post_status("Укажи имя канала и client_secret.json", state="error")
+            return
+
+        yt = self.cfg.setdefault("youtube", {})
+        channels = yt.setdefault("channels", [])
+        for ch in channels:
+            if ch.get("name") == name:
+                ch.update({
+                    "name": name,
+                    "client_secret": client,
+                    "credentials": creds,
+                    "default_privacy": privacy,
+                })
+                break
+        else:
+            channels.append({
+                "name": name,
+                "client_secret": client,
+                "credentials": creds,
+                "default_privacy": privacy,
+            })
+
+        save_cfg(self.cfg)
+        self._refresh_youtube_ui()
+        self._post_status(f"YouTube канал «{name}» сохранён", state="ok")
+
+    def _on_youtube_delete(self):
+        items = self.lst_youtube_channels.selectedItems()
+        if not items:
+            return
+        name = items[0].text()
+        yt = self.cfg.setdefault("youtube", {})
+        channels = yt.setdefault("channels", [])
+        yt["channels"] = [c for c in channels if c.get("name") != name]
+        if yt.get("active_channel") == name:
+            yt["active_channel"] = ""
+        save_cfg(self.cfg)
+        self._refresh_youtube_ui()
+        self._post_status(f"YouTube канал «{name}» удалён", state="ok")
+
+    def _on_youtube_set_active(self):
+        items = self.lst_youtube_channels.selectedItems()
+        if not items:
+            return
+        name = items[0].text()
+        yt = self.cfg.setdefault("youtube", {})
+        yt["active_channel"] = name
+        save_cfg(self.cfg)
+        self._refresh_youtube_ui()
+        self._post_status(f"Активный YouTube канал: {name}", state="ok")
 
 
 # ---------- main ----------
