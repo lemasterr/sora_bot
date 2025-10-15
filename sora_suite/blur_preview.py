@@ -8,8 +8,36 @@ from pathlib import Path
 from typing import List, Dict
 
 from PyQt6 import QtCore, QtGui, QtWidgets
-from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
-from PyQt6.QtMultimediaWidgets import QGraphicsVideoItem
+
+try:  # pragma: no cover - импорт зависит от окружения
+    from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
+    from PyQt6.QtMultimediaWidgets import QGraphicsVideoItem
+except Exception:  # noqa: BLE001 - важно поймать любые сбои загрузки бэкенда
+    QMediaPlayer = None  # type: ignore[assignment]
+    QAudioOutput = None  # type: ignore[assignment]
+    QGraphicsVideoItem = None  # type: ignore[assignment]
+
+
+def _detect_multimedia_backend() -> bool:
+    """Возвращает True, если QtMultimedia видит видеобэкенды."""
+
+    if QMediaPlayer is None:  # импорт не удался
+        return False
+
+    try:
+        supported = QMediaPlayer.supportedMimeTypes()
+    except Exception:  # pragma: no cover - защитный сценарий
+        return False
+
+    return any(mt.startswith("video/") for mt in supported)
+
+
+HAS_MULTIMEDIA_BACKEND = _detect_multimedia_backend()
+
+MULTIMEDIA_BACKEND_TIP = (
+    "Установи системные плагины QtMultimedia (например, пакеты PyQt6-Qt6 и PyQt6-Qt6-Data) "
+    "или собери приложение с комплектом медиасервисов Qt, чтобы работал предпросмотр видео."
+)
 
 
 class BlurPreviewDialog(QtWidgets.QDialog):
@@ -21,57 +49,81 @@ class BlurPreviewDialog(QtWidgets.QDialog):
         self.resize(960, 720)
 
         self._zones: List[Dict[str, int]] = [dict(z) for z in zones] if zones else []
-        self._scene = QtWidgets.QGraphicsScene(self)
-        self._video_item = QGraphicsVideoItem()
-        self._scene.addItem(self._video_item)
         self._overlay_items: List[QtWidgets.QGraphicsRectItem] = []
-
-        self._player = QMediaPlayer(self)
-        self._audio = QAudioOutput(self)
-        self._player.setAudioOutput(self._audio)
-        self._player.setVideoOutput(self._video_item)
-
-        self._video_item.nativeSizeChanged.connect(self._update_overlay_geometry)
-        self._player.positionChanged.connect(self._sync_position)
-        self._player.durationChanged.connect(self._sync_duration)
+        self._video_sources: List[Path] = []
+        self._video_enabled = HAS_MULTIMEDIA_BACKEND and QMediaPlayer is not None and QGraphicsVideoItem is not None
 
         layout = QtWidgets.QVBoxLayout(self)
 
-        picker_layout = QtWidgets.QHBoxLayout()
-        picker_layout.addWidget(QtWidgets.QLabel("Видео:"))
-        self.cmb_video = QtWidgets.QComboBox()
-        self.cmb_video.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
-        self._video_sources = self._collect_videos(source_dirs)
-        for path in self._video_sources:
-            self.cmb_video.addItem(path.name, str(path))
-        picker_layout.addWidget(self.cmb_video, 1)
-        self.btn_browse_video = QtWidgets.QPushButton("Выбрать файл…")
-        picker_layout.addWidget(self.btn_browse_video)
-        self.btn_reload_list = QtWidgets.QPushButton("Обновить")
-        picker_layout.addWidget(self.btn_reload_list)
-        layout.addLayout(picker_layout)
+        if self._video_enabled:
+            self._scene = QtWidgets.QGraphicsScene(self)
+            self._video_item = QGraphicsVideoItem()
+            self._scene.addItem(self._video_item)
 
-        view_container = QtWidgets.QFrame()
-        view_container.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
-        view_layout = QtWidgets.QVBoxLayout(view_container)
-        view_layout.setContentsMargins(0, 0, 0, 0)
-        self.view = QtWidgets.QGraphicsView(self._scene)
-        self.view.setRenderHints(QtGui.QPainter.RenderHint.Antialiasing | QtGui.QPainter.RenderHint.SmoothPixmapTransform)
-        self.view.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        view_layout.addWidget(self.view)
-        layout.addWidget(view_container, 1)
+            self._player = QMediaPlayer(self)
+            self._audio = QAudioOutput(self)
+            self._player.setAudioOutput(self._audio)
+            self._player.setVideoOutput(self._video_item)
 
-        controls = QtWidgets.QHBoxLayout()
-        self.btn_play = QtWidgets.QPushButton("▶")
-        self.btn_pause = QtWidgets.QPushButton("⏸")
-        self.slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
-        self.slider.setRange(0, 0)
-        self.lbl_time = QtWidgets.QLabel("00:00 / 00:00")
-        controls.addWidget(self.btn_play)
-        controls.addWidget(self.btn_pause)
-        controls.addWidget(self.slider, 1)
-        controls.addWidget(self.lbl_time)
-        layout.addLayout(controls)
+            self._video_item.nativeSizeChanged.connect(self._update_overlay_geometry)
+            self._player.positionChanged.connect(self._sync_position)
+            self._player.durationChanged.connect(self._sync_duration)
+
+            picker_layout = QtWidgets.QHBoxLayout()
+            picker_layout.addWidget(QtWidgets.QLabel("Видео:"))
+            self.cmb_video = QtWidgets.QComboBox()
+            self.cmb_video.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
+            self._video_sources = self._collect_videos(source_dirs)
+            for path in self._video_sources:
+                self.cmb_video.addItem(path.name, str(path))
+            picker_layout.addWidget(self.cmb_video, 1)
+            self.btn_browse_video = QtWidgets.QPushButton("Выбрать файл…")
+            picker_layout.addWidget(self.btn_browse_video)
+            self.btn_reload_list = QtWidgets.QPushButton("Обновить")
+            picker_layout.addWidget(self.btn_reload_list)
+            layout.addLayout(picker_layout)
+
+            view_container = QtWidgets.QFrame()
+            view_container.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
+            view_layout = QtWidgets.QVBoxLayout(view_container)
+            view_layout.setContentsMargins(0, 0, 0, 0)
+            self.view = QtWidgets.QGraphicsView(self._scene)
+            self.view.setRenderHints(
+                QtGui.QPainter.RenderHint.Antialiasing | QtGui.QPainter.RenderHint.SmoothPixmapTransform
+            )
+            self.view.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            view_layout.addWidget(self.view)
+            layout.addWidget(view_container, 1)
+
+            controls = QtWidgets.QHBoxLayout()
+            self.btn_play = QtWidgets.QPushButton("▶")
+            self.btn_pause = QtWidgets.QPushButton("⏸")
+            self.slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
+            self.slider.setRange(0, 0)
+            self.lbl_time = QtWidgets.QLabel("00:00 / 00:00")
+            controls.addWidget(self.btn_play)
+            controls.addWidget(self.btn_pause)
+            controls.addWidget(self.slider, 1)
+            controls.addWidget(self.lbl_time)
+            layout.addLayout(controls)
+
+        else:
+            self._scene = None
+            self._video_item = None
+            self._player = None
+            self._audio = None
+
+            info_box = QtWidgets.QGroupBox("Видеопросмотр недоступен")
+            info_layout = QtWidgets.QVBoxLayout(info_box)
+            label = QtWidgets.QLabel(
+                "QtMultimedia не смог загрузить видео-бэкенд. Предпросмотр отключён, "
+                "но координаты можно отредактировать вручную.\n\n"
+                f"{MULTIMEDIA_BACKEND_TIP}"
+            )
+            label.setWordWrap(True)
+            label.setStyleSheet("color:#cbd5f5")
+            info_layout.addWidget(label)
+            layout.addWidget(info_box)
 
         zones_box = QtWidgets.QGroupBox("Зоны delogo")
         zones_layout = QtWidgets.QVBoxLayout(zones_box)
@@ -90,7 +142,10 @@ class BlurPreviewDialog(QtWidgets.QDialog):
         layout.addWidget(zones_box)
 
         footer = QtWidgets.QHBoxLayout()
-        self.lbl_hint = QtWidgets.QLabel("Выбери видео и настрой координаты. Кнопка ОК сохранит изменения.")
+        hint = "Выбери видео и настрой координаты. Кнопка ОК сохранит изменения." if self._video_enabled else (
+            "Видеопросмотр отключён, но координаты из таблицы сохранятся после нажатия ОК."
+        )
+        self.lbl_hint = QtWidgets.QLabel(hint)
         self.lbl_hint.setStyleSheet("color:#94a3b8")
         footer.addWidget(self.lbl_hint, 1)
         self.btn_ok = QtWidgets.QPushButton("Сохранить")
@@ -99,20 +154,22 @@ class BlurPreviewDialog(QtWidgets.QDialog):
         footer.addWidget(self.btn_cancel)
         layout.addLayout(footer)
 
-        self.btn_play.clicked.connect(self._player.play)
-        self.btn_pause.clicked.connect(self._player.pause)
-        self.slider.sliderMoved.connect(self._player.setPosition)
         self.btn_zone_add.clicked.connect(self._add_zone)
         self.btn_zone_remove.clicked.connect(self._remove_zone)
         self.btn_ok.clicked.connect(self.accept)
         self.btn_cancel.clicked.connect(self.reject)
         self.tbl_zones.itemChanged.connect(self._on_zone_item_changed)
-        self.cmb_video.currentIndexChanged.connect(self._on_video_selected)
-        self.btn_browse_video.clicked.connect(self._browse_video)
-        self.btn_reload_list.clicked.connect(lambda: self._reload_sources(source_dirs))
+
+        if self._video_enabled:
+            self.btn_play.clicked.connect(self._player.play)
+            self.btn_pause.clicked.connect(self._player.pause)
+            self.slider.sliderMoved.connect(self._player.setPosition)
+            self.cmb_video.currentIndexChanged.connect(self._on_video_selected)
+            self.btn_browse_video.clicked.connect(self._browse_video)
+            self.btn_reload_list.clicked.connect(lambda: self._reload_sources(source_dirs))
 
         self._populate_zone_table()
-        if self._video_sources:
+        if self._video_enabled and self._video_sources:
             self._on_video_selected(0)
 
     def _collect_videos(self, dirs: List[Path]) -> List[Path]:
@@ -142,6 +199,8 @@ class BlurPreviewDialog(QtWidgets.QDialog):
             self._on_video_selected(0)
 
     def _on_video_selected(self, index: int):
+        if not self._video_enabled:
+            return
         path = Path(self.cmb_video.itemData(index) or "")
         if path and path.exists():
             self._player.pause()
@@ -152,6 +211,8 @@ class BlurPreviewDialog(QtWidgets.QDialog):
             self.lbl_hint.setText("Выбери видео для предпросмотра")
 
     def _browse_video(self):
+        if not self._video_enabled:
+            return
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Выбери видео", "", "Видео (*.mp4 *.mov *.m4v *.webm)")
         if path:
             if self.cmb_video.findData(path) == -1:
@@ -159,6 +220,8 @@ class BlurPreviewDialog(QtWidgets.QDialog):
             self.cmb_video.setCurrentIndex(self.cmb_video.findData(path))
 
     def _sync_position(self, pos: int):
+        if not self._video_enabled:
+            return
         self.slider.blockSignals(True)
         self.slider.setValue(pos)
         self.slider.blockSignals(False)
@@ -166,6 +229,8 @@ class BlurPreviewDialog(QtWidgets.QDialog):
         self.lbl_time.setText(f"{self._fmt_ms(pos)} / {self._fmt_ms(total)}")
 
     def _sync_duration(self, duration: int):
+        if not self._video_enabled:
+            return
         self.slider.setRange(0, duration)
         self.lbl_time.setText(f"00:00 / {self._fmt_ms(duration)}")
 
@@ -229,6 +294,8 @@ class BlurPreviewDialog(QtWidgets.QDialog):
         self.lbl_hint.setText("Изменения не сохранены — нажми «Сохранить», чтобы применить их.")
 
     def _update_overlay_items(self):
+        if not self._video_enabled or not self._scene:
+            return
         while len(self._overlay_items) < len(self._zones):
             rect = QtWidgets.QGraphicsRectItem()
             rect.setPen(QtGui.QPen(QtGui.QColor("#4c6ef5"), 3))
@@ -242,6 +309,8 @@ class BlurPreviewDialog(QtWidgets.QDialog):
         self._update_overlay_geometry()
 
     def _update_overlay_geometry(self):
+        if not self._video_enabled or not self._video_item:
+            return
         size = self._video_item.nativeSize()
         if not size or size.width() == 0 or size.height() == 0:
             return

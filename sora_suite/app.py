@@ -25,7 +25,6 @@ from typing import Optional, List, Union, Tuple, Dict
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 
-from blur_preview import BlurPreviewDialog
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
 
@@ -2309,6 +2308,29 @@ class MainWindow(QtWidgets.QMainWindow):
         if not preset:
             self._post_status("Нет выбранного пресета", state="error")
             return
+
+        try:
+            from blur_preview import (
+                BlurPreviewDialog,
+                HAS_MULTIMEDIA_BACKEND,
+                MULTIMEDIA_BACKEND_TIP,
+            )
+        except Exception as exc:  # pragma: no cover - защитное сообщение для UI
+            self._post_status(f"Предпросмотр недоступен: {exc}", state="error")
+            return
+
+        if not HAS_MULTIMEDIA_BACKEND:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Предпросмотр недоступен",
+                (
+                    "Модуль QtMultimedia не нашёл видеодрайверы. "
+                    "Предпросмотр временно отключён.\n\n"
+                    f"{MULTIMEDIA_BACKEND_TIP}"
+                ),
+            )
+            return
+
         zones = self._preset_cache.get(preset, [])
         dirs = [
             Path(self.cfg.get("downloads_dir", str(DL_DIR))),
