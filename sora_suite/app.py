@@ -152,6 +152,10 @@ def load_cfg() -> dict:
     retention.setdefault("blurred", 14)
     retention.setdefault("merged", 30)
 
+    ui = data.setdefault("ui", {})
+    ui.setdefault("show_activity", True)
+    ui.setdefault("accent_kind", "info")
+
     return data
 
 
@@ -160,27 +164,79 @@ def save_cfg(cfg: dict):
         yaml.safe_dump(cfg, f, allow_unicode=True, sort_keys=False)
 
 
+def _normalize_path(raw: Union[str, Path]) -> Path:
+    return Path(os.path.expandvars(str(raw or ""))).expanduser()
+
+
+def _same_path(a: Union[str, Path], b: Union[str, Path]) -> bool:
+    try:
+        pa = _normalize_path(a)
+        pb = _normalize_path(b)
+        return pa == pb
+    except Exception:
+        return str(a or "").strip() == str(b or "").strip()
+
+
+def _human_size(num_bytes: int) -> str:
+    step = 1024.0
+    units = ["B", "KB", "MB", "GB", "TB"]
+    size = float(max(num_bytes, 0))
+    for unit in units:
+        if size < step:
+            return f"{size:.1f} {unit}"
+        size /= step
+    return f"{size:.1f} PB"
+
+
+def _dir_size(path: Path) -> int:
+    total = 0
+    try:
+        for root, dirs, files in os.walk(path):
+            for name in files:
+                try:
+                    total += (Path(root) / name).stat().st_size
+                except Exception:
+                    continue
+    except Exception:
+        return total
+    return total
+
+
 def ensure_dirs(cfg: dict):
     raw_root = cfg.get("project_root", "") or ""
-    root_path = Path(os.path.expandvars(raw_root)).expanduser()
+    root_path = _normalize_path(raw_root)
     root_path.mkdir(parents=True, exist_ok=True)
     cfg["project_root"] = str(root_path)
 
     for key in ["downloads_dir", "blurred_dir", "merged_dir"]:
         raw = cfg.get(key, "") or ""
-        path = Path(os.path.expandvars(raw)).expanduser()
+        path = _normalize_path(raw)
         path.mkdir(parents=True, exist_ok=True)
         cfg[key] = str(path)
+
+    # источники для пост-обработки — если пусто или каталог не существует, подтягиваем из основных
+    blur_src = cfg.get("blur_src_dir") or cfg.get("downloads_dir")
+    merge_src = cfg.get("merge_src_dir") or cfg.get("blurred_dir")
+    blur_path = _normalize_path(blur_src)
+    merge_path = _normalize_path(merge_src)
+    if not blur_path.exists():
+        blur_path = _normalize_path(cfg.get("downloads_dir"))
+    if not merge_path.exists():
+        merge_path = _normalize_path(cfg.get("blurred_dir"))
+    blur_path.mkdir(parents=True, exist_ok=True)
+    merge_path.mkdir(parents=True, exist_ok=True)
+    cfg["blur_src_dir"] = str(blur_path)
+    cfg["merge_src_dir"] = str(merge_path)
     yt = cfg.get("youtube", {}) or {}
     archive = yt.get("archive_dir")
     if archive:
-        archive_path = Path(os.path.expandvars(archive)).expanduser()
+        archive_path = _normalize_path(archive)
         archive_path.mkdir(parents=True, exist_ok=True)
         yt["archive_dir"] = str(archive_path)
 
     upload_src = yt.get("upload_src_dir")
     if upload_src:
-        src_path = Path(os.path.expandvars(upload_src)).expanduser()
+        src_path = _normalize_path(upload_src)
         src_path.mkdir(parents=True, exist_ok=True)
         yt["upload_src_dir"] = str(src_path)
 
@@ -658,12 +714,34 @@ class MainWindow(QtWidgets.QMainWindow):
         self.panel_activity = QtWidgets.QWidget()
         act_layout = QtWidgets.QVBoxLayout(self.panel_activity)
         act_layout.setContentsMargins(8, 8, 8, 8)
+
+        self.current_event_card = QtWidgets.QFrame()
+        self.current_event_card.setObjectName("currentEventCard")
+        self.current_event_card.setStyleSheet(
+            "QFrame#currentEventCard{background:#162132;border:1px solid #27364d;border-radius:14px;padding:0;}"
+            "QLabel#currentEventTitle{color:#9fb7ff;font-size:11px;letter-spacing:1px;text-transform:uppercase;}"
+            "QLabel#currentEventBody{color:#f8fafc;font-size:15px;font-weight:600;}")
+        card_layout = QtWidgets.QVBoxLayout(self.current_event_card)
+        card_layout.setContentsMargins(14, 12, 14, 12)
+        self.lbl_current_event_title = QtWidgets.QLabel("Сейчас")
+        self.lbl_current_event_title.setObjectName("currentEventTitle")
+        self.lbl_current_event_body = QtWidgets.QLabel("—")
+        self.lbl_current_event_body.setObjectName("currentEventBody")
+        self.lbl_current_event_body.setWordWrap(True)
+        card_layout.addWidget(self.lbl_current_event_title)
+        card_layout.addWidget(self.lbl_current_event_body)
+        act_layout.addWidget(self.current_event_card, 0)
+
         act_header = QtWidgets.QHBoxLayout()
-        self.lbl_activity = QtWidgets.QLabel("<b>Текущие события</b>")
+        self.lbl_activity = QtWidgets.QLabel("<b>История событий</b>")
+        self.chk_activity_visible = QtWidgets.QCheckBox("Показывать")
+        self.chk_activity_visible.setChecked(bool(self.cfg.get("ui", {}).get("show_activity", True)))
+        self.chk_activity_visible.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
         self.btn_activity_clear = QtWidgets.QPushButton("Очистить")
         self.btn_activity_clear.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DialogResetButton))
         act_header.addWidget(self.lbl_activity)
         act_header.addStretch(1)
+        act_header.addWidget(self.chk_activity_visible)
         act_header.addWidget(self.btn_activity_clear)
         act_layout.addLayout(act_header)
 
@@ -674,12 +752,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lst_activity.setAlternatingRowColors(False)
         self.lst_activity.setSpacing(2)
         self.lst_activity.setStyleSheet(
-            "QListWidget{background:#131b2b;border:1px solid #2b364d;border-radius:10px;padding:6px;}"
-            "QListWidget::item{margin:2px;padding:6px 8px;border-radius:6px;background:#1a2332;}"
+            "QListWidget{background:#101827;border:1px solid #23324b;border-radius:10px;padding:6px;}"
+            "QListWidget::item{margin:2px;padding:6px 8px;border-radius:6px;background:#172235;}"
         )
         act_layout.addWidget(self.lst_activity, 1)
 
-        self.lbl_activity_hint = QtWidgets.QLabel("Здесь отображаются ключевые шаги процессов: скачка, блюр, склейка, загрузка.")
+        self.lbl_activity_hint = QtWidgets.QLabel("Здесь можно посмотреть детальный лог процессов: скачка, блюр, склейка, загрузка.")
         self.lbl_activity_hint.setWordWrap(True)
         self.lbl_activity_hint.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
         act_layout.addWidget(self.lbl_activity_hint)
@@ -691,6 +769,10 @@ class MainWindow(QtWidgets.QMainWindow):
         split.addWidget(self.tabs)
         split.setStretchFactor(0, 1)
         split.setStretchFactor(1, 3)
+
+        # применяем настройки отображения после создания виджетов
+        self._update_current_event("—", self.cfg.get("ui", {}).get("accent_kind", "info"), persist=False)
+        self._apply_activity_visibility(self.chk_activity_visible.isChecked(), persist=False)
 
         # TAB: Задачи
         self.tab_tasks = QtWidgets.QWidget()
@@ -1058,7 +1140,35 @@ class MainWindow(QtWidgets.QMainWindow):
         grid_paths.addWidget(self.ed_merge_src, row, 1)
         grid_paths.addWidget(self.btn_browse_merge_src, row, 2)
 
+        self._blur_src_autofollow = _same_path(self.cfg.get("blur_src_dir"), self.cfg.get("downloads_dir"))
+        self._merge_src_autofollow = _same_path(self.cfg.get("merge_src_dir"), self.cfg.get("blurred_dir"))
+        self._upload_src_autofollow = _same_path(yt_cfg.get("upload_src_dir"), self.cfg.get("merged_dir"))
+
+        self.ed_downloads.textEdited.connect(self._on_downloads_path_edited)
+        self.ed_blur_src.textEdited.connect(self._on_blur_src_edited)
+        self.ed_blurred.textEdited.connect(self._on_blurred_path_edited)
+        self.ed_merge_src.textEdited.connect(self._on_merge_src_edited)
+        self.ed_merged.textEdited.connect(self._on_merged_path_edited)
+        self.ed_youtube_src.textEdited.connect(self._on_youtube_src_edited)
+
         self.settings_tabs.addTab(page_paths, "Каталоги")
+
+        # --- Интерфейс ---
+        page_ui = QtWidgets.QWidget()
+        ui_layout = QtWidgets.QVBoxLayout(page_ui)
+        ui_layout.setContentsMargins(12, 12, 12, 12)
+        grp_ui = QtWidgets.QGroupBox("Отображение")
+        ui_form = QtWidgets.QFormLayout(grp_ui)
+        self.cb_ui_show_activity = QtWidgets.QCheckBox("Показывать историю событий в левой панели")
+        self.cb_ui_show_activity.setChecked(bool(self.cfg.get("ui", {}).get("show_activity", True)))
+        ui_form.addRow(self.cb_ui_show_activity)
+        ui_hint = QtWidgets.QLabel("Когда история скрыта, остаётся только карточка с текущим этапом.")
+        ui_hint.setWordWrap(True)
+        ui_hint.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
+        ui_form.addRow(ui_hint)
+        ui_layout.addWidget(grp_ui)
+        ui_layout.addStretch(1)
+        self.settings_tabs.addTab(page_ui, "Интерфейс")
 
         # --- Chrome ---
         page_chrome = QtWidgets.QWidget()
@@ -1220,6 +1330,8 @@ class MainWindow(QtWidgets.QMainWindow):
         maint_layout.addWidget(self.cb_maintenance_auto)
 
         maint_buttons = QtWidgets.QHBoxLayout()
+        self.btn_maintenance_sizes = QtWidgets.QPushButton("Размеры папок")
+        maint_buttons.addWidget(self.btn_maintenance_sizes)
         maint_buttons.addStretch(1)
         self.btn_maintenance_cleanup = QtWidgets.QPushButton("Очистить сейчас")
         maint_buttons.addWidget(self.btn_maintenance_cleanup)
@@ -1281,6 +1393,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings_tabs.addTab(page_docs, "Документация")
 
         self._refresh_path_fields()
+        self.cb_ui_show_activity.toggled.connect(self._on_settings_activity_toggle)
     def _refresh_path_fields(self):
         mapping = [
             (self.ed_root, self.cfg.get("project_root", str(PROJECT_ROOT))),
@@ -1317,6 +1430,7 @@ class MainWindow(QtWidgets.QMainWindow):
             (self.ed_merged, "textEdited"),
             (self.ed_blur_src, "textEdited"),
             (self.ed_merge_src, "textEdited"),
+            (self.cb_ui_show_activity, "toggled"),
             (self.ed_cdp_port, "textEdited"),
             (self.ed_userdir, "textEdited"),
             (self.ed_chrome_bin, "textEdited"),
@@ -1353,6 +1467,63 @@ class MainWindow(QtWidgets.QMainWindow):
             signal = getattr(widget, signal_name, None)
             if signal:
                 signal.connect(self._mark_settings_dirty)
+
+    def _on_downloads_path_edited(self, text: str):
+        clean = text.strip()
+        if getattr(self, "_blur_src_autofollow", False):
+            self._blur_src_autofollow = True
+            self.ed_blur_src.blockSignals(True)
+            self.ed_blur_src.setText(clean)
+            self.ed_blur_src.blockSignals(False)
+            self._mark_settings_dirty()
+
+    def _on_blur_src_edited(self, text: str):
+        clean = text.strip()
+        downloads = self.ed_downloads.text().strip()
+        auto = not clean or clean == downloads
+        if auto and not getattr(self, "_blur_src_autofollow", False):
+            self._blur_src_autofollow = True
+            self._on_downloads_path_edited(downloads)
+        else:
+            self._blur_src_autofollow = auto
+
+    def _on_blurred_path_edited(self, text: str):
+        clean = text.strip()
+        if getattr(self, "_merge_src_autofollow", False):
+            self._merge_src_autofollow = True
+            self.ed_merge_src.blockSignals(True)
+            self.ed_merge_src.setText(clean)
+            self.ed_merge_src.blockSignals(False)
+            self._mark_settings_dirty()
+
+    def _on_merge_src_edited(self, text: str):
+        clean = text.strip()
+        blurred = self.ed_blurred.text().strip()
+        auto = not clean or clean == blurred
+        if auto and not getattr(self, "_merge_src_autofollow", False):
+            self._merge_src_autofollow = True
+            self._on_blurred_path_edited(blurred)
+        else:
+            self._merge_src_autofollow = auto
+
+    def _on_merged_path_edited(self, text: str):
+        clean = text.strip()
+        if getattr(self, "_upload_src_autofollow", False):
+            self._upload_src_autofollow = True
+            self.ed_youtube_src.blockSignals(True)
+            self.ed_youtube_src.setText(clean)
+            self.ed_youtube_src.blockSignals(False)
+            self._mark_settings_dirty()
+
+    def _on_youtube_src_edited(self, text: str):
+        clean = text.strip()
+        merged = self.ed_merged.text().strip()
+        auto = not clean or clean == merged
+        if auto and not getattr(self, "_upload_src_autofollow", False):
+            self._upload_src_autofollow = True
+            self._on_merged_path_edited(merged)
+        else:
+            self._upload_src_autofollow = auto
     def _make_zone_edits(self, grid: QtWidgets.QGridLayout):
         edits = []
         headers = ["Зона", "x", "y", "w", "h"]
@@ -1432,6 +1603,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_open_merge.clicked.connect(lambda: open_in_finder(self.cfg.get("merged_dir", MERG_DIR)))
         self.btn_stop_all.clicked.connect(self._stop_all)
         self.btn_activity_clear.clicked.connect(self._clear_activity)
+        self.chk_activity_visible.toggled.connect(self._on_activity_toggle)
 
         self.btn_load_prompts.clicked.connect(self._load_prompts)
         self.btn_save_prompts.clicked.connect(self._save_prompts)
@@ -1449,6 +1621,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_save_autogen_cfg.clicked.connect(self._save_autogen_cfg)
         self.btn_reload_readme.clicked.connect(self._load_readme_preview)
         self.btn_maintenance_cleanup.clicked.connect(lambda: self._run_maintenance_cleanup(manual=True))
+        self.btn_maintenance_sizes.clicked.connect(self._report_dir_sizes)
 
         self.btn_youtube_src_browse.clicked.connect(lambda: self._browse_dir(self.ed_youtube_src, "Выбери папку с клипами"))
         self.cb_youtube_draft_only.toggled.connect(self._toggle_youtube_schedule)
@@ -1526,9 +1699,14 @@ class MainWindow(QtWidgets.QMainWindow):
         if state == "error": color = "#d74c4c"
         self.pb_global.setStyleSheet(f"QProgressBar::chunk {{ background-color: {color}; }}")
 
-    def _append_activity(self, text: str, kind: str = "info"):
+    def _append_activity(self, text: str, kind: str = "info", card_text: Optional[Union[str, bool]] = None):
         if not text:
             return
+
+        if card_text is not False:
+            display = card_text if isinstance(card_text, str) and card_text else text
+            self._update_current_event(display, kind)
+
         item = QtWidgets.QListWidgetItem(text)
         palette = {
             "info": ("#93c5fd", "#15223c"),
@@ -1600,7 +1778,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         timestamp = time.strftime("%H:%M:%S")
         pretty = f"[{timestamp}] {normalized}"
-        self._append_activity(pretty, kind=kind)
+        self._append_activity(pretty, kind=kind, card_text=normalized)
 
     # helper для статуса
     def _post_status(self, text: str, progress: int = 0, total: int = 0, state: str = "idle"):
@@ -1609,6 +1787,52 @@ class MainWindow(QtWidgets.QMainWindow):
     def _clear_activity(self):
         self.lst_activity.clear()
         self._post_status("Лента событий очищена", state="idle")
+        self._update_current_event("—", "info")
+
+    def _update_current_event(self, text: str, kind: str = "info", persist: bool = False):
+        if not hasattr(self, "current_event_card"):
+            return
+
+        palette = {
+            "info": ("#27364d", "#f8fafc"),
+            "success": ("#1f5136", "#34d399"),
+            "error": ("#4d1f29", "#f87171"),
+            "running": ("#4d3b1f", "#facc15"),
+        }
+        border, color = palette.get(kind, palette["info"])
+        self.current_event_card.setStyleSheet(
+            f"QFrame#currentEventCard{{background:#162132;border:1px solid {border};border-radius:14px;padding:0;}}"
+            "QLabel#currentEventTitle{color:#9fb7ff;font-size:11px;letter-spacing:1px;text-transform:uppercase;}"
+            f"QLabel#currentEventBody{{color:{color};font-size:15px;font-weight:600;}}"
+        )
+        self.lbl_current_event_body.setText(text or "—")
+        self.cfg.setdefault("ui", {})["accent_kind"] = kind
+        if persist:
+            save_cfg(self.cfg)
+
+    def _apply_activity_visibility(self, visible: bool, persist: bool = True):
+        if not hasattr(self, "lst_activity"):
+            return
+        self.lst_activity.setVisible(bool(visible))
+        if hasattr(self, "lbl_activity_hint"):
+            self.lbl_activity_hint.setVisible(bool(visible))
+        if hasattr(self, "chk_activity_visible"):
+            self.chk_activity_visible.blockSignals(True)
+            self.chk_activity_visible.setChecked(bool(visible))
+            self.chk_activity_visible.blockSignals(False)
+        if hasattr(self, "cb_ui_show_activity"):
+            self.cb_ui_show_activity.blockSignals(True)
+            self.cb_ui_show_activity.setChecked(bool(visible))
+            self.cb_ui_show_activity.blockSignals(False)
+        self.cfg.setdefault("ui", {})["show_activity"] = bool(visible)
+        if persist:
+            save_cfg(self.cfg)
+
+    def _on_activity_toggle(self, checked: bool):
+        self._apply_activity_visibility(bool(checked), persist=True)
+
+    def _on_settings_activity_toggle(self, checked: bool):
+        self._apply_activity_visibility(bool(checked), persist=False)
 
     # ----- обработчик завершения подпроцессов -----
     @QtCore.pyqtSlot(int, str)
@@ -2351,6 +2575,9 @@ class MainWindow(QtWidgets.QMainWindow):
         tg_cfg["bot_token"] = self.ed_tg_token.text().strip()
         tg_cfg["chat_id"] = self.ed_tg_chat.text().strip()
 
+        ui_cfg = self.cfg.setdefault("ui", {})
+        ui_cfg["show_activity"] = bool(self.cb_ui_show_activity.isChecked())
+
         maint_cfg = self.cfg.setdefault("maintenance", {})
         maint_cfg["auto_cleanup_on_start"] = bool(self.cb_maintenance_auto.isChecked())
         retention = maint_cfg.setdefault("retention_days", {})
@@ -2446,11 +2673,39 @@ class MainWindow(QtWidgets.QMainWindow):
             err_head = f"Очистка: {len(errors)} ошибок"
             self._append_activity(err_head, kind="error")
             for detail in errors[:5]:
-                self._append_activity(f"↳ {detail}", kind="error")
+                self._append_activity(f"↳ {detail}", kind="error", card_text=False)
             if manual:
                 self._post_status(err_head, state="error")
 
         self._refresh_stats()
+
+    def _report_dir_sizes(self):
+        self._save_settings_clicked(silent=True)
+        yt_cfg = self.cfg.get("youtube", {}) or {}
+        mapping = [
+            ("RAW", self.cfg.get("downloads_dir", str(DL_DIR))),
+            ("BLURRED", self.cfg.get("blurred_dir", str(BLUR_DIR))),
+            ("MERGED", self.cfg.get("merged_dir", str(MERG_DIR))),
+            ("UPLOAD", yt_cfg.get("upload_src_dir", self.cfg.get("merged_dir", str(MERG_DIR))))
+        ]
+
+        rows: List[str] = []
+        summary_parts: List[str] = []
+        for label, raw in mapping:
+            folder = _normalize_path(raw)
+            if folder.exists():
+                size = _dir_size(folder)
+                human = _human_size(size)
+                rows.append(f"{label}: {human} — {folder}")
+                summary_parts.append(f"{label} {human}")
+            else:
+                rows.append(f"{label}: папка не найдена — {folder}")
+
+        summary = ", ".join(summary_parts) if summary_parts else "нет данных"
+        self._append_activity("Размеры папок подсчитаны", kind="success", card_text=summary)
+        for row in rows:
+            self._append_activity(row, kind="info", card_text=False)
+        self._post_status("Размеры папок обновлены", state="ok")
 
     def _test_tg_settings(self):
         self._save_settings_clicked(silent=True)

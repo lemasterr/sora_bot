@@ -92,3 +92,6 @@ maintenance:
     downloads: 7
     blurred: 14
     merged: 30
+ui:
+  show_activity: true
+  accent_kind: info
