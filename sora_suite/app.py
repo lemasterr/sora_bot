@@ -12,7 +12,7 @@ import socket
 import shutil
 from pathlib import Path
 from urllib.request import urlopen, Request
-from typing import Optional, List, Union
+from typing import Optional, List, Union, Tuple
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 from concurrent.futures import ThreadPoolExecutor
@@ -59,6 +59,11 @@ def load_cfg() -> dict:
     downloader = data.setdefault("downloader", {})
     downloader.setdefault("workdir", str(WORKERS_DIR / "downloader"))
     downloader.setdefault("entry", "download_all.py")
+
+    telegram = data.setdefault("telegram", {})
+    telegram.setdefault("enabled", False)
+    telegram.setdefault("bot_token", "")
+    telegram.setdefault("chat_id", "")
 
     # --- ffmpeg ---
     ff = data.setdefault("ffmpeg", {})
@@ -170,24 +175,28 @@ def open_in_finder(path: Union[str, Path]):
         subprocess.Popen(["xdg-open", path])
 
 
-def send_tg(cfg: dict, text: str):
+def send_tg(cfg: dict, text: str) -> Tuple[bool, str]:
+    """Отправляет Telegram-уведомление. Возвращает (ok, reason)."""
     tg = cfg.get("telegram", {}) or {}
     if not tg.get("enabled"):
-        return
+        return False, "disabled"
+
     token, chat = tg.get("bot_token"), tg.get("chat_id")
     if not token or not chat:
-        return
+        return False, "missing-credentials"
+
     try:
         import urllib.parse
+
         url = f"https://api.telegram.org/bot{token}/sendMessage"
         payload = urllib.parse.urlencode({"chat_id": chat, "text": text})
         req = Request(url, data=payload.encode("utf-8"), headers={
             "Content-Type": "application/x-www-form-urlencoded"
         })
         with urlopen(req, timeout=5):
-            pass
-    except Exception:
-        pass
+            return True, ""
+    except Exception as e:
+        return False, str(e)
 
 
 # --- Shadow profile helpers ---
@@ -369,7 +378,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._procs_lock = Lock()
 
         self._build_ui()
+        self._auto_save_timer = QtCore.QTimer(self)
+        self._auto_save_timer.setInterval(1500)
+        self._auto_save_timer.setSingleShot(True)
+        self._auto_save_timer.timeout.connect(self._autosave_flush)
         self._wire()
+        self._register_settings_autosave()
         self._init_state()
         self._refresh_stats()
         self._reload_history()
@@ -576,32 +590,35 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tab_settings = QtWidgets.QScrollArea()
         self.tab_settings.setWidgetResizable(True)
         settings_body = QtWidgets.QWidget()
-        s = QtWidgets.QFormLayout(settings_body)
+        settings_layout = QtWidgets.QVBoxLayout(settings_body)
+        self.settings_tabs = QtWidgets.QTabWidget()
+        settings_layout.addWidget(self.settings_tabs)
 
+        # --- Chrome ---
         ch = self.cfg.get("chrome", {})
+        chrome_page = QtWidgets.QWidget()
+        chrome_layout = QtWidgets.QVBoxLayout(chrome_page)
+        chrome_form = QtWidgets.QFormLayout()
         self.ed_cdp_port = QtWidgets.QLineEdit(str(ch.get("cdp_port", 9222)))
         self.ed_userdir = QtWidgets.QLineEdit(ch.get("user_data_dir", ""))
         self.ed_chrome_bin = QtWidgets.QLineEdit(ch.get("binary", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"))
-        s.addRow("Chrome CDP порт:", self.ed_cdp_port)
-        s.addRow("Chrome user data dir:", self.ed_userdir)
-        s.addRow("Chrome binary:", self.ed_chrome_bin)
+        chrome_form.addRow("Chrome CDP порт:", self.ed_cdp_port)
+        chrome_form.addRow("Chrome user data dir:", self.ed_userdir)
+        chrome_form.addRow("Chrome binary:", self.ed_chrome_bin)
+        chrome_layout.addLayout(chrome_form)
 
-        # --- Менеджер профилей Chrome ---
         grp_prof = QtWidgets.QGroupBox("Профили Chrome")
         vlp = QtWidgets.QVBoxLayout(grp_prof)
-
         top = QtWidgets.QHBoxLayout()
         self.lst_profiles = QtWidgets.QListWidget()
         top.addWidget(self.lst_profiles, 1)
-
         form = QtWidgets.QFormLayout()
         self.ed_prof_name = QtWidgets.QLineEdit()
-        self.ed_prof_root = QtWidgets.QLineEdit()   # user_data_dir
-        self.ed_prof_dir  = QtWidgets.QLineEdit()   # profile_directory
+        self.ed_prof_root = QtWidgets.QLineEdit()
+        self.ed_prof_dir = QtWidgets.QLineEdit()
         form.addRow("Имя профиля:", self.ed_prof_name)
         form.addRow("user_data_dir:", self.ed_prof_root)
         form.addRow("profile_directory:", self.ed_prof_dir)
-
         btns = QtWidgets.QHBoxLayout()
         self.btn_prof_add = QtWidgets.QPushButton("Добавить/Обновить")
         self.btn_prof_del = QtWidgets.QPushButton("Удалить")
@@ -611,96 +628,171 @@ class MainWindow(QtWidgets.QMainWindow):
         btns.addWidget(self.btn_prof_del)
         btns.addWidget(self.btn_prof_set)
         btns.addWidget(self.btn_prof_scan)
-
         form.addRow(btns)
         top.addLayout(form, 2)
         vlp.addLayout(top)
-
         hl = QtWidgets.QHBoxLayout()
         hl.addWidget(QtWidgets.QLabel("Активный профиль:"))
         self.lbl_prof_active = QtWidgets.QLabel("—")
-        hl.addWidget(self.lbl_prof_active); hl.addStretch(1)
+        hl.addWidget(self.lbl_prof_active)
+        hl.addStretch(1)
         vlp.addLayout(hl)
+        chrome_layout.addWidget(grp_prof)
+        self.btn_apply_chrome = QtWidgets.QPushButton("Применить Chrome")
+        chrome_layout.addWidget(self.btn_apply_chrome, 0, QtCore.Qt.AlignmentFlag.AlignRight)
+        chrome_layout.addStretch(1)
+        self.settings_tabs.addTab(chrome_page, "Chrome")
 
-        s.addRow(grp_prof)
-
-        # --- Пути проекта (с кнопками выбора)
+        # --- Пути ---
+        paths_page = QtWidgets.QWidget()
+        paths_layout = QtWidgets.QVBoxLayout(paths_page)
         row_paths = QtWidgets.QGridLayout()
         r = 0
-        self.ed_root = QtWidgets.QLineEdit(self.cfg.get("project_root", str(PROJECT_ROOT)));  self.btn_browse_root = QtWidgets.QPushButton("…")
-        row_paths.addWidget(QtWidgets.QLabel("Папка проекта:"), r, 0); row_paths.addWidget(self.ed_root, r, 1); row_paths.addWidget(self.btn_browse_root, r, 2); r += 1
-
-        self.ed_downloads = QtWidgets.QLineEdit(self.cfg.get("downloads_dir", str(DL_DIR))); self.btn_browse_downloads = QtWidgets.QPushButton("…")
-        row_paths.addWidget(QtWidgets.QLabel("Папка RAW:"), r, 0); row_paths.addWidget(self.ed_downloads, r, 1); row_paths.addWidget(self.btn_browse_downloads, r, 2); r += 1
-
-        self.ed_blurred = QtWidgets.QLineEdit(self.cfg.get("blurred_dir", str(BLUR_DIR)));   self.btn_browse_blurred = QtWidgets.QPushButton("…")
-        row_paths.addWidget(QtWidgets.QLabel("Папка BLURRED:"), r, 0); row_paths.addWidget(self.ed_blurred, r, 1); row_paths.addWidget(self.btn_browse_blurred, r, 2); r += 1
-
-        self.ed_merged = QtWidgets.QLineEdit(self.cfg.get("merged_dir", str(MERG_DIR)));     self.btn_browse_merged = QtWidgets.QPushButton("…")
-        row_paths.addWidget(QtWidgets.QLabel("Папка MERGED:"), r, 0); row_paths.addWidget(self.ed_merged, r, 1); row_paths.addWidget(self.btn_browse_merged, r, 2); r += 1
-
-        # источники для BLUR/MERGE
+        self.ed_root = QtWidgets.QLineEdit(self.cfg.get("project_root", str(PROJECT_ROOT)))
+        self.btn_browse_root = QtWidgets.QPushButton("…")
+        row_paths.addWidget(QtWidgets.QLabel("Папка проекта:"), r, 0)
+        row_paths.addWidget(self.ed_root, r, 1)
+        row_paths.addWidget(self.btn_browse_root, r, 2)
+        r += 1
+        self.ed_downloads = QtWidgets.QLineEdit(self.cfg.get("downloads_dir", str(DL_DIR)))
+        self.btn_browse_downloads = QtWidgets.QPushButton("…")
+        row_paths.addWidget(QtWidgets.QLabel("Папка RAW:"), r, 0)
+        row_paths.addWidget(self.ed_downloads, r, 1)
+        row_paths.addWidget(self.btn_browse_downloads, r, 2)
+        r += 1
+        self.ed_blurred = QtWidgets.QLineEdit(self.cfg.get("blurred_dir", str(BLUR_DIR)))
+        self.btn_browse_blurred = QtWidgets.QPushButton("…")
+        row_paths.addWidget(QtWidgets.QLabel("Папка BLURRED:"), r, 0)
+        row_paths.addWidget(self.ed_blurred, r, 1)
+        row_paths.addWidget(self.btn_browse_blurred, r, 2)
+        r += 1
+        self.ed_merged = QtWidgets.QLineEdit(self.cfg.get("merged_dir", str(MERG_DIR)))
+        self.btn_browse_merged = QtWidgets.QPushButton("…")
+        row_paths.addWidget(QtWidgets.QLabel("Папка MERGED:"), r, 0)
+        row_paths.addWidget(self.ed_merged, r, 1)
+        row_paths.addWidget(self.btn_browse_merged, r, 2)
+        r += 1
         self.ed_blur_src = QtWidgets.QLineEdit(self.cfg.get("blur_src_dir", self.cfg.get("downloads_dir", str(DL_DIR))))
         self.btn_browse_blur_src = QtWidgets.QPushButton("…")
-        row_paths.addWidget(QtWidgets.QLabel("Источник BLUR:"), r, 0); row_paths.addWidget(self.ed_blur_src, r, 1); row_paths.addWidget(self.btn_browse_blur_src, r, 2); r += 1
-
+        row_paths.addWidget(QtWidgets.QLabel("Источник BLUR:"), r, 0)
+        row_paths.addWidget(self.ed_blur_src, r, 1)
+        row_paths.addWidget(self.btn_browse_blur_src, r, 2)
+        r += 1
         self.ed_merge_src = QtWidgets.QLineEdit(self.cfg.get("merge_src_dir", self.cfg.get("blurred_dir", str(BLUR_DIR))))
         self.btn_browse_merge_src = QtWidgets.QPushButton("…")
-        row_paths.addWidget(QtWidgets.QLabel("Источник MERGE:"), r, 0); row_paths.addWidget(self.ed_merge_src, r, 1); row_paths.addWidget(self.btn_browse_merge_src, r, 2); r += 1
+        row_paths.addWidget(QtWidgets.QLabel("Источник MERGE:"), r, 0)
+        row_paths.addWidget(self.ed_merge_src, r, 1)
+        row_paths.addWidget(self.btn_browse_merge_src, r, 2)
+        paths_layout.addLayout(row_paths)
+        self.btn_apply_paths = QtWidgets.QPushButton("Применить пути")
+        paths_layout.addWidget(self.btn_apply_paths, 0, QtCore.Qt.AlignmentFlag.AlignRight)
+        paths_layout.addStretch(1)
+        self.settings_tabs.addTab(paths_page, "Пути")
 
-        s.addRow(row_paths)
-
+        # --- FFmpeg ---
         ff = self.cfg.get("ffmpeg", {})
-        self.ed_ff_bin = QtWidgets.QLineEdit(ff.get("binary","ffmpeg"))
-        self.ed_post = QtWidgets.QLineEdit(ff.get("post_chain","boxblur=1:1,noise=alls=2:allf=t,unsharp=3:3:0.5:3:3:0.0"))
+        ff_page = QtWidgets.QWidget()
+        ff_layout = QtWidgets.QVBoxLayout(ff_page)
+        ff_form = QtWidgets.QFormLayout()
+        self.ed_ff_bin = QtWidgets.QLineEdit(ff.get("binary", "ffmpeg"))
+        self.ed_post = QtWidgets.QLineEdit(ff.get("post_chain", "boxblur=1:1,noise=alls=2:allf=t,unsharp=3:3:0.5:3:3:0.0"))
         self.cmb_vcodec = QtWidgets.QComboBox()
-        self.cmb_vcodec.addItems(["auto_hw","libx264","copy"])
-        self.cmb_vcodec.setCurrentText(ff.get("vcodec","auto_hw"))
-        self.ed_crf = QtWidgets.QSpinBox(); self.ed_crf.setRange(0,51); self.ed_crf.setValue(int(ff.get("crf",18)))
-        self.cmb_preset = QtWidgets.QComboBox(); self.cmb_preset.addItems(
-            ["ultrafast","superfast","veryfast","faster","fast","medium","slow","slower","veryslow","placebo"])
-        self.cmb_preset.setCurrentText(ff.get("preset","veryfast"))
-        self.cmb_format = QtWidgets.QComboBox(); self.cmb_format.addItems(["mp4","mov","webm"]); self.cmb_format.setCurrentText(ff.get("format","mp4"))
-        self.cb_copy_audio = QtWidgets.QCheckBox("Копировать аудио"); self.cb_copy_audio.setChecked(bool(ff.get("copy_audio",True)))
-        self.sb_blur_threads = QtWidgets.QSpinBox(); self.sb_blur_threads.setRange(1, 8); self.sb_blur_threads.setValue(int(ff.get("blur_threads",2)))
-        s.addRow("ffmpeg:", self.ed_ff_bin)
-        s.addRow("POST (цепочка фильтров):", self.ed_post)
-        s.addRow("vcodec:", self.cmb_vcodec)
-        s.addRow("CRF:", self.ed_crf)
-        s.addRow("preset:", self.cmb_preset)
-        s.addRow("format:", self.cmb_format)
-        s.addRow("Потоки BLUR:", self.sb_blur_threads)
-        s.addRow("", self.cb_copy_audio)
-
+        self.cmb_vcodec.addItems(["auto_hw", "libx264", "copy"])
+        self.cmb_vcodec.setCurrentText(ff.get("vcodec", "auto_hw"))
+        self.ed_crf = QtWidgets.QSpinBox()
+        self.ed_crf.setRange(0, 51)
+        self.ed_crf.setValue(int(ff.get("crf", 18)))
+        self.cmb_preset = QtWidgets.QComboBox()
+        self.cmb_preset.addItems(["ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow", "placebo"])
+        self.cmb_preset.setCurrentText(ff.get("preset", "veryfast"))
+        self.cmb_format = QtWidgets.QComboBox()
+        self.cmb_format.addItems(["mp4", "mov", "webm"])
+        self.cmb_format.setCurrentText(ff.get("format", "mp4"))
+        self.cb_copy_audio = QtWidgets.QCheckBox("Копировать аудио")
+        self.cb_copy_audio.setChecked(bool(ff.get("copy_audio", True)))
+        self.sb_blur_threads = QtWidgets.QSpinBox()
+        self.sb_blur_threads.setRange(1, 8)
+        self.sb_blur_threads.setValue(int(ff.get("blur_threads", 2)))
+        ff_form.addRow("ffmpeg:", self.ed_ff_bin)
+        ff_form.addRow("POST (цепочка фильтров):", self.ed_post)
+        ff_form.addRow("vcodec:", self.cmb_vcodec)
+        ff_form.addRow("CRF:", self.ed_crf)
+        ff_form.addRow("preset:", self.cmb_preset)
+        ff_form.addRow("format:", self.cmb_format)
+        ff_form.addRow("Потоки BLUR:", self.sb_blur_threads)
+        ff_form.addRow("", self.cb_copy_audio)
         self.cmb_aspect = QtWidgets.QComboBox()
         self.cmb_aspect.addItems(["portrait_9x16", "landscape_16x9"])
-        self.cmb_aspect.setCurrentText(ff.get("active_preset","portrait_9x16"))
-        s.addRow("Активный пресет:", self.cmb_aspect)
-
+        self.cmb_aspect.setCurrentText(ff.get("active_preset", "portrait_9x16"))
+        ff_form.addRow("Активный пресет:", self.cmb_aspect)
+        ff_layout.addLayout(ff_form)
         self.grp_portrait = QtWidgets.QGroupBox("Координаты 9:16 (три зоны delogo)")
         gp = QtWidgets.QGridLayout(self.grp_portrait)
         self.p_edits = self._make_zone_edits(gp)
-
         self.grp_landscape = QtWidgets.QGroupBox("Координаты 16:9 (три зоны delogo)")
         glp = QtWidgets.QGridLayout(self.grp_landscape)
         self.l_edits = self._make_zone_edits(glp)
+        ff_layout.addWidget(self.grp_portrait)
+        ff_layout.addWidget(self.grp_landscape)
+        self.btn_apply_ffmpeg = QtWidgets.QPushButton("Применить FFmpeg")
+        ff_layout.addWidget(self.btn_apply_ffmpeg, 0, QtCore.Qt.AlignmentFlag.AlignRight)
+        ff_layout.addStretch(1)
+        self.settings_tabs.addTab(ff_page, "FFmpeg")
 
-        s.addRow(self.grp_portrait)
-        s.addRow(self.grp_landscape)
-
-        # --- Автоген: параметры пауз из worker config ---
+        # --- Автоген ---
+        autogen_page = QtWidgets.QWidget()
+        autogen_layout = QtWidgets.QVBoxLayout(autogen_page)
         grp_auto = QtWidgets.QGroupBox("Автоген — паузы и лимиты (workers/autogen/config.yaml)")
         fa = QtWidgets.QFormLayout(grp_auto)
-        self.sb_auto_success_every = QtWidgets.QSpinBox(); self.sb_auto_success_every.setRange(1, 999); self.sb_auto_success_every.setValue(2)
-        self.sb_auto_success_pause = QtWidgets.QSpinBox(); self.sb_auto_success_pause.setRange(0, 3600); self.sb_auto_success_pause.setValue(180)
+        self.sb_auto_success_every = QtWidgets.QSpinBox()
+        self.sb_auto_success_every.setRange(1, 999)
+        self.sb_auto_success_every.setValue(2)
+        self.sb_auto_success_pause = QtWidgets.QSpinBox()
+        self.sb_auto_success_pause.setRange(0, 3600)
+        self.sb_auto_success_pause.setValue(180)
         self.btn_save_autogen_cfg = QtWidgets.QPushButton("Сохранить автоген конфиг")
         fa.addRow("Пауза после каждых N успешных:", self.sb_auto_success_every)
         fa.addRow("Длительность паузы, сек:", self.sb_auto_success_pause)
         fa.addRow(self.btn_save_autogen_cfg)
-        s.addRow(grp_auto)
+        autogen_layout.addWidget(grp_auto)
+        self.btn_apply_autogen = QtWidgets.QPushButton("Применить автоген")
+        autogen_layout.addWidget(self.btn_apply_autogen, 0, QtCore.Qt.AlignmentFlag.AlignRight)
+        autogen_layout.addStretch(1)
+        self.settings_tabs.addTab(autogen_page, "Autogen")
 
-        self.btn_save_settings = QtWidgets.QPushButton("Сохранить настройки")
-        s.addRow("", self.btn_save_settings)
+        # --- Telegram ---
+        tg_cfg = self.cfg.get("telegram", {}) or {}
+        telegram_page = QtWidgets.QWidget()
+        telegram_layout = QtWidgets.QVBoxLayout(telegram_page)
+        tg_form = QtWidgets.QFormLayout()
+        self.cb_tg_enabled = QtWidgets.QCheckBox("Включить уведомления")
+        self.cb_tg_enabled.setChecked(bool(tg_cfg.get("enabled", False)))
+        tg_form.addRow(self.cb_tg_enabled)
+        self.ed_tg_token = QtWidgets.QLineEdit(tg_cfg.get("bot_token", ""))
+        self.ed_tg_token.setPlaceholderText("Токен бота")
+        tg_form.addRow("Bot token:", self.ed_tg_token)
+        self.ed_tg_chat = QtWidgets.QLineEdit(str(tg_cfg.get("chat_id", "")))
+        self.ed_tg_chat.setPlaceholderText("Chat ID")
+        tg_form.addRow("Chat ID:", self.ed_tg_chat)
+        telegram_layout.addLayout(tg_form)
+        btns_tg = QtWidgets.QHBoxLayout()
+        self.btn_tg_test = QtWidgets.QPushButton("Отправить тест")
+        self.btn_apply_tg = QtWidgets.QPushButton("Применить Telegram")
+        btns_tg.addWidget(self.btn_tg_test)
+        btns_tg.addWidget(self.btn_apply_tg)
+        btns_tg.addStretch(1)
+        telegram_layout.addLayout(btns_tg)
+        telegram_layout.addStretch(1)
+        self.settings_tabs.addTab(telegram_page, "Telegram")
+
+        self._autosave_hint_default = "Изменения сохраняются автоматически. Нажмите «Применить», чтобы сохранить вручную."
+        self._autosave_hint_pending = "Изменения будут сохранены автоматически…"
+        self._autosave_hint_saved = "Настройки сохранены автоматически."
+        self.lbl_autosave_hint = QtWidgets.QLabel(self._autosave_hint_default)
+        self.lbl_autosave_hint.setStyleSheet("color:#555;font-size:12px;")
+        settings_layout.addWidget(self.lbl_autosave_hint)
+        self.btn_save_settings = QtWidgets.QPushButton("Применить все настройки")
+        settings_layout.addWidget(self.btn_save_settings, 0, QtCore.Qt.AlignmentFlag.AlignRight)
 
         self.tab_settings.setWidget(settings_body)
         self.tabs.addTab(self.tab_settings, "Настройки")
@@ -774,8 +866,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_run_scenario.clicked.connect(self._run_scenario)
 
         self.btn_reload_history.clicked.connect(self._reload_history)
-        self.btn_save_settings.clicked.connect(self._save_settings_clicked)
+        self.btn_save_settings.clicked.connect(lambda: self._save_settings_clicked(section="Все"))
         self.btn_save_autogen_cfg.clicked.connect(self._save_autogen_cfg)
+        self.btn_apply_chrome.clicked.connect(lambda: self._save_settings_clicked(section="Chrome"))
+        self.btn_apply_paths.clicked.connect(lambda: self._save_settings_clicked(section="Пути"))
+        self.btn_apply_ffmpeg.clicked.connect(lambda: self._save_settings_clicked(section="FFmpeg"))
+        self.btn_apply_autogen.clicked.connect(lambda: self._save_settings_clicked(section="Autogen"))
+        self.btn_apply_tg.clicked.connect(lambda: self._save_settings_clicked(section="Telegram"))
+        self.btn_tg_test.clicked.connect(self._test_telegram)
 
         # rename
         self.btn_ren_browse.clicked.connect(self._ren_browse)
@@ -798,6 +896,62 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_browse_merged.clicked.connect(lambda: self._browse_dir(self.ed_merged, "Выбери папку MERGED"))
         self.btn_browse_blur_src.clicked.connect(lambda: self._browse_dir(self.ed_blur_src, "Выбери ИСТОЧНИК для BLUR"))
         self.btn_browse_merge_src.clicked.connect(lambda: self._browse_dir(self.ed_merge_src, "Выбери ИСТОЧНИК для MERGE"))
+
+    def _register_settings_autosave(self):
+        widgets: List[QtWidgets.QWidget] = [
+            self.ed_cdp_port,
+            self.ed_userdir,
+            self.ed_chrome_bin,
+            self.ed_root,
+            self.ed_downloads,
+            self.ed_blurred,
+            self.ed_merged,
+            self.ed_blur_src,
+            self.ed_merge_src,
+            self.ed_ff_bin,
+            self.ed_post,
+            self.cmb_vcodec,
+            self.ed_crf,
+            self.cmb_preset,
+            self.cmb_format,
+            self.cb_copy_audio,
+            self.sb_blur_threads,
+            self.cmb_aspect,
+            self.sb_merge_group,
+            self.sb_auto_success_every,
+            self.sb_auto_success_pause,
+            self.cb_tg_enabled,
+            self.ed_tg_token,
+            self.ed_tg_chat,
+        ]
+        for w in widgets:
+            self._hook_autosave_widget(w)
+        for group in (self.p_edits, self.l_edits):
+            for edits in group:
+                for spin in edits:
+                    self._hook_autosave_widget(spin)
+
+    def _hook_autosave_widget(self, widget: QtWidgets.QWidget):
+        if isinstance(widget, QtWidgets.QLineEdit):
+            widget.textEdited.connect(self._touch_settings_autosave)
+        elif isinstance(widget, QtWidgets.QSpinBox):
+            widget.valueChanged.connect(self._touch_settings_autosave)
+        elif isinstance(widget, QtWidgets.QComboBox):
+            widget.currentIndexChanged.connect(self._touch_settings_autosave)
+        elif isinstance(widget, QtWidgets.QCheckBox):
+            widget.stateChanged.connect(self._touch_settings_autosave)
+
+    def _touch_settings_autosave(self, *args):
+        if hasattr(self, "_auto_save_timer"):
+            if hasattr(self, "lbl_autosave_hint"):
+                self.lbl_autosave_hint.setText(self._autosave_hint_pending)
+            self._auto_save_timer.start()
+
+    def _autosave_flush(self):
+        self._save_settings_clicked(silent=True)
+        if hasattr(self, "lbl_autosave_hint"):
+            self.lbl_autosave_hint.setText(self._autosave_hint_saved)
+            QtCore.QTimer.singleShot(2000, lambda: self.lbl_autosave_hint.setText(self._autosave_hint_default))
 
     def _init_state(self):
         self.runner_autogen = ProcRunner("AUTOGEN")
@@ -868,13 +1022,17 @@ class MainWindow(QtWidgets.QMainWindow):
             self._post_status(msg, state=("ok" if rc == 0 else "error"))
             append_history(self.cfg, {"event": "autogen_finish", "rc": rc})
             if rc == 0:
-                send_tg(self.cfg, "AUTOGEN: ok")
+                ok, reason = send_tg(self.cfg, "AUTOGEN: ok")
+                if not ok and reason not in {"disabled", "missing-credentials"}:
+                    self.sig_log.emit(f"[TG] Ошибка отправки: {reason}")
         elif tag == "DL":
             msg = "Скачка завершена" + (" ✓" if rc == 0 else " ✗")
             self._post_status(msg, state=("ok" if rc == 0 else "error"))
             append_history(self.cfg, {"event": "download_finish", "rc": rc})
             if rc == 0:
-                send_tg(self.cfg, "DOWNLOAD: ok")
+                ok, reason = send_tg(self.cfg, "DOWNLOAD: ok")
+                if not ok and reason not in {"disabled", "missing-credentials"}:
+                    self.sig_log.emit(f"[TG] Ошибка отправки: {reason}")
         self._refresh_stats()
 
     # ----- Chrome (через тень профиля) -----
@@ -1069,6 +1227,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._run_autogen_sync()
 
     def _run_autogen_sync(self) -> bool:
+        self._save_settings_clicked(silent=True)
         workdir=self.cfg.get("autogen",{}).get("workdir", str(WORKERS_DIR / "autogen"))
         entry=self.cfg.get("autogen",{}).get("entry","main.py")
         python=sys.executable; cmd=[python, entry]; env=os.environ.copy(); env["PYTHONUNBUFFERED"]="1"
@@ -1087,6 +1246,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._run_download_sync()
 
     def _run_download_sync(self) -> bool:
+        self._save_settings_clicked(silent=True)
         workdir=self.cfg.get("downloader",{}).get("workdir", str(WORKERS_DIR / "downloader"))
         entry=self.cfg.get("downloader",{}).get("entry","download_all.py")
         python=sys.executable; cmd=[python, entry]; env=os.environ.copy(); env["PYTHONUNBUFFERED"]="1"
@@ -1206,7 +1366,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         ok_all = all(results)
         append_history(self.cfg, {"event":"blur_finish","ok":ok_all,"count":total,"preset":active,"src":str(src_dir)})
-        send_tg(self.cfg, f"BLUR: завершено (ok={ok_all}, {total} файлов, пресет={active})")
+        ok_tg, reason = send_tg(self.cfg, f"BLUR: завершено (ok={ok_all}, {total} файлов, пресет={active})")
+        if not ok_tg and reason not in {"disabled", "missing-credentials"}:
+            self.sig_log.emit(f"[TG] Ошибка отправки: {reason}")
         if ok_all:
             self._post_status("Блюр завершён", state="ok")
         else:
@@ -1215,6 +1377,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ----- MERGE -----
     def _run_merge_sync(self) -> bool:
+        self._save_settings_clicked(silent=True)
         merge_cfg = self.cfg.get("merge", {}) or {}
         group = int(self.sb_merge_group.value() or merge_cfg.get("group_size", 3))
         pattern = merge_cfg.get("pattern", "*.mp4")
@@ -1304,7 +1467,9 @@ class MainWindow(QtWidgets.QMainWindow):
             "group_size": group,
             "src": str(src_dir)
         })
-        send_tg(self.cfg, f"MERGE: завершено (ok={ok_all}, groups={total}, by={group})")
+        ok_tg, reason = send_tg(self.cfg, f"MERGE: завершено (ok={ok_all}, groups={total}, by={group})")
+        if not ok_tg and reason not in {"disabled", "missing-credentials"}:
+            self.sig_log.emit(f"[TG] Ошибка отправки: {reason}")
 
         if ok_all:
             self._post_status("Склейка завершена", state="ok")
@@ -1398,7 +1563,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         append_history(self.cfg, {"event":"rename", "dir": str(folder), "count": done, "mode": ("titles" if use_titles else "seq")})
         self._post_status(f"Переименовано: {done}/{total}", state=("ok" if done==total else "error"))
-        send_tg(self.cfg, f"RENAME: {done}/{total} в {folder.name}")
+        ok_tg, reason = send_tg(self.cfg, f"RENAME: {done}/{total} в {folder.name}")
+        if not ok_tg and reason not in {"disabled", "missing-credentials"}:
+            self.sig_log.emit(f"[TG] Ошибка отправки: {reason}")
         self._refresh_stats()
 
     # ----- Stop -----
@@ -1448,19 +1615,17 @@ class MainWindow(QtWidgets.QMainWindow):
             self.txt_history.setPlainText(f"Ошибка чтения истории: {e}")
 
     # ----- settings -----
-    def _save_settings_clicked(self, silent: bool=False):
-        self.cfg.setdefault("chrome", {})
-        self.cfg["chrome"]["cdp_port"] = int(self.ed_cdp_port.text() or "9222")
-        self.cfg["chrome"]["user_data_dir"] = self.ed_userdir.text().strip()
-        self.cfg["chrome"]["binary"] = self.ed_chrome_bin.text().strip()
-        save_cfg(self.cfg)
+    def _save_settings_clicked(self, silent: bool=False, section: Optional[str]=None):
+        chrome = self.cfg.setdefault("chrome", {})
+        chrome["cdp_port"] = int(self.ed_cdp_port.text() or "9222")
+        chrome["user_data_dir"] = self.ed_userdir.text().strip()
+        chrome["binary"] = self.ed_chrome_bin.text().strip()
 
         self.cfg["project_root"] = self.ed_root.text().strip() or str(PROJECT_ROOT)
         self.cfg["downloads_dir"] = self.ed_downloads.text().strip() or str(DL_DIR)
         self.cfg["blurred_dir"] = self.ed_blurred.text().strip() or str(BLUR_DIR)
         self.cfg["merged_dir"] = self.ed_merged.text().strip() or str(MERG_DIR)
 
-        # источники
         self.cfg["blur_src_dir"] = self.ed_blur_src.text().strip() or self.cfg["downloads_dir"]
         self.cfg["merge_src_dir"] = self.ed_merge_src.text().strip() or self.cfg["blurred_dir"]
 
@@ -1489,10 +1654,32 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.cfg.setdefault("merge", {})["group_size"] = int(self.sb_merge_group.value())
 
+        tg = self.cfg.setdefault("telegram", {})
+        tg["enabled"] = bool(self.cb_tg_enabled.isChecked())
+        tg["bot_token"] = self.ed_tg_token.text().strip()
+        tg["chat_id"] = self.ed_tg_chat.text().strip()
+
         save_cfg(self.cfg)
         ensure_dirs(self.cfg)
         if not silent:
-            self._post_status("Настройки сохранены", state="ok")
+            msg = "Настройки сохранены" if not section else f"Настройки «{section}» сохранены"
+            self._post_status(msg, state="ok")
+
+    def _test_telegram(self):
+        self._save_settings_clicked(silent=True, section="Telegram")
+        ok, reason = send_tg(self.cfg, "Sora Suite: тестовое уведомление")
+        if ok:
+            self._post_status("Telegram: тестовое уведомление отправлено", state="ok")
+            self.sig_log.emit("[TG] Тестовое уведомление отправлено")
+            return
+        if reason == "disabled":
+            msg = "Telegram уведомления выключены"
+        elif reason == "missing-credentials":
+            msg = "Укажи bot token и chat id для Telegram"
+        else:
+            msg = f"Telegram ошибка: {reason}"
+        self._post_status(msg, state="error")
+        self.sig_log.emit(f"[TG] {msg}")
 
     # ----- автоген конфиг -----
     def _load_autogen_cfg_ui(self):

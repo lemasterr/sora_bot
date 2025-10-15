@@ -11,7 +11,7 @@ Sora autogen (Chrome CDP)
 import os
 import time
 from pathlib import Path
-from typing import List, Optional, Tuple, Set, Deque
+from typing import List, Optional, Tuple, Set, Deque, Dict
 from collections import deque
 
 import yaml
@@ -380,6 +380,8 @@ def run_loop(page: Page, cfg: dict, selectors: dict, prompts: List[str], already
     backoff_on_reject = int((cfg.get("queue_retry") or {}).get("backoff_seconds_on_reject", 180))
     success_pause_every_n = int((cfg.get("queue_retry") or {}).get("success_pause_every_n", 0))
     success_pause_seconds = int((cfg.get("queue_retry") or {}).get("success_pause_seconds", 0))
+    max_retry_cycles = int((cfg.get("queue_retry") or {}).get("max_retry_cycles", 0))
+    max_attempts_per_prompt = int((cfg.get("queue_retry") or {}).get("max_attempts_per_prompt", 0))
     debug = bool(cfg.get("debug", False))
 
     print("[NOTIFY] AUTOGEN_START")
@@ -403,6 +405,7 @@ def run_loop(page: Page, cfg: dict, selectors: dict, prompts: List[str], already
     print("[i] Кнопка-стрелка определена.")
 
     queue = deque([p for p in prompts if p not in already])
+    attempts: Dict[str, int] = {}
     if not queue:
         print("[i] Нет новых промптов — всё уже отправлено.")
         print("[NOTIFY] AUTOGEN_FINISH_OK")
@@ -422,6 +425,7 @@ def run_loop(page: Page, cfg: dict, selectors: dict, prompts: List[str], already
         prompt = queue.popleft()
         idx_counter += 1
         print(f"[STEP] {idx_counter}/{idx_total} — отправляю…")
+        attempts[prompt] = attempts.get(prompt, 0) + 1
         ok, reason = submit_prompt_once(
             page=page,
             sels=selectors,
@@ -445,9 +449,18 @@ def run_loop(page: Page, cfg: dict, selectors: dict, prompts: List[str], already
                 print(f"[INFO] Пауза {success_pause_seconds}s после {success} успешных.")
                 time.sleep(success_pause_seconds)
         else:
-            print(f"[WARN] не удалось отправить (пока): {reason}")
-            mark_failed(prompt, reason)
-            retry_queue.append(prompt)
+            attempt_num = attempts[prompt]
+            limit_hit = max_attempts_per_prompt and attempt_num >= max_attempts_per_prompt
+            reason_to_store = reason or ""
+            if limit_hit:
+                extra = f"attempt-limit-{attempt_num}"
+                reason_to_store = f"{reason_to_store}|{extra}" if reason_to_store else extra
+                print(f"[FAIL] лимит попыток ({attempt_num}) исчерпан — удаляю из очереди.")
+            else:
+                print(f"[WARN] не удалось отправить (пока): {reason}")
+            mark_failed(prompt, reason_to_store)
+            if not limit_hit:
+                retry_queue.append(prompt)
             failed += 1
 
         time.sleep(poll_interval)
@@ -455,6 +468,13 @@ def run_loop(page: Page, cfg: dict, selectors: dict, prompts: List[str], already
     cycle = 0
     while retry_queue:
         cycle += 1
+        if max_retry_cycles and cycle > max_retry_cycles:
+            print(f"[FAIL] достигнут лимит циклов переподачи ({max_retry_cycles}). Останавливаюсь.")
+            remaining = list(retry_queue)
+            retry_queue.clear()
+            for prompt in remaining:
+                mark_failed(prompt, f"cycle-limit-{max_retry_cycles}")
+            break
         print(f"[STEP] Переподача, цикл #{cycle}. Осталось: {len(retry_queue)}")
         cur_round = deque()
         while retry_queue:
@@ -462,6 +482,14 @@ def run_loop(page: Page, cfg: dict, selectors: dict, prompts: List[str], already
 
         for prompt in cur_round:
             print(f"[STEP] RETRY — пробую снова…")
+            if max_attempts_per_prompt and attempts.get(prompt, 0) >= max_attempts_per_prompt:
+                current_attempts = attempts.get(prompt, 0)
+                display_attempts = current_attempts or max_attempts_per_prompt
+                limit_reason = f"attempt-limit-{display_attempts}"
+                print(f"[FAIL] лимит попыток ({display_attempts}) исчерпан — пропускаю повтор.")
+                mark_failed(prompt, limit_reason)
+                continue
+            attempts[prompt] = attempts.get(prompt, 0) + 1
             ok, reason = submit_prompt_once(
                 page=page,
                 sels=selectors,
@@ -485,9 +513,19 @@ def run_loop(page: Page, cfg: dict, selectors: dict, prompts: List[str], already
                     print(f"[INFO] Пауза {success_pause_seconds}s после {success} успешных.")
                     time.sleep(success_pause_seconds)
             else:
-                print(f"[WARN] снова отказ: {reason}")
-                mark_failed(prompt, f"retry:{reason}")
-                retry_queue.append(prompt)
+                attempt_num = attempts[prompt]
+                limit_hit = max_attempts_per_prompt and attempt_num >= max_attempts_per_prompt
+                reason_base = f"retry:{reason}" if reason else "retry"
+                if limit_hit:
+                    extra = f"attempt-limit-{attempt_num}"
+                    reason_base = f"{reason_base}|{extra}" if reason_base else extra
+                    print(f"[FAIL] лимит попыток ({attempt_num}) исчерпан — удаляю из очереди.")
+                else:
+                    print(f"[WARN] снова отказ: {reason}")
+                mark_failed(prompt, reason_base)
+                if not limit_hit:
+                    retry_queue.append(prompt)
+                failed += 1
             time.sleep(poll_interval)
 
         time.sleep(20)
