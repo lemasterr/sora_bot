@@ -21,7 +21,7 @@ import socket
 import shutil
 from pathlib import Path
 from urllib.request import urlopen, Request
-from typing import Optional, List, Union
+from typing import Optional, List, Union, Tuple, Dict
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 from concurrent.futures import ThreadPoolExecutor
@@ -439,12 +439,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._build_ui()
         self._wire()
         self._init_state()
-        self._refresh_stats()
-        self._reload_history()
-        self._refresh_profiles_ui()
-        self._refresh_youtube_ui()
-        self._load_autogen_cfg_ui()
-        self._load_readme_preview()
+
+        QtCore.QTimer.singleShot(0, self._perform_delayed_startup)
 
         # дать раннеру ffmpeg доступ к self для логов
         _run_ffmpeg._self = self  # type: ignore[attr-defined]
@@ -457,6 +453,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._register_settings_autosave_sources()
 
     # ----- helpers -----
+    def _perform_delayed_startup(self):
+        self._refresh_stats()
+        self._reload_history()
+        self._refresh_profiles_ui()
+        self._refresh_youtube_ui()
+        self._load_autogen_cfg_ui()
+        self._load_readme_preview()
+
     def _apply_theme(self):
         app = QtWidgets.QApplication.instance()
         if not app:
@@ -465,23 +469,23 @@ class MainWindow(QtWidgets.QMainWindow):
         app.setStyle("Fusion")
 
         palette = QtGui.QPalette()
-        base = QtGui.QColor("#0f172a")
-        text = QtGui.QColor("#e2e8f0")
-        disabled = QtGui.QColor("#64748b")
-        highlight = QtGui.QColor("#2563eb")
+        base = QtGui.QColor("#1a2332")
+        text = QtGui.QColor("#f1f5f9")
+        disabled = QtGui.QColor("#8a94a6")
+        highlight = QtGui.QColor("#4c6ef5")
 
         roles = {
             QtGui.QPalette.ColorRole.Window: base,
-            QtGui.QPalette.ColorRole.Base: QtGui.QColor("#0b1120"),
-            QtGui.QPalette.ColorRole.AlternateBase: QtGui.QColor("#111c2f"),
+            QtGui.QPalette.ColorRole.Base: QtGui.QColor("#141c2b"),
+            QtGui.QPalette.ColorRole.AlternateBase: QtGui.QColor("#1f293b"),
             QtGui.QPalette.ColorRole.WindowText: text,
             QtGui.QPalette.ColorRole.Text: text,
-            QtGui.QPalette.ColorRole.Button: QtGui.QColor("#1d4ed8"),
+            QtGui.QPalette.ColorRole.Button: QtGui.QColor("#2f3d55"),
             QtGui.QPalette.ColorRole.ButtonText: QtGui.QColor("#f8fafc"),
             QtGui.QPalette.ColorRole.Highlight: highlight,
             QtGui.QPalette.ColorRole.HighlightedText: QtGui.QColor("#f8fafc"),
             QtGui.QPalette.ColorRole.BrightText: QtGui.QColor("#ffffff"),
-            QtGui.QPalette.ColorRole.Link: QtGui.QColor("#38bdf8"),
+            QtGui.QPalette.ColorRole.Link: QtGui.QColor("#93c5fd"),
         }
         for role, color in roles.items():
             palette.setColor(QtGui.QPalette.ColorGroup.Active, role, color)
@@ -492,25 +496,25 @@ class MainWindow(QtWidgets.QMainWindow):
 
         app.setStyleSheet(
             """
-            QWidget { background-color: #0f172a; color: #e2e8f0; }
-            QGroupBox { border: 1px solid #1f3b63; border-radius: 10px; margin-top: 18px; }
-            QGroupBox::title { subcontrol-origin: margin; left: 14px; padding: 0 8px; background-color: #0f172a; }
-            QPushButton { background-color: #1d4ed8; border-radius: 6px; padding: 6px 14px; color: #f8fafc; }
-            QPushButton:disabled { background-color: #334155; color: #64748b; }
-            QPushButton:hover { background-color: #2563eb; }
-            QPushButton:pressed { background-color: #1e40af; }
+            QWidget { background-color: #1a2332; color: #f1f5f9; }
+            QGroupBox { border: 1px solid #2b364d; border-radius: 10px; margin-top: 18px; }
+            QGroupBox::title { subcontrol-origin: margin; left: 14px; padding: 0 8px; background-color: #1a2332; }
+            QPushButton { background-color: #2f3d55; border-radius: 6px; padding: 6px 14px; color: #f8fafc; }
+            QPushButton:disabled { background-color: #394357; color: #8a94a6; }
+            QPushButton:hover { background-color: #3d4f70; }
+            QPushButton:pressed { background-color: #2a3852; }
             QLineEdit, QSpinBox, QDoubleSpinBox, QDateTimeEdit, QComboBox, QTextEdit, QPlainTextEdit {
-                background-color: #0b1120; border: 1px solid #1f3b63; border-radius: 6px; padding: 4px 6px;
-                selection-background-color: #2563eb; selection-color: #f8fafc;
+                background-color: #141c2b; border: 1px solid #2b364d; border-radius: 6px; padding: 4px 6px;
+                selection-background-color: #4c6ef5; selection-color: #f8fafc;
             }
-            QListWidget { border: 1px solid #1f3b63; border-radius: 10px; background-color: #050b16; color: #e2e8f0; }
-            QTabWidget::pane { border: 1px solid #1f3b63; border-radius: 10px; margin-top: -4px; }
-            QTabBar::tab { background: #0b1120; border: 1px solid #1f3b63; padding: 6px 12px; margin-right: 4px;
+            QListWidget { border: 1px solid #2b364d; border-radius: 10px; background-color: #131b2b; color: #f1f5f9; }
+            QTabWidget::pane { border: 1px solid #2b364d; border-radius: 10px; margin-top: -4px; }
+            QTabBar::tab { background: #141c2b; border: 1px solid #2b364d; padding: 6px 12px; margin-right: 4px;
                            border-top-left-radius: 6px; border-top-right-radius: 6px; }
-            QTabBar::tab:selected { background: #1d4ed8; color: #f8fafc; }
-            QTabBar::tab:hover { background: #2563eb; }
+            QTabBar::tab:selected { background: #4c6ef5; color: #f8fafc; }
+            QTabBar::tab:hover { background: #5b7cff; }
             QLabel#statusBanner { font-size: 15px; }
-            QTextBrowser { background-color: #050b16; border: 1px solid #1f3b63; border-radius: 8px; padding: 8px; }
+            QTextBrowser { background-color: #131b2b; border: 1px solid #2b364d; border-radius: 8px; padding: 8px; }
             QScrollArea { border: none; }
             """
         )
@@ -576,6 +580,41 @@ class MainWindow(QtWidgets.QMainWindow):
         minutes = int(self.sb_youtube_default_delay.value())
         self.dt_youtube_publish.setDateTime(QtCore.QDateTime.currentDateTime().addSecs(minutes * 60))
 
+    def _reflect_youtube_interval(self, value: int):
+        try:
+            val = int(value)
+        except (TypeError, ValueError):
+            val = 0
+        if self.sb_youtube_interval_default.value() != val:
+            self.sb_youtube_interval_default.blockSignals(True)
+            self.sb_youtube_interval_default.setValue(val)
+            self.sb_youtube_interval_default.blockSignals(False)
+        self._update_youtube_queue_label()
+
+    def _reflect_youtube_limit(self, value: int):
+        try:
+            val = int(value)
+        except (TypeError, ValueError):
+            val = 0
+        if self.sb_youtube_limit_default.value() != val:
+            self.sb_youtube_limit_default.blockSignals(True)
+            self.sb_youtube_limit_default.setValue(val)
+            self.sb_youtube_limit_default.blockSignals(False)
+        self._update_youtube_queue_label()
+
+    def _sync_delay_from_datetime(self):
+        if not self.dt_youtube_publish.isEnabled() or self.cb_youtube_draft_only.isChecked():
+            return
+        target = self.dt_youtube_publish.dateTime()
+        if not target.isValid():
+            return
+        now = QtCore.QDateTime.currentDateTime()
+        minutes = max(0, now.secsTo(target) // 60)
+        if self.sb_youtube_default_delay.value() != minutes:
+            self.sb_youtube_default_delay.blockSignals(True)
+            self.sb_youtube_default_delay.setValue(int(minutes))
+            self.sb_youtube_default_delay.blockSignals(False)
+
     # ----- UI -----
     def _build_ui(self):
         central = QtWidgets.QWidget(self)
@@ -587,8 +626,8 @@ class MainWindow(QtWidgets.QMainWindow):
         banner.setWordWrap(True)
         banner.setStyleSheet(
             "QLabel#statusBanner{padding:12px 18px;border-radius:12px;"
-            "background:qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #1d4ed8,stop:1 #1e40af);"
-            "color:#f8fafc;font-weight:600;letter-spacing:0.3px;}"
+            "background:qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #4c6ef5,stop:1 #1d4ed8);"
+            "color:#f8fafc;font-weight:600;letter-spacing:0.3px;border:1px solid #1a1f4a;}"
         )
         v.addWidget(banner)
 
@@ -631,8 +670,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lst_activity.setAlternatingRowColors(False)
         self.lst_activity.setSpacing(2)
         self.lst_activity.setStyleSheet(
-            "QListWidget{background:#050b16;border:1px solid #1f3b63;border-radius:10px;padding:6px;}"
-            "QListWidget::item{margin:2px;padding:6px 8px;border-radius:6px;}"
+            "QListWidget{background:#131b2b;border:1px solid #2b364d;border-radius:10px;padding:6px;}"
+            "QListWidget::item{margin:2px;padding:6px 8px;border-radius:6px;background:#1a2332;}"
         )
         act_layout.addWidget(self.lst_activity, 1)
 
@@ -650,7 +689,12 @@ class MainWindow(QtWidgets.QMainWindow):
         split.setStretchFactor(1, 3)
 
         # TAB: Задачи
-        self.tab_tasks = QtWidgets.QWidget(); lt = QtWidgets.QVBoxLayout(self.tab_tasks)
+        self.tab_tasks = QtWidgets.QWidget()
+        lt = QtWidgets.QVBoxLayout(self.tab_tasks)
+        lt.setContentsMargins(0, 0, 0, 0)
+
+        self.task_tabs = QtWidgets.QTabWidget()
+        lt.addWidget(self.task_tabs)
 
         grp_choose = QtWidgets.QGroupBox("Что выполнить")
         f = QtWidgets.QFormLayout(grp_choose)
@@ -659,82 +703,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cb_do_blur = QtWidgets.QCheckBox("Блюр водяного знака (ffmpeg, пресеты 9:16 / 16:9)")
         self.cb_do_merge = QtWidgets.QCheckBox("Склейка группами N")
         self.cb_do_upload = QtWidgets.QCheckBox("Загрузка на YouTube (отложенный постинг)")
-        f.addRow(self.cb_do_autogen); f.addRow(self.cb_do_download)
-        f.addRow(self.cb_do_blur); f.addRow(self.cb_do_merge)
+        for box in (self.cb_do_autogen, self.cb_do_download, self.cb_do_blur, self.cb_do_merge, self.cb_do_upload):
+            box.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        f.addRow(self.cb_do_autogen)
+        f.addRow(self.cb_do_download)
+        f.addRow(self.cb_do_blur)
+        f.addRow(self.cb_do_merge)
         f.addRow(self.cb_do_upload)
-        lt.addWidget(grp_choose)
 
-        # --- Скачка: лимит N ---
-        grp_dl = QtWidgets.QGroupBox("Скачка")
-        hb = QtWidgets.QHBoxLayout(grp_dl)
-        hb.addWidget(QtWidgets.QLabel("Скачать N последних:"))
-        self.sb_max_videos = QtWidgets.QSpinBox(); self.sb_max_videos.setRange(0, 10000); self.sb_max_videos.setValue(0)
-        hb.addWidget(self.sb_max_videos)
-        self.btn_apply_dl = QtWidgets.QPushButton("Применить")
-        hb.addWidget(self.btn_apply_dl)
-        hb.addStretch(1)
-        lt.addWidget(grp_dl)
-
-        # --- Переименование файлов ---
-        grp_ren = QtWidgets.QGroupBox("Переименование файлов")
-        ren_l = QtWidgets.QGridLayout(grp_ren)
-
-        self.ed_ren_dir = QtWidgets.QLineEdit(self.cfg.get("downloads_dir", str(DL_DIR)))
-        self.btn_ren_browse = QtWidgets.QPushButton("…")
-        self.rb_ren_from_titles = QtWidgets.QRadioButton("По списку из titles.txt")
-        self.rb_ren_from_titles.setChecked(True)
-        self.rb_ren_sequential = QtWidgets.QRadioButton("Последовательно (1,2,3…)")
-        self.ed_ren_prefix = QtWidgets.QLineEdit("")
-        self.ed_ren_start = QtWidgets.QSpinBox(); self.ed_ren_start.setRange(1, 1_000_000); self.ed_ren_start.setValue(1)
-        self.btn_ren_run = QtWidgets.QPushButton("Переименовать")
-
-        row = 0
-        ren_l.addWidget(QtWidgets.QLabel("Папка:"), row, 0)
-        ren_l.addWidget(self.ed_ren_dir, row, 1)
-        ren_l.addWidget(self.btn_ren_browse, row, 2)
-        row += 1
-
-        ren_l.addWidget(self.rb_ren_from_titles, row, 0, 1, 3); row += 1
-        ren_l.addWidget(self.rb_ren_sequential, row, 0, 1, 3); row += 1
-
-        ren_l.addWidget(QtWidgets.QLabel("Префикс (для нумерации):"), row, 0)
-        ren_l.addWidget(self.ed_ren_prefix, row, 1, 1, 2); row += 1
-
-        ren_l.addWidget(QtWidgets.QLabel("Начать с №:"), row, 0)
-        ren_l.addWidget(self.ed_ren_start, row, 1)
-        ren_l.addWidget(self.btn_ren_run, row, 2); row += 1
-
-        lt.addWidget(grp_ren)
-
-        # --- Склейка: сколько клипов в один ---
-        grp_merge = QtWidgets.QGroupBox("Склейка (merge)")
-        mg = QtWidgets.QHBoxLayout(grp_merge)
-        mg.addWidget(QtWidgets.QLabel("Склеивать по N клипов:"))
-        self.sb_merge_group = QtWidgets.QSpinBox(); self.sb_merge_group.setRange(1, 1000)
-        self.sb_merge_group.setValue(int(self.cfg.get("merge",{}).get("group_size",3)))
-        self.btn_apply_merge = QtWidgets.QPushButton("Применить")
-        mg.addWidget(self.sb_merge_group)
-        mg.addWidget(self.btn_apply_merge)
-        mg.addStretch(1)
-        lt.addWidget(grp_merge)
-
-        # --- Запуск сценария ---
         grp_run = QtWidgets.QGroupBox("Запуск")
         hb2 = QtWidgets.QHBoxLayout(grp_run)
         self.btn_run_scenario = QtWidgets.QPushButton("Старт сценария (галочки сверху)")
-        hb2.addWidget(self.btn_run_scenario); hb2.addStretch(1)
-        lt.addWidget(grp_run)
+        hb2.addWidget(self.btn_run_scenario)
+        hb2.addStretch(1)
 
-        # --- Статистика / статус ---
         grp_stat = QtWidgets.QGroupBox("Статистика / статус")
         vb = QtWidgets.QVBoxLayout(grp_stat)
-
-        # статусная строка + прогресс
         self.lbl_status = QtWidgets.QLabel("—")
         self.pb_global = QtWidgets.QProgressBar(); self.pb_global.setMinimum(0); self.pb_global.setMaximum(1); self.pb_global.setValue(1); self.pb_global.setFormat("—")
         vb.addWidget(self.lbl_status); vb.addWidget(self.pb_global)
-
-        # компактная стата по папкам
         grid_stat = QtWidgets.QGridLayout()
         grid_stat.addWidget(QtWidgets.QLabel("<b>RAW</b>"), 0, 0)
         grid_stat.addWidget(QtWidgets.QLabel("<b>BLURRED</b>"), 0, 1)
@@ -747,8 +734,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for w in (self.lbl_stat_raw, self.lbl_stat_blur, self.lbl_stat_merge, self.lbl_stat_upload):
             w.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
             w.setStyleSheet(
-                "QLabel{font: 700 16px 'Menlo'; padding:6px; border:1px solid #1f3b63; "
-                "background:#111c2f; border-radius:8px;}"
+                "QLabel{font: 700 16px 'Menlo'; padding:6px; border:1px solid #2b364d; background:#131b2b; border-radius:8px;}"
             )
         grid_stat.addWidget(self.lbl_stat_raw, 1, 0)
         grid_stat.addWidget(self.lbl_stat_blur, 1, 1)
@@ -756,7 +742,89 @@ class MainWindow(QtWidgets.QMainWindow):
         grid_stat.addWidget(self.lbl_stat_upload, 1, 3)
         vb.addLayout(grid_stat)
 
-        lt.addWidget(grp_stat)
+        pipeline_tab = QtWidgets.QWidget()
+        pipeline_layout = QtWidgets.QVBoxLayout(pipeline_tab)
+        pipeline_layout.addWidget(grp_choose)
+        pipeline_layout.addWidget(grp_run)
+        pipeline_layout.addWidget(grp_stat)
+        pipeline_layout.addStretch(1)
+        self.task_tabs.addTab(pipeline_tab, "Пайплайн")
+
+        # --- Скачка: лимит N ---
+        grp_dl = QtWidgets.QGroupBox("Скачка")
+        hb = QtWidgets.QHBoxLayout(grp_dl)
+        hb.addWidget(QtWidgets.QLabel("Скачать N последних:"))
+        self.sb_max_videos = QtWidgets.QSpinBox(); self.sb_max_videos.setRange(0, 10000); self.sb_max_videos.setValue(0)
+        hb.addWidget(self.sb_max_videos)
+        self.btn_apply_dl = QtWidgets.QPushButton("Применить")
+        hb.addWidget(self.btn_apply_dl)
+        hb.addStretch(1)
+
+        tab_download = QtWidgets.QWidget()
+        download_layout = QtWidgets.QVBoxLayout(tab_download)
+        dl_hint = QtWidgets.QLabel("Галочку \"Авто-скачка видео\" можно оставить включённой для сценария или запускать скачку отдельно.")
+        dl_hint.setWordWrap(True)
+        dl_hint.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
+        download_layout.addWidget(dl_hint)
+        download_layout.addWidget(grp_dl)
+        download_layout.addStretch(1)
+        self.task_tabs.addTab(tab_download, "Скачка")
+
+        # --- Переименование файлов ---
+        grp_ren = QtWidgets.QGroupBox("Переименование файлов")
+        ren_l = QtWidgets.QGridLayout(grp_ren)
+        self.ed_ren_dir = QtWidgets.QLineEdit(self.cfg.get("downloads_dir", str(DL_DIR)))
+        self.btn_ren_browse = QtWidgets.QPushButton("…")
+        self.rb_ren_from_titles = QtWidgets.QRadioButton("По списку из titles.txt")
+        self.rb_ren_from_titles.setChecked(True)
+        self.rb_ren_sequential = QtWidgets.QRadioButton("Последовательно (1,2,3…)")
+        self.ed_ren_prefix = QtWidgets.QLineEdit("")
+        self.ed_ren_start = QtWidgets.QSpinBox(); self.ed_ren_start.setRange(1, 1_000_000); self.ed_ren_start.setValue(1)
+        self.btn_ren_run = QtWidgets.QPushButton("Переименовать")
+        row = 0
+        ren_l.addWidget(QtWidgets.QLabel("Папка:"), row, 0)
+        ren_l.addWidget(self.ed_ren_dir, row, 1)
+        ren_l.addWidget(self.btn_ren_browse, row, 2)
+        row += 1
+        ren_l.addWidget(self.rb_ren_from_titles, row, 0, 1, 3); row += 1
+        ren_l.addWidget(self.rb_ren_sequential, row, 0, 1, 3); row += 1
+        ren_l.addWidget(QtWidgets.QLabel("Префикс (для нумерации):"), row, 0)
+        ren_l.addWidget(self.ed_ren_prefix, row, 1, 1, 2); row += 1
+        ren_l.addWidget(QtWidgets.QLabel("Начать с №:"), row, 0)
+        ren_l.addWidget(self.ed_ren_start, row, 1)
+        ren_l.addWidget(self.btn_ren_run, row, 2); row += 1
+
+        rename_tab = QtWidgets.QWidget()
+        rename_layout = QtWidgets.QVBoxLayout(rename_tab)
+        ren_hint = QtWidgets.QLabel("Переименуй ролики перед блюром: можно тянуть названия из titles.txt или нумеровать автоматически.")
+        ren_hint.setWordWrap(True)
+        ren_hint.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
+        rename_layout.addWidget(ren_hint)
+        rename_layout.addWidget(grp_ren)
+        rename_layout.addStretch(1)
+        self.task_tabs.addTab(rename_tab, "Переименование")
+
+        # --- Склейка: сколько клипов в один ---
+        grp_merge = QtWidgets.QGroupBox("Склейка (merge)")
+        mg = QtWidgets.QHBoxLayout(grp_merge)
+        mg.addWidget(QtWidgets.QLabel("Склеивать по N клипов:"))
+        self.sb_merge_group = QtWidgets.QSpinBox(); self.sb_merge_group.setRange(1, 1000)
+        self.sb_merge_group.setValue(int(self.cfg.get("merge",{}).get("group_size",3)))
+        self.btn_apply_merge = QtWidgets.QPushButton("Применить")
+        mg.addWidget(self.sb_merge_group)
+        mg.addWidget(self.btn_apply_merge)
+        mg.addStretch(1)
+
+        merge_tab = QtWidgets.QWidget()
+        merge_layout = QtWidgets.QVBoxLayout(merge_tab)
+        merge_hint = QtWidgets.QLabel("После блюра можно склеить клипы в ленты — выбери размер группы и нажми применить.")
+        merge_hint.setWordWrap(True)
+        merge_hint.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
+        merge_layout.addWidget(merge_hint)
+        merge_layout.addWidget(grp_merge)
+        merge_layout.addStretch(1)
+        self.task_tabs.addTab(merge_tab, "Склейка")
+
         self.tabs.addTab(self.tab_tasks, "Задачи")
 
         # TAB: YouTube uploader
@@ -1277,48 +1345,67 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-        sample = candidates[0]
+        sample_videos = candidates[:3]
 
         ff_cfg = self.cfg.get("ffmpeg", {}) or {}
         ffbin = self.ed_ff_bin.text().strip() or ff_cfg.get("binary", "ffmpeg")
+        ffprobe = ff_cfg.get("probe_binary") or self._guess_ffprobe(ffbin)
 
         try:
-            with tempfile.TemporaryDirectory() as tmp:
-                frame_path = Path(tmp) / "probe_frame.jpg"
-                cmd = [
-                    ffbin,
-                    "-hide_banner",
-                    "-loglevel",
-                    "error",
-                    "-y",
-                    "-i",
-                    str(sample),
-                    "-frames:v",
-                    "1",
-                    "-q:v",
-                    "2",
-                    str(frame_path),
-                ]
-                res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                if res.returncode != 0 or not frame_path.exists():
-                    stderr = (res.stderr or "ffmpeg error").strip()
-                    raise RuntimeError(stderr or "ffmpeg вернул ошибку")
-                with Image.open(frame_path) as img_raw:
-                    img = img_raw.convert("RGB")
+            frames = self._collect_watermark_frames(sample_videos, ffbin, ffprobe)
+        except FileNotFoundError as exc:
+            msg = f"ffmpeg не найден: {exc}"
+            self._post_status(msg, state="error")
+            self._append_activity(msg, kind="error")
+            return
         except Exception as exc:
-            msg = f"Автодетект: не удалось извлечь кадр ({exc})"
+            msg = f"Автодетект: не удалось подготовить кадры ({exc})"
             self._post_status(msg, state="error")
             self._append_activity(msg, kind="error")
             return
 
-        zones = self._detect_watermark_boxes(img)
+        if not frames:
+            msg = "Автодетект: не удалось извлечь кадры для анализа"
+            self._post_status(msg, state="error")
+            self._append_activity(msg, kind="error")
+            return
+
+        candidate_map: Dict[str, List[Tuple[float, Tuple[int, int, int, int]]]] = {}
+        seen_names: List[str] = []
+        first_orientation: Optional[str] = None
+        for video_path, ts, image in frames:
+            try:
+                orientation = "portrait_9x16" if image.height >= image.width else "landscape_16x9"
+                if first_orientation is None:
+                    first_orientation = orientation
+                candidate_map.setdefault(orientation, []).extend(self._detect_watermark_candidates(image))
+            finally:
+                if hasattr(image, "close"):
+                    image.close()
+            name = video_path.name
+            if name not in seen_names:
+                seen_names.append(name)
+
+        if not candidate_map:
+            msg = "Автодетект: на кадрах не найдено характерных зон по краям"
+            self._post_status(msg, state="error")
+            self._append_activity(msg, kind="error")
+            return
+
+        orientation = max(candidate_map, key=lambda key: len(candidate_map[key])) if candidate_map else first_orientation or "portrait_9x16"
+        candidates_for_orientation = candidate_map.get(orientation, [])
+        if not candidates_for_orientation and first_orientation and first_orientation in candidate_map:
+            orientation = first_orientation
+            candidates_for_orientation = candidate_map.get(orientation, [])
+
+        zones = self._merge_watermark_candidates(candidates_for_orientation)
         if not zones:
-            msg = f"Автодетект: водяной знак не найден в {sample.name}"
+            joined = ", ".join(seen_names) or "выбранных файлов"
+            msg = f"Автодетект: водяной знак не найден в {joined}"
             self._post_status(msg, state="error")
             self._append_activity(msg, kind="error")
             return
 
-        orientation = "portrait_9x16" if img.height >= img.width else "landscape_16x9"
         edits = self.p_edits if orientation == "portrait_9x16" else self.l_edits
         for idx in range(len(edits)):
             zone = zones[idx] if idx < len(zones) else zones[-1]
@@ -1330,61 +1417,202 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.cmb_aspect.setCurrentText(orientation)
         self._mark_settings_dirty()
-        msg = f"Автодетект: обновлены зоны для {sample.name} ({orientation})"
+        joined = ", ".join(seen_names[:3])
+        suffix = f" (и ещё {len(seen_names) - 3})" if len(seen_names) > 3 else ""
+        msg = f"Автодетект: обновлены зоны для {joined}{suffix} ({orientation})" if joined else f"Автодетект: обновлены зоны ({orientation})"
         self._post_status("Зоны delogo обновлены", state="ok")
         self._append_activity(msg, kind="success")
 
     @staticmethod
-    def _detect_watermark_boxes(image):  # type: ignore[no-untyped-def]
+    def _guess_ffprobe(ffmpeg_bin: str) -> str:
+        cleaned = (ffmpeg_bin or "").strip().strip('"')
+        if not cleaned:
+            return "ffprobe.exe" if sys.platform.startswith("win") else "ffprobe"
+        ff_path = Path(cleaned)
+        suffix = ff_path.suffix if ff_path.suffix else (".exe" if sys.platform.startswith("win") else "")
+        candidate = ff_path.with_name(f"ffprobe{suffix}")
+        if candidate.exists():
+            return str(candidate)
+        return "ffprobe.exe" if sys.platform.startswith("win") else "ffprobe"
+
+    @classmethod
+    def _collect_watermark_frames(cls, videos: List[Path], ffbin: str, ffprobe: str, per_video: int = 4):
+        frames: List[Tuple[Path, float, "Image.Image"]] = []  # type: ignore[name-defined]
+        if Image is None:
+            return frames
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            for video in videos:
+                duration = cls._probe_video_duration(video, ffprobe)
+                if duration and duration > 1:
+                    step = duration / max(1, per_video + 1)
+                    offsets = [step * (idx + 1) for idx in range(per_video)]
+                else:
+                    offsets = [idx * 5.0 for idx in range(per_video)]
+                if not offsets:
+                    offsets = [0.0]
+                for idx, ts in enumerate(offsets):
+                    ts = max(0.0, ts)
+                    if duration and ts >= duration:
+                        ts = max(0.0, duration - 0.5)
+                    frame_path = tmp_dir / f"probe_{video.stem}_{idx}.jpg"
+                    cmd = [ffbin, "-hide_banner", "-loglevel", "error", "-y"]
+                    if ts > 0:
+                        cmd.extend(["-ss", f"{ts:.3f}"])
+                    cmd.extend(["-i", str(video), "-frames:v", "1", "-q:v", "2", str(frame_path)])
+                    res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                    if res.returncode != 0 or not frame_path.exists():
+                        continue
+                    try:
+                        with Image.open(frame_path) as img_raw:
+                            frames.append((video, ts, img_raw.convert("RGB").copy()))
+                    except Exception:
+                        continue
+        return frames
+
+    @staticmethod
+    def _probe_video_duration(video: Path, ffprobe: str) -> Optional[float]:
+        if not ffprobe:
+            return None
+        try:
+            res = subprocess.run(
+                [ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(video)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+        except FileNotFoundError:
+            return None
+        if res.returncode != 0:
+            return None
+        out = res.stdout.strip().splitlines()
+        if not out:
+            return None
+        try:
+            value = float(out[0])
+        except ValueError:
+            return None
+        return value if value > 0 else None
+
+    @staticmethod
+    def _detect_watermark_candidates(image):  # type: ignore[no-untyped-def]
         try:
             edges = image.convert("L").filter(ImageFilter.FIND_EDGES)
         except Exception:
             return []
 
         w, h = edges.size
+        if w == 0 or h == 0:
+            return []
+
         patch_w = max(int(w * 0.22), 80)
         patch_h = max(int(h * 0.18), 60)
+        stride_x = max(20, patch_w // 3)
+        stride_y = max(20, patch_h // 3)
 
-        center_box = (
-            max(0, w // 2 - patch_w // 2),
-            max(0, h // 2 - patch_h // 2),
-            min(w, w // 2 + patch_w // 2),
-            min(h, h // 2 + patch_h // 2),
-        )
-        baseline = ImageStat.Stat(edges.crop(center_box)).mean[0] if ImageStat else 0
+        baseline = 0
+        if ImageStat:
+            cx0 = max(0, w // 2 - patch_w // 4)
+            cy0 = max(0, h // 2 - patch_h // 4)
+            cx1 = min(w, w // 2 + patch_w // 4)
+            cy1 = min(h, h // 2 + patch_h // 4)
+            baseline = ImageStat.Stat(edges.crop((cx0, cy0, cx1, cy1))).mean[0]
 
-        positions = []
-        offsets_x = [0, max(0, w - patch_w), max(0, w // 2 - patch_w // 2)]
-        offsets_y = [0, max(0, h - patch_h), max(0, h // 2 - patch_h // 2)]
+        positions: List[Tuple[float, Tuple[int, int, int, int]]] = []
+        seen: set[Tuple[int, int, int, int]] = set()
 
-        for x in offsets_x:
-            for y in offsets_y:
-                near_border = (x in (0, w - patch_w)) or (y in (0, h - patch_h))
-                if not near_border:
-                    continue
-                box = (int(x), int(y), int(min(w, x + patch_w)), int(min(h, y + patch_h)))
-                crop = edges.crop(box)
-                score = ImageStat.Stat(crop).mean[0] if ImageStat else 0
-                positions.append((score, box))
+        def add_box(x0: int, y0: int):
+            x0 = max(0, min(int(x0), max(0, w - patch_w)))
+            y0 = max(0, min(int(y0), max(0, h - patch_h)))
+            box = (x0, y0, min(w, x0 + patch_w), min(h, y0 + patch_h))
+            if box in seen:
+                return
+            seen.add(box)
+            score = ImageStat.Stat(edges.crop(box)).mean[0] if ImageStat else 0
+            positions.append((score, box))
+
+        for x in range(0, max(1, w - patch_w + 1), stride_x):
+            add_box(x, 0)
+            add_box(x, h - patch_h)
+        for y in range(0, max(1, h - patch_h + 1), stride_y):
+            add_box(0, y)
+            add_box(w - patch_w, y)
 
         if not positions:
             return []
 
-        threshold = max(baseline * 1.25, baseline + 10)
-        good = [p for p in positions if p[0] >= threshold]
-        if not good:
-            good = sorted(positions, key=lambda item: item[0], reverse=True)[:1]
+        positions.sort(key=lambda item: item[0], reverse=True)
+        threshold = max(baseline * 1.25, baseline + 12)
+        strong = [item for item in positions if item[0] >= threshold]
+        candidates = strong if strong else positions[:6]
+        return candidates[:6]
 
-        good = sorted(good, key=lambda item: item[0], reverse=True)[:3]
+    @staticmethod
+    def _box_iou(box_a: Tuple[int, int, int, int], box_b: Tuple[int, int, int, int]) -> float:
+        ax0, ay0, ax1, ay1 = box_a
+        bx0, by0, bx1, by1 = box_b
+        inter_x0 = max(ax0, bx0)
+        inter_y0 = max(ay0, by0)
+        inter_x1 = min(ax1, bx1)
+        inter_y1 = min(ay1, by1)
+        if inter_x1 <= inter_x0 or inter_y1 <= inter_y0:
+            return 0.0
+        inter = float(inter_x1 - inter_x0) * float(inter_y1 - inter_y0)
+        area_a = float(max(0, ax1 - ax0)) * float(max(0, ay1 - ay0))
+        area_b = float(max(0, bx1 - bx0)) * float(max(0, by1 - by0))
+        union = area_a + area_b - inter
+        if union <= 0:
+            return 0.0
+        return inter / union
 
+    @classmethod
+    def _merge_watermark_candidates(cls, candidates: List[Tuple[float, Tuple[int, int, int, int]]], limit: int = 3):
+        if not candidates:
+            return []
+        clusters: List[Dict[str, float]] = []  # type: ignore[var-annotated]
+        for score, box in sorted(candidates, key=lambda item: item[0], reverse=True):
+            merged = False
+            for cluster in clusters:
+                if cls._box_iou(tuple(map(int, cluster["box"])), box) >= 0.3:  # type: ignore[index]
+                    cluster["score"] = max(cluster["score"], score)
+                    cluster["count"] += 1
+                    cluster["sum_x0"] += box[0]
+                    cluster["sum_y0"] += box[1]
+                    cluster["sum_x1"] += box[2]
+                    cluster["sum_y1"] += box[3]
+                    merged = True
+                    break
+            if not merged:
+                clusters.append({
+                    "score": score,
+                    "count": 1.0,
+                    "sum_x0": float(box[0]),
+                    "sum_y0": float(box[1]),
+                    "sum_x1": float(box[2]),
+                    "sum_y1": float(box[3]),
+                    "box": box,
+                })
+
+        scored: List[Tuple[float, float, Tuple[float, float, float, float]]] = []
+        for cluster in clusters:
+            count = max(1.0, cluster["count"])
+            avg_box = (
+                cluster["sum_x0"] / count,
+                cluster["sum_y0"] / count,
+                cluster["sum_x1"] / count,
+                cluster["sum_y1"] / count,
+            )
+            scored.append((cluster["count"], cluster["score"], avg_box))
+
+        scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
         zones = []
-        for _, box in good:
+        for _, _, box in scored[:limit]:
             x0, y0, x1, y1 = box
             zones.append({
-                "x": max(0, int(x0)),
-                "y": max(0, int(y0)),
-                "w": max(1, int(x1 - x0)),
-                "h": max(1, int(y1 - y0)),
+                "x": max(0, int(round(x0))),
+                "y": max(0, int(round(y0))),
+                "w": max(1, int(round(x1 - x0))),
+                "h": max(1, int(round(y1 - y0))),
             })
         return zones
 
@@ -1472,11 +1700,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sb_youtube_default_delay.valueChanged.connect(self._apply_default_delay)
         self.sb_youtube_interval_default.valueChanged.connect(lambda val: self.sb_youtube_interval.setValue(int(val)))
         self.sb_youtube_limit_default.valueChanged.connect(lambda val: self.sb_youtube_batch_limit.setValue(int(val)))
-        self.sb_youtube_interval.valueChanged.connect(lambda _: self._update_youtube_queue_label())
-        self.sb_youtube_batch_limit.valueChanged.connect(lambda _: self._update_youtube_queue_label())
+        self.sb_youtube_interval.valueChanged.connect(self._reflect_youtube_interval)
+        self.sb_youtube_batch_limit.valueChanged.connect(self._reflect_youtube_limit)
         self.btn_youtube_refresh.clicked.connect(self._update_youtube_queue_label)
         self.btn_youtube_start.clicked.connect(self._start_youtube_single)
         self.ed_youtube_src.textChanged.connect(lambda _: self._update_youtube_queue_label())
+        self.dt_youtube_publish.dateTimeChanged.connect(self._sync_delay_from_datetime)
         self.btn_tg_test.clicked.connect(self._test_tg_settings)
 
         # rename
@@ -2118,6 +2347,7 @@ class MainWindow(QtWidgets.QMainWindow):
             dt_local = self.dt_youtube_publish.dateTime()
             yt_cfg["last_publish_at"] = dt_local.toString(QtCore.Qt.DateFormat.ISODate)
             publish_at = dt_local.toUTC().toString("yyyy-MM-dd'T'HH:mm:ss'Z'")
+            save_cfg(self.cfg)
 
         workdir = yt_cfg.get("workdir", str(WORKERS_DIR / "uploader"))
         entry = yt_cfg.get("entry", "upload_queue.py")
