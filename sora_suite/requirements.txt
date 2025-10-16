@@ -5,6 +5,7 @@ opencv-python==4.10.0.84
 playwright==1.48.0
 PyYAML==6.0.2
 platformdirs==4.2.2
+requests==2.32.3
 google-api-python-client==2.129.0
 google-auth==2.34.0
 google-auth-oauthlib==1.2.1

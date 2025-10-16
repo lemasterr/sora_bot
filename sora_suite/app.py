@@ -156,12 +156,18 @@ def load_cfg() -> dict:
     tiktok.setdefault("upload_src_dir", data.get("merged_dir", str(MERG_DIR)))
     tiktok.setdefault("archive_dir", str(PROJECT_ROOT / "uploaded_tiktok"))
     tiktok.setdefault("schedule_minutes_from_now", 0)
+    tiktok.setdefault("schedule_enabled", True)
     tiktok.setdefault("batch_step_minutes", 60)
     tiktok.setdefault("batch_limit", 0)
     tiktok.setdefault("draft_only", False)
     tiktok.setdefault("last_publish_at", "")
     tiktok.setdefault("github_workflow", ".github/workflows/tiktok-upload.yml")
     tiktok.setdefault("github_ref", "main")
+    for prof in tiktok.get("profiles", []) or []:
+        if isinstance(prof, dict):
+            if prof.get("cookies_file") and not prof.get("credentials_file"):
+                prof["credentials_file"] = prof.get("cookies_file")
+            prof.pop("cookies_file", None)
 
     telegram = data.setdefault("telegram", {})
     telegram.setdefault("enabled", False)
@@ -644,21 +650,23 @@ class MainWindow(QtWidgets.QMainWindow):
         app.setStyle("Fusion")
 
         palette = QtGui.QPalette()
-        base = QtGui.QColor("#1a2332")
+        base = QtGui.QColor("#0f172a")
+        panel = QtGui.QColor("#101a2f")
+        field = QtGui.QColor("#111d32")
         text = QtGui.QColor("#f1f5f9")
         disabled = QtGui.QColor("#8a94a6")
         highlight = QtGui.QColor("#4c6ef5")
 
         roles = {
             QtGui.QPalette.ColorRole.Window: base,
-            QtGui.QPalette.ColorRole.Base: QtGui.QColor("#141c2b"),
-            QtGui.QPalette.ColorRole.AlternateBase: QtGui.QColor("#1f293b"),
+            QtGui.QPalette.ColorRole.Base: field,
+            QtGui.QPalette.ColorRole.AlternateBase: panel,
             QtGui.QPalette.ColorRole.WindowText: text,
             QtGui.QPalette.ColorRole.Text: text,
-            QtGui.QPalette.ColorRole.Button: QtGui.QColor("#2f3d55"),
+            QtGui.QPalette.ColorRole.Button: QtGui.QColor("#1f2d4a"),
             QtGui.QPalette.ColorRole.ButtonText: QtGui.QColor("#f8fafc"),
             QtGui.QPalette.ColorRole.Highlight: highlight,
-            QtGui.QPalette.ColorRole.HighlightedText: QtGui.QColor("#f8fafc"),
+            QtGui.QPalette.ColorRole.HighlightedText: QtGui.QColor("#0f172a"),
             QtGui.QPalette.ColorRole.BrightText: QtGui.QColor("#ffffff"),
             QtGui.QPalette.ColorRole.Link: QtGui.QColor("#93c5fd"),
         }
@@ -671,36 +679,36 @@ class MainWindow(QtWidgets.QMainWindow):
 
         app.setStyleSheet(
             """
-            QWidget { background-color: #1a2332; color: #f1f5f9; }
-            QGroupBox { border: 1px solid #2b364d; border-radius: 10px; margin-top: 18px; }
-            QGroupBox::title { subcontrol-origin: margin; left: 14px; padding: 0 8px; background-color: #1a2332; }
-            QPushButton { background-color: #2f3d55; border-radius: 6px; padding: 6px 14px; color: #f8fafc; }
-            QPushButton:disabled { background-color: #394357; color: #8a94a6; }
-            QPushButton:hover { background-color: #3d4f70; }
-            QPushButton:pressed { background-color: #2a3852; }
+            QWidget { background-color: #0f172a; color: #f1f5f9; }
+            QGroupBox { border: 1px solid #22314d; border-radius: 12px; margin-top: 14px; background-color: #101a2f; }
+            QGroupBox::title { subcontrol-origin: margin; left: 16px; padding: 0 6px; background-color: #101a2f; }
+            QPushButton { background-color: #1f2d4a; border: 1px solid #2f4368; border-radius: 8px; padding: 6px 14px; color: #f8fafc; }
+            QPushButton:disabled { background-color: #1b2640; border-color: #2a3654; color: #66738a; }
+            QPushButton:hover { background-color: #2b3c5d; }
+            QPushButton:pressed { background-color: #1a2540; }
             QLineEdit, QSpinBox, QDoubleSpinBox, QDateTimeEdit, QComboBox, QTextEdit, QPlainTextEdit {
-                background-color: #141c2b; border: 1px solid #2b364d; border-radius: 6px; padding: 4px 6px;
+                background-color: #0b1528; border: 1px solid #22314d; border-radius: 8px; padding: 4px 8px;
                 selection-background-color: #4c6ef5; selection-color: #f8fafc;
             }
-            QCheckBox { color: #f8fafc; spacing: 6px; }
+            QPlainTextEdit { padding: 8px; }
+            QCheckBox { color: #f8fafc; spacing: 8px; }
             QCheckBox::indicator {
-                width: 18px; height: 18px; border-radius: 4px;
-                border: 1px solid #475569; background: #f8fafc;
+                width: 18px; height: 18px; border-radius: 5px;
+                border: 1px solid #334155; background: #0b1528;
             }
             QCheckBox::indicator:unchecked { image: none; }
             QCheckBox::indicator:checked {
-                background: #f8fafc; border-color: #93c5fd;
-                image: url(:/qt-project.org/styles/commonstyle/images/check.png);
+                background: #4c6ef5; border: 1px solid #93c5fd; image: none;
             }
-            QCheckBox::indicator:hover { border-color: #93c5fd; }
-            QListWidget { border: 1px solid #2b364d; border-radius: 10px; background-color: #131b2b; color: #f1f5f9; }
-            QTabWidget::pane { border: 1px solid #2b364d; border-radius: 10px; margin-top: -4px; }
-            QTabBar::tab { background: #141c2b; border: 1px solid #2b364d; padding: 6px 12px; margin-right: 4px;
+            QCheckBox::indicator:disabled { background: #1e293b; border-color: #27364d; }
+            QListWidget { border: 1px solid #22314d; border-radius: 12px; background-color: #0b1528; color: #f1f5f9; }
+            QTabWidget::pane { border: 1px solid #22314d; border-radius: 12px; margin-top: -4px; background: #0f172a; }
+            QTabBar::tab { background: #101a2f; border: 1px solid #22314d; padding: 6px 12px; margin-right: 4px;
                            border-top-left-radius: 6px; border-top-right-radius: 6px; }
             QTabBar::tab:selected { background: #4c6ef5; color: #f8fafc; }
-            QTabBar::tab:hover { background: #5b7cff; }
+            QTabBar::tab:hover { background: #374968; }
             QLabel#statusBanner { font-size: 15px; }
-            QTextBrowser { background-color: #131b2b; border: 1px solid #2b364d; border-radius: 8px; padding: 8px; }
+            QTextBrowser { background-color: #0b1528; border: 1px solid #22314d; border-radius: 10px; padding: 12px; }
             QScrollArea { border: none; }
             """
         )
@@ -946,7 +954,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # TAB: Задачи
         self.tab_tasks = QtWidgets.QWidget()
         lt = QtWidgets.QVBoxLayout(self.tab_tasks)
-        lt.setContentsMargins(0, 0, 0, 0)
+        lt.setContentsMargins(12, 12, 12, 12)
+        lt.setSpacing(12)
         tasks_intro = QtWidgets.QLabel(
             "Основная панель запуска: отметь нужные этапы, нажми старт и следи за прогрессом и статистикой."
         )
@@ -1177,6 +1186,8 @@ class MainWindow(QtWidgets.QMainWindow):
         yt_cfg = self.cfg.get("youtube", {}) or {}
         self.tab_youtube = QtWidgets.QWidget()
         ty = QtWidgets.QVBoxLayout(self.tab_youtube)
+        ty.setContentsMargins(12, 12, 12, 12)
+        ty.setSpacing(12)
 
         grp_channels = QtWidgets.QGroupBox("Каналы и доступы")
         gc_layout = QtWidgets.QHBoxLayout(grp_channels)
@@ -1292,27 +1303,73 @@ class MainWindow(QtWidgets.QMainWindow):
         tk_cfg = self.cfg.get("tiktok", {}) or {}
         self.tab_tiktok = QtWidgets.QWidget()
         tt = QtWidgets.QVBoxLayout(self.tab_tiktok)
+        tt.setContentsMargins(12, 12, 12, 12)
+        tt.setSpacing(12)
 
         grp_tt_profiles = QtWidgets.QGroupBox("Профили и авторизация")
         tp_layout = QtWidgets.QHBoxLayout(grp_tt_profiles)
-        tp_layout.setSpacing(12)
+        tp_layout.setSpacing(16)
+        tp_layout.setContentsMargins(16, 16, 16, 16)
 
         self.lst_tiktok_profiles = QtWidgets.QListWidget()
         self.lst_tiktok_profiles.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        self.lst_tiktok_profiles.setUniformItemSizes(True)
+        self.lst_tiktok_profiles.setMinimumWidth(180)
         tp_layout.addWidget(self.lst_tiktok_profiles, 1)
 
+        profile_panel = QtWidgets.QWidget()
+        profile_layout = QtWidgets.QVBoxLayout(profile_panel)
+        profile_layout.setContentsMargins(0, 0, 0, 0)
+        profile_layout.setSpacing(10)
+
+        tt_hint = QtWidgets.QLabel("Укажи client_key, client_secret, open_id и refresh_token TikTok. Можно загрузить их из JSON/" "YAML файла и хранить вне конфига.")
+        tt_hint.setWordWrap(True)
+        tt_hint.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
+        profile_layout.addWidget(tt_hint)
+
         tt_form = QtWidgets.QFormLayout()
+        tt_form.setSpacing(10)
+        tt_form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        tt_form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
+
         self.ed_tt_name = QtWidgets.QLineEdit()
         tt_form.addRow("Имя профиля:", self.ed_tt_name)
 
-        cookies_wrap = QtWidgets.QWidget()
-        cookies_layout = QtWidgets.QHBoxLayout(cookies_wrap)
-        cookies_layout.setContentsMargins(0, 0, 0, 0)
-        self.ed_tt_cookies = QtWidgets.QLineEdit()
-        self.btn_tt_cookies = QtWidgets.QPushButton("…")
-        cookies_layout.addWidget(self.ed_tt_cookies, 1)
-        cookies_layout.addWidget(self.btn_tt_cookies)
-        tt_form.addRow("cookies.json:", cookies_wrap)
+        secret_wrap = QtWidgets.QWidget()
+        secret_layout = QtWidgets.QHBoxLayout(secret_wrap)
+        secret_layout.setContentsMargins(0, 0, 0, 0)
+        secret_layout.setSpacing(6)
+        self.ed_tt_secret = QtWidgets.QLineEdit()
+        self.ed_tt_secret.setPlaceholderText("./secrets/tiktok/profile.json")
+        self.btn_tt_secret = QtWidgets.QPushButton("…")
+        secret_layout.addWidget(self.ed_tt_secret, 1)
+        secret_layout.addWidget(self.btn_tt_secret)
+        tt_form.addRow("Файл секретов:", secret_wrap)
+
+        self.btn_tt_secret_load = QtWidgets.QPushButton("Загрузить из файла")
+        tt_form.addRow("", self.btn_tt_secret_load)
+
+        self.ed_tt_client_key = QtWidgets.QLineEdit()
+        self.ed_tt_client_key.setPlaceholderText("aw41xxx…")
+        tt_form.addRow("Client key:", self.ed_tt_client_key)
+
+        self.ed_tt_client_secret = QtWidgets.QLineEdit()
+        self.ed_tt_client_secret.setPlaceholderText("секрет приложения")
+        self.ed_tt_client_secret.setEchoMode(QtWidgets.QLineEdit.EchoMode.PasswordEchoOnEdit)
+        tt_form.addRow("Client secret:", self.ed_tt_client_secret)
+
+        self.ed_tt_open_id = QtWidgets.QLineEdit()
+        self.ed_tt_open_id.setPlaceholderText("open_id пользователя")
+        tt_form.addRow("Open ID:", self.ed_tt_open_id)
+
+        self.ed_tt_refresh_token = QtWidgets.QLineEdit()
+        self.ed_tt_refresh_token.setPlaceholderText("refresh_token")
+        self.ed_tt_refresh_token.setEchoMode(QtWidgets.QLineEdit.EchoMode.PasswordEchoOnEdit)
+        tt_form.addRow("Refresh token:", self.ed_tt_refresh_token)
+
+        self.lbl_tt_token_status = QtWidgets.QLabel("Access token будет обновлён автоматически")
+        self.lbl_tt_token_status.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
+        tt_form.addRow("Access token:", self.lbl_tt_token_status)
 
         self.ed_tt_timezone = QtWidgets.QLineEdit()
         self.ed_tt_timezone.setPlaceholderText("Europe/Warsaw")
@@ -1329,22 +1386,26 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.txt_tt_caption = QtWidgets.QPlainTextEdit()
         self.txt_tt_caption.setPlaceholderText("Шаблон подписи: {title}\n{hashtags}")
-        self.txt_tt_caption.setFixedHeight(100)
+        self.txt_tt_caption.setFixedHeight(110)
         tt_form.addRow("Шаблон подписи:", self.txt_tt_caption)
 
         btn_tt_row = QtWidgets.QHBoxLayout()
+        btn_tt_row.setSpacing(8)
         self.btn_tt_add = QtWidgets.QPushButton("Сохранить")
         self.btn_tt_delete = QtWidgets.QPushButton("Удалить")
         self.btn_tt_set_active = QtWidgets.QPushButton("Сделать активным")
         btn_tt_row.addWidget(self.btn_tt_add)
         btn_tt_row.addWidget(self.btn_tt_delete)
         btn_tt_row.addWidget(self.btn_tt_set_active)
-        tt_form.addRow(btn_tt_row)
+
+        tt_form.addRow("", btn_tt_row)
 
         self.lbl_tt_active = QtWidgets.QLabel("—")
         tt_form.addRow("Активный профиль:", self.lbl_tt_active)
 
-        tp_layout.addLayout(tt_form, 2)
+        profile_layout.addLayout(tt_form)
+        profile_layout.addStretch(1)
+        tp_layout.addWidget(profile_panel, 2)
         tt.addWidget(grp_tt_profiles)
 
         grp_tt_run = QtWidgets.QGroupBox("Очередь и запуск")
@@ -1363,7 +1424,7 @@ class MainWindow(QtWidgets.QMainWindow):
         row += 1
 
         self.cb_tiktok_schedule = QtWidgets.QCheckBox("Запланировать публикации")
-        self.cb_tiktok_schedule.setChecked(True)
+        self.cb_tiktok_schedule.setChecked(bool(tk_cfg.get("schedule_enabled", True)))
         tr_layout.addWidget(self.cb_tiktok_schedule, row, 0, 1, 3)
         row += 1
 
@@ -1429,7 +1490,7 @@ class MainWindow(QtWidgets.QMainWindow):
         tr_layout.addLayout(run_tt_row, row, 0, 1, 3)
 
         tt.addWidget(grp_tt_run)
-        tt.addSpacing(8)
+        tt.addSpacing(6)
         self.tabs.addTab(self.tab_tiktok, "TikTok")
 
         self._toggle_tiktok_schedule()
@@ -2435,7 +2496,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_tt_add.clicked.connect(self._on_tiktok_add_update)
         self.btn_tt_delete.clicked.connect(self._on_tiktok_delete)
         self.btn_tt_set_active.clicked.connect(self._on_tiktok_set_active)
-        self.btn_tt_cookies.clicked.connect(lambda: self._browse_file(self.ed_tt_cookies, "Выбери экспорт cookies", "JSON (*.json);;Все файлы (*.*)"))
+        self.btn_tt_secret.clicked.connect(lambda: self._browse_file(self.ed_tt_secret, "Выбери файл секретов", "JSON (*.json);;YAML (*.yaml *.yml);;Все файлы (*.*)"))
+        self.btn_tt_secret_load.clicked.connect(self._load_tiktok_secret_file)
         self.cb_tiktok_schedule.toggled.connect(self._toggle_tiktok_schedule)
         self.cb_tiktok_schedule.toggled.connect(lambda _: self._update_tiktok_queue_label())
         self.cb_tiktok_draft.toggled.connect(lambda _: self._update_tiktok_queue_label())
@@ -4045,6 +4107,8 @@ class MainWindow(QtWidgets.QMainWindow):
         tk_cfg["github_workflow"] = self.ed_tiktok_workflow_settings.text().strip() or tk_cfg.get("github_workflow", ".github/workflows/tiktok-upload.yml")
         tk_cfg["github_ref"] = self.ed_tiktok_ref_settings.text().strip() or tk_cfg.get("github_ref", "main")
         tk_cfg["last_publish_at"] = self.dt_tiktok_publish.dateTime().toString(QtCore.Qt.DateFormat.ISODate)
+        if hasattr(self, "cb_tiktok_schedule"):
+            tk_cfg["schedule_enabled"] = bool(self.cb_tiktok_schedule.isChecked())
 
         tg_cfg = self.cfg.setdefault("telegram", {})
         tg_cfg["enabled"] = bool(self.cb_tg_enabled.isChecked())
@@ -4850,6 +4914,7 @@ class MainWindow(QtWidgets.QMainWindow):
         enable = self.cb_tiktok_schedule.isChecked() and not self.cb_tiktok_draft.isChecked()
         self.dt_tiktok_publish.setEnabled(enable)
         self.sb_tiktok_interval.setEnabled(enable)
+        self.cfg.setdefault("tiktok", {})["schedule_enabled"] = bool(self.cb_tiktok_schedule.isChecked())
 
     def _reflect_tiktok_interval(self, value: int):
         try:
@@ -5058,22 +5123,32 @@ class MainWindow(QtWidgets.QMainWindow):
         items = self.lst_tiktok_profiles.selectedItems()
         if not items:
             self.ed_tt_name.clear()
-            self.ed_tt_cookies.clear()
+            self.ed_tt_secret.clear()
+            self.ed_tt_client_key.clear()
+            self.ed_tt_client_secret.clear()
+            self.ed_tt_open_id.clear()
+            self.ed_tt_refresh_token.clear()
             self.ed_tt_timezone.clear()
             self.sb_tt_offset.setValue(0)
             self.ed_tt_hashtags.clear()
             self.txt_tt_caption.clear()
+            self._update_tiktok_token_status(None)
             return
         name = items[0].text()
         prof = self._active_tiktok_profile(name)
         if not prof:
             return
         self.ed_tt_name.setText(prof.get("name", ""))
-        self.ed_tt_cookies.setText(prof.get("cookies_file", ""))
+        self.ed_tt_secret.setText(prof.get("credentials_file", ""))
+        self.ed_tt_client_key.setText(prof.get("client_key", ""))
+        self.ed_tt_client_secret.setText(prof.get("client_secret", ""))
+        self.ed_tt_open_id.setText(prof.get("open_id", ""))
+        self.ed_tt_refresh_token.setText(prof.get("refresh_token", ""))
         self.ed_tt_timezone.setText(prof.get("timezone", ""))
         self.sb_tt_offset.setValue(int(prof.get("schedule_offset_minutes", 0)))
         self.ed_tt_hashtags.setText(prof.get("default_hashtags", ""))
         self.txt_tt_caption.setPlainText(prof.get("caption_template", "{title}\n{hashtags}"))
+        self._update_tiktok_token_status(prof)
         self.cmb_tiktok_profile.blockSignals(True)
         idx = self.cmb_tiktok_profile.findText(name)
         if idx >= 0:
@@ -5082,13 +5157,24 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_tiktok_add_update(self):
         name = self.ed_tt_name.text().strip()
-        cookies = self.ed_tt_cookies.text().strip()
-        if not name or not cookies:
-            self._post_status("Укажи имя и файл cookies для TikTok", state="error")
+        secret_file = self.ed_tt_secret.text().strip()
+        client_key = self.ed_tt_client_key.text().strip()
+        client_secret = self.ed_tt_client_secret.text().strip()
+        open_id = self.ed_tt_open_id.text().strip()
+        refresh_token = self.ed_tt_refresh_token.text().strip()
+        if not name:
+            self._post_status("Укажи имя профиля TikTok", state="error")
+            return
+        if not secret_file and not all([client_key, client_secret, open_id, refresh_token]):
+            self._post_status("Добавь файл секретов или заполни client_key, client_secret, open_id и refresh_token", state="error")
             return
         prof = {
             "name": name,
-            "cookies_file": cookies,
+            "credentials_file": secret_file,
+            "client_key": client_key,
+            "client_secret": client_secret,
+            "open_id": open_id,
+            "refresh_token": refresh_token,
             "timezone": self.ed_tt_timezone.text().strip(),
             "schedule_offset_minutes": int(self.sb_tt_offset.value()),
             "default_hashtags": self.ed_tt_hashtags.text().strip(),
@@ -5105,6 +5191,71 @@ class MainWindow(QtWidgets.QMainWindow):
         save_cfg(self.cfg)
         self._refresh_tiktok_ui()
         self._post_status(f"TikTok профиль «{name}» сохранён", state="ok")
+
+    def _update_tiktok_token_status(self, prof: Optional[dict]):
+        if not hasattr(self, "lbl_tt_token_status"):
+            return
+        default_text = "Access token будет обновлён автоматически"
+        if not prof:
+            self.lbl_tt_token_status.setText(default_text)
+            return
+        expires_raw = str(prof.get("access_token_expires_at", "") or prof.get("access_token_expires", ""))
+        if not expires_raw:
+            self.lbl_tt_token_status.setText(default_text)
+            return
+        qt_dt = QtCore.QDateTime.fromString(expires_raw, QtCore.Qt.DateFormat.ISODate)
+        if not qt_dt.isValid():
+            self.lbl_tt_token_status.setText("Access token: неверный формат даты")
+            return
+        qt_dt = qt_dt.toLocalTime()
+        now = QtCore.QDateTime.currentDateTime()
+        seconds = now.secsTo(qt_dt)
+        if seconds <= 0:
+            self.lbl_tt_token_status.setText(f"Access token истёк {qt_dt.toString('dd.MM HH:mm')}")
+            return
+        hours = seconds // 3600
+        minutes = (seconds % 3600) // 60
+        self.lbl_tt_token_status.setText(
+            f"Access token до {qt_dt.toString('dd.MM HH:mm')} (осталось {int(hours)}ч {int(minutes)}м)"
+        )
+
+    def _load_tiktok_secret_file(self):
+        path = self.ed_tt_secret.text().strip()
+        if not path:
+            self._post_status("Укажи путь к JSON/YAML с секретами TikTok", state="error")
+            return
+        file_path = _normalize_path(path)
+        if not file_path.exists():
+            self._post_status(f"Файл не найден: {file_path}", state="error")
+            return
+        try:
+            text = file_path.read_text(encoding="utf-8")
+            if file_path.suffix.lower() in {".yaml", ".yml"}:
+                data = yaml.safe_load(text) or {}
+            else:
+                data = json.loads(text)
+        except Exception as exc:
+            self._post_status(f"Не удалось прочитать секреты: {exc}", state="error")
+            return
+
+        mapping = {
+            "client_key": self.ed_tt_client_key,
+            "client_secret": self.ed_tt_client_secret,
+            "open_id": self.ed_tt_open_id,
+            "refresh_token": self.ed_tt_refresh_token,
+        }
+        for key, widget in mapping.items():
+            value = data.get(key)
+            if value:
+                widget.setText(str(value))
+
+        if data.get("access_token_expires_at") or data.get("access_token_expires"):
+            self._update_tiktok_token_status(data)
+        else:
+            current = self._active_tiktok_profile(self.ed_tt_name.text().strip())
+            self._update_tiktok_token_status(current)
+
+        self._post_status("Секреты TikTok подгружены", state="ok")
 
     def _on_tiktok_delete(self):
         items = self.lst_tiktok_profiles.selectedItems()

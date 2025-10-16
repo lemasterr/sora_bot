@@ -35,6 +35,7 @@ tiktok:
   upload_src_dir: ./merged
   archive_dir: ./uploaded_tiktok
   schedule_minutes_from_now: 0
+  schedule_enabled: true
   batch_step_minutes: 60
   batch_limit: 0
   draft_only: false
