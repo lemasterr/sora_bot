@@ -21,6 +21,7 @@ import shutil
 from pathlib import Path
 from functools import partial
 from urllib.request import urlopen, Request
+from collections import deque
 from typing import Optional, List, Union, Tuple, Dict
 
 from PyQt6 import QtCore, QtGui, QtWidgets
@@ -32,15 +33,14 @@ from threading import Lock
 PROMPTS_DEFAULT_KEY = "__general__"
 
 APP_DIR = Path(__file__).parent.resolve()
-PROJECT_ROOT = APP_DIR.parent.resolve()
+CFG_PATH = APP_DIR / "app_config.yaml"
+PROJECT_ROOT = APP_DIR  # корень хранения по умолчанию совпадает с директорией приложения
 WORKERS_DIR = PROJECT_ROOT / "workers"
 DL_DIR = PROJECT_ROOT / "downloads"
 BLUR_DIR = PROJECT_ROOT / "blurred"
 MERG_DIR = PROJECT_ROOT / "merged"
 HIST_FILE = PROJECT_ROOT / "history.jsonl"   # JSONL по-умолчанию (с обратн. совместимостью)
 TITLES_FILE = PROJECT_ROOT / "titles.txt"
-
-CFG_PATH = APP_DIR / "app_config.yaml"
 
 
 # ---------- утилиты ----------
@@ -489,35 +489,42 @@ def _ffconcat_escape(path: Path) -> str:
 
 
 # ---------- универсальный раннер FFmpeg с логами ----------
-def _run_ffmpeg(cmd: List[str], log_prefix: str = "FFMPEG") -> int:
+def _run_ffmpeg(cmd: List[str], log_prefix: str = "FFMPEG") -> Tuple[int, List[str]]:
     """
     Запускает FFmpeg, пишет stdout/stderr в логи через self.sig_log.
     self передаём через _run_ffmpeg._self из конструктора окна.
     """
+    tail = deque(maxlen=50)
     try:
         p = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True
+            text=True,
+            bufsize=1,
+            universal_newlines=True,
         )
         assert p.stdout
         for ln in p.stdout:
+            line = ln.rstrip()
+            tail.append(line)
             self = getattr(_run_ffmpeg, "_self", None)
             if self:
-                self.sig_log.emit(f"[{log_prefix}] {ln.rstrip()}")
+                self.sig_log.emit(f"[{log_prefix}] {line}")
         rc = p.wait()
-        return rc
+        return rc, list(tail)
     except FileNotFoundError:
         self = getattr(_run_ffmpeg, "_self", None)
         if self:
             self.sig_log.emit(f"[{log_prefix}] ffmpeg не найден. Проверь путь в Настройках → ffmpeg.")
-        return 127
+        tail.append("ffmpeg не найден")
+        return 127, list(tail)
     except Exception as e:
         self = getattr(_run_ffmpeg, "_self", None)
         if self:
             self.sig_log.emit(f"[{log_prefix}] ошибка запуска: {e}")
-        return 1
+        tail.append(str(e))
+        return 1, list(tail)
 
 
 # ---------- процесс-раннер ----------
@@ -3730,6 +3737,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._send_tg(f"🌫️ Блюр запускается: {total} файлов → {dst_dir}")
         counter = {"done": 0}
         lock = Lock()
+        failures: List[str] = []
 
         def blur_one(v: Path) -> bool:
             out = dst_dir / v.name
@@ -3778,12 +3786,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
             tried_labels: List[str] = []
             rc = 1
+            tail: List[str] = []
             final_audio_copy = copy_audio
             error_note: Optional[str] = None
             try:
                 for label, use_hw, audio_copy_flag in attempts:
                     tried_labels.append(label)
-                    rc = _run_ffmpeg(_build_cmd(use_hw, audio_copy_flag), log_prefix=f"BLUR:{v.name}")
+                    rc, tail = _run_ffmpeg(_build_cmd(use_hw, audio_copy_flag), log_prefix=f"BLUR:{v.name}")
                     if rc == 0:
                         final_audio_copy = audio_copy_flag
                         break
@@ -3796,12 +3805,18 @@ class MainWindow(QtWidgets.QMainWindow):
                 counter["done"] += 1
                 self._post_status("Блюр…", progress=counter["done"], total=total, state="running")
                 detail = "→".join(tried_labels) if tried_labels else ""
+                last_line = tail[-1] if tail else ""
+                if not error_note and not ok and last_line:
+                    error_note = last_line
                 if error_note:
                     self.sig_log.emit(f"[BLUR] Ошибка {v.name}: {error_note}")
                 else:
                     self.sig_log.emit(f"[BLUR] {'OK' if ok else 'FAIL'} ({detail}): {v.name}")
                 if ok and copy_audio and not final_audio_copy:
                     self.sig_log.emit(f"[BLUR] {v.name}: аудио сконвертировано в AAC для совместимости")
+                if not ok:
+                    note = error_note or last_line or "ffmpeg завершился с ошибкой"
+                    failures.append(f"{v.name}: {note}")
             return ok
 
         with ThreadPoolExecutor(max_workers=max(1, threads)) as ex:
@@ -3815,6 +3830,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self._post_status("Блюр завершён", state="ok")
         else:
             self._post_status("Блюр завершён с ошибками", state="error")
+            if failures:
+                preview = "; ".join(failures[:3])
+                if len(failures) > 3:
+                    preview += f" … и ещё {len(failures) - 3}"
+                self._append_activity(f"Блюр: ошибки → {preview}", kind="error")
         return ok_all
 
     # ----- MERGE -----
