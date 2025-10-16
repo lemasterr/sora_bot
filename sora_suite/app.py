@@ -650,6 +650,36 @@ class MainWindow(QtWidgets.QMainWindow):
         self._preset_tables: Dict[str, QtWidgets.QTableWidget] = {}
 
     # ----- helpers -----
+    def _ensure_path_exists(self, raw: Union[str, Path]) -> Path:
+        """Create file/dir for path within project if missing and return Path."""
+
+        if raw is None:
+            return Path()
+
+        try:
+            path = raw if isinstance(raw, Path) else Path(str(raw).strip())
+        except Exception:
+            return Path()
+
+        if not str(path):
+            return Path()
+
+        target = _project_path(path)
+
+        try:
+            if target.exists():
+                return target
+
+            if target.suffix:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.touch()
+            else:
+                target.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+
+        return target
+
     def _perform_delayed_startup(self):
         self._refresh_stats()
         self._reload_history()
