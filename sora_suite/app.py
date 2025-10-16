@@ -75,6 +75,7 @@ def load_cfg() -> dict:
     downloader = data.setdefault("downloader", {})
     downloader.setdefault("workdir", str(WORKERS_DIR / "downloader"))
     downloader.setdefault("entry", "download_all.py")
+    downloader.setdefault("max_videos", 0)
 
     # --- ffmpeg ---
     ff = data.setdefault("ffmpeg", {})
@@ -1167,7 +1168,9 @@ class MainWindow(QtWidgets.QMainWindow):
         grp_dl = QtWidgets.QGroupBox("Скачка")
         hb = QtWidgets.QHBoxLayout(grp_dl)
         hb.addWidget(QtWidgets.QLabel("Скачать N последних:"))
-        self.sb_max_videos = QtWidgets.QSpinBox(); self.sb_max_videos.setRange(0, 10000); self.sb_max_videos.setValue(0)
+        self.sb_max_videos = QtWidgets.QSpinBox()
+        self.sb_max_videos.setRange(0, 10000)
+        self.sb_max_videos.setValue(int(self.cfg.get("downloader", {}).get("max_videos", 0)))
         hb.addWidget(self.sb_max_videos)
         self.btn_apply_dl = QtWidgets.QPushButton("Применить")
         hb.addWidget(self.btn_apply_dl)
@@ -2207,6 +2210,7 @@ class MainWindow(QtWidgets.QMainWindow):
             (self.ed_merged, "textEdited"),
             (self.ed_blur_src, "textEdited"),
             (self.ed_merge_src, "textEdited"),
+            (self.sb_max_videos, "valueChanged"),
             (self.cb_ui_show_activity, "toggled"),
             (self.cmb_ui_activity_density, "currentIndexChanged"),
             (self.ed_cdp_port, "textEdited"),
@@ -3285,6 +3289,16 @@ class MainWindow(QtWidgets.QMainWindow):
         if persist:
             save_cfg(self.cfg)
 
+    @QtCore.pyqtSlot(str)
+    def _update_vcodec_ui(self, text: str):
+        if not hasattr(self, "cmb_vcodec"):
+            return
+        self.cmb_vcodec.blockSignals(True)
+        try:
+            self.cmb_vcodec.setCurrentText(text)
+        finally:
+            self.cmb_vcodec.blockSignals(False)
+
     def _on_activity_toggle(self, checked: bool):
         self._apply_activity_visibility(bool(checked), persist=True)
 
@@ -3531,7 +3545,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ----- Apply DL limit -----
     def _apply_dl_limit(self):
-        n = self.sb_max_videos.value()
+        n = int(self.sb_max_videos.value())
+        self.cfg.setdefault("downloader", {})["max_videos"] = n
+        save_cfg(self.cfg)
         self._post_status(f"Будут скачаны последние {n if n>0 else 'ВСЕ'}", state="ok")
 
     # ----- Merge opts -----
@@ -3635,18 +3651,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self._run_download_sync()
 
     def _run_download_sync(self) -> bool:
-        self._save_settings_clicked(silent=True)
         dest_dir = _project_path(self.cfg.get("downloads_dir", str(DL_DIR)))
         before = len(self._iter_videos(dest_dir)) if dest_dir.exists() else 0
 
-        workdir=self.cfg.get("downloader",{}).get("workdir", str(WORKERS_DIR / "downloader"))
-        entry=self.cfg.get("downloader",{}).get("entry","download_all.py")
-        python=sys.executable; cmd=[python, entry]; env=os.environ.copy(); env["PYTHONUNBUFFERED"]="1"
+        dl_cfg = self.cfg.get("downloader", {}) or {}
+        workdir = dl_cfg.get("workdir", str(WORKERS_DIR / "downloader"))
+        entry = dl_cfg.get("entry", "download_all.py")
+        max_v = int(dl_cfg.get("max_videos", 0) or 0)
+
+        python = sys.executable
+        cmd = [python, entry]
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
         env["DOWNLOAD_DIR"] = str(dest_dir)
         env["TITLES_FILE"] = str(self._titles_path())
         env["TITLES_CURSOR_FILE"] = str(self._cursor_path())
-        max_v = int(self.sb_max_videos.value())
-        env["MAX_VIDEOS"] = str(max_v if max_v>0 else 0)
+        env["MAX_VIDEOS"] = str(max_v if max_v > 0 else 0)
         done = threading.Event(); rc_holder = {"rc":1}
         def on_finish(rc, tag):
             if tag=="DL": rc_holder["rc"]=rc; done.set()
@@ -3665,10 +3685,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ----- BLUR -----
     def _run_blur_presets_sync(self) -> bool:
-        self._save_settings_clicked(silent=True)
-
-        ff = self.cfg.get("ffmpeg", {})
-        ffbin_raw = (self.ed_ff_bin.text().strip() or ff.get("binary") or "ffmpeg").strip()
+        ff_cfg = self.cfg.get("ffmpeg", {}) or {}
+        ffbin_raw = (ff_cfg.get("binary") or "ffmpeg").strip()
         ffbin = ffbin_raw
         if ffbin_raw:
             candidate = shutil.which(ffbin_raw)
@@ -3692,24 +3710,41 @@ class MainWindow(QtWidgets.QMainWindow):
             self._send_tg("⚠️ FFmpeg не найден. Проверь настройку пути в разделе ffmpeg.")
             return False
 
-        post = self.ed_post.text().strip()
-        vcodec_choice = self.cmb_vcodec.currentText().strip()
+        post = ff_cfg.get("post_chain", "").strip()
+        vcodec_choice = (ff_cfg.get("vcodec") or "libx264").strip()
         if vcodec_choice == "copy":
             self.sig_log.emit("[BLUR] vcodec=copy несовместим с delogo — переключаю на libx264")
-            self.cmb_vcodec.blockSignals(True)
-            self.cmb_vcodec.setCurrentText("libx264")
-            self.cmb_vcodec.blockSignals(False)
-            self._mark_settings_dirty()
             vcodec_choice = "libx264"
-        crf = str(self.ed_crf.value())
-        preset = self.cmb_preset.currentText()
-        fmt = self.cmb_format.currentText()
-        copy_audio = self.cb_copy_audio.isChecked()
-        threads = int(self.sb_blur_threads.value())
+            ff_cfg["vcodec"] = "libx264"
+            save_cfg(self.cfg)
+            QtCore.QMetaObject.invokeMethod(
+                self,
+                "_update_vcodec_ui",
+                QtCore.Qt.ConnectionType.QueuedConnection,
+                QtCore.Q_ARG(str, "libx264"),
+            )
+        crf = str(int(ff_cfg.get("crf", 18)))
+        preset = ff_cfg.get("preset", "veryfast")
+        fmt = (ff_cfg.get("format") or "mp4").strip()
+        copy_audio = bool(ff_cfg.get("copy_audio", True))
+        threads = int(ff_cfg.get("blur_threads", 2) or 1)
 
-        active = self.cmb_active_preset.currentText().strip()
-        presets = (self.cfg.get("ffmpeg", {}).get("presets") or {})
-        zones = (presets.get(active) or {}).get("zones") or []
+        presets = ff_cfg.get("presets") or {}
+        active = (ff_cfg.get("active_preset") or "").strip()
+        if not active and presets:
+            active = next(iter(presets.keys()))
+        raw_zones = (presets.get(active) or {}).get("zones") or []
+        zones = []
+        for zone in raw_zones:
+            try:
+                x = int(zone.get("x", 0))
+                y = int(zone.get("y", 0))
+                w = int(zone.get("w", 0))
+                h = int(zone.get("h", 0))
+                if w > 0 and h > 0:
+                    zones.append({"x": x, "y": y, "w": w, "h": h})
+            except Exception:
+                continue
         if not zones:
             self._post_status("В пресете нет зон для блюра", state="error")
             return False
@@ -4213,6 +4248,9 @@ class MainWindow(QtWidgets.QMainWindow):
         tg_cfg["enabled"] = bool(self.cb_tg_enabled.isChecked())
         tg_cfg["bot_token"] = self.ed_tg_token.text().strip()
         tg_cfg["chat_id"] = self.ed_tg_chat.text().strip()
+
+        dl_cfg = self.cfg.setdefault("downloader", {})
+        dl_cfg["max_videos"] = int(self.sb_max_videos.value())
 
         ui_cfg = self.cfg.setdefault("ui", {})
         ui_cfg["show_activity"] = bool(self.cb_ui_show_activity.isChecked())

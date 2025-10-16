@@ -15,6 +15,7 @@ autogen:
 downloader:
   workdir: ./workers/downloader
   entry: download_all.py
+  max_videos: 0
 youtube:
   workdir: ./workers/uploader
   entry: upload_queue.py
