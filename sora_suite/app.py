@@ -896,6 +896,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_open_raw = QtWidgets.QPushButton("RAW (downloads)")
         self.btn_open_blur = QtWidgets.QPushButton("BLURRED")
         self.btn_open_merge = QtWidgets.QPushButton("MERGED")
+        self.btn_quick_update = QtWidgets.QPushButton("Обновить из GitHub")
+        self.btn_quick_update.setToolTip("Выполнить git pull для текущего репозитория")
         self.btn_start_selected = QtWidgets.QPushButton("Старт выбранного")
         self.btn_stop_all = QtWidgets.QPushButton("Стоп все")
         tb.addWidget(self.btn_open_chrome)
@@ -903,6 +905,7 @@ class MainWindow(QtWidgets.QMainWindow):
         tb.addWidget(self.btn_open_raw)
         tb.addWidget(self.btn_open_blur)
         tb.addWidget(self.btn_open_merge)
+        tb.addWidget(self.btn_quick_update)
         tb.addStretch(1)
         tb.addWidget(self.btn_start_selected)
         tb.addWidget(self.btn_stop_all)
@@ -2438,6 +2441,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_env_check.clicked.connect(self._run_env_check)
         self.btn_update_check.clicked.connect(lambda: self._check_for_updates(dry_run=True))
         self.btn_update_pull.clicked.connect(lambda: self._check_for_updates(dry_run=False))
+        self.btn_quick_update.clicked.connect(lambda: self._check_for_updates(dry_run=False))
         self.btn_maintenance_cleanup.clicked.connect(lambda: self._run_maintenance_cleanup(manual=True))
         self.btn_maintenance_sizes.clicked.connect(self._report_dir_sizes)
         self.cmb_ui_activity_density.currentIndexChanged.connect(self._on_activity_density_changed)
@@ -5130,6 +5134,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if not git or not git_dir.exists():
             self._post_status("git недоступен или проект не является репозиторием", state="error")
             return
+
+        action = "Проверяем обновления" if dry_run else "Обновляем из GitHub"
+        self._post_status(f"{action}…", state="running")
+        self._append_activity(f"{action} через git", kind="running", card_text=action)
 
         def run_git(args: List[str]) -> subprocess.CompletedProcess[str]:
             return subprocess.run([git, *args], cwd=repo, capture_output=True, text=True)
