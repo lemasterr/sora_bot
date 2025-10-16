@@ -282,53 +282,68 @@ def _dir_size(path: Path) -> int:
 
 
 def ensure_dirs(cfg: dict):
-    raw_root = cfg.get("project_root", "") or ""
-    root_path = _normalize_path(raw_root)
+    root_path = _project_path(cfg.get("project_root", PROJECT_ROOT))
     root_path.mkdir(parents=True, exist_ok=True)
     cfg["project_root"] = str(root_path)
 
-    for key in ["downloads_dir", "blurred_dir", "merged_dir"]:
-        raw = cfg.get(key, "") or ""
-        path = _normalize_path(raw)
+    def _ensure_dir(key: str, fallback: Union[str, Path]) -> Path:
+        raw = cfg.get(key) or fallback
+        path = _project_path(raw)
         path.mkdir(parents=True, exist_ok=True)
         cfg[key] = str(path)
+        return path
+
+    downloads_path = _ensure_dir("downloads_dir", DL_DIR)
+    blurred_path = _ensure_dir("blurred_dir", BLUR_DIR)
+    merged_path = _ensure_dir("merged_dir", MERG_DIR)
 
     # источники для пост-обработки — если пусто или каталог не существует, подтягиваем из основных
-    blur_src = cfg.get("blur_src_dir") or cfg.get("downloads_dir")
-    merge_src = cfg.get("merge_src_dir") or cfg.get("blurred_dir")
-    blur_path = _normalize_path(blur_src)
-    merge_path = _normalize_path(merge_src)
+    blur_path = _project_path(cfg.get("blur_src_dir") or downloads_path)
     if not blur_path.exists():
-        blur_path = _normalize_path(cfg.get("downloads_dir"))
-    if not merge_path.exists():
-        merge_path = _normalize_path(cfg.get("blurred_dir"))
+        blur_path = downloads_path
     blur_path.mkdir(parents=True, exist_ok=True)
-    merge_path.mkdir(parents=True, exist_ok=True)
     cfg["blur_src_dir"] = str(blur_path)
+
+    merge_path = _project_path(cfg.get("merge_src_dir") or blurred_path)
+    if not merge_path.exists():
+        merge_path = blurred_path
+    merge_path.mkdir(parents=True, exist_ok=True)
     cfg["merge_src_dir"] = str(merge_path)
+
     yt = cfg.get("youtube", {}) or {}
     archive = yt.get("archive_dir")
     if archive:
-        archive_path = _normalize_path(archive)
+        archive_path = _project_path(archive)
         archive_path.mkdir(parents=True, exist_ok=True)
         yt["archive_dir"] = str(archive_path)
 
     upload_src = yt.get("upload_src_dir")
     if upload_src:
-        src_path = _normalize_path(upload_src)
+        src_path = _project_path(upload_src)
         src_path.mkdir(parents=True, exist_ok=True)
         yt["upload_src_dir"] = str(src_path)
+
+    tiktok = cfg.get("tiktok", {}) or {}
+    secrets_dir = tiktok.get("secrets_dir")
+    if secrets_dir:
+        secrets_path = _project_path(secrets_dir)
+        secrets_path.mkdir(parents=True, exist_ok=True)
+        tiktok["secrets_dir"] = str(secrets_path)
+
+    cfg["downloads_dir"] = str(downloads_path)
+    cfg["blurred_dir"] = str(blurred_path)
+    cfg["merged_dir"] = str(merged_path)
 
     tk = cfg.get("tiktok", {}) or {}
     tk_archive = tk.get("archive_dir")
     if tk_archive:
-        tk_archive_path = _normalize_path(tk_archive)
+        tk_archive_path = _project_path(tk_archive)
         tk_archive_path.mkdir(parents=True, exist_ok=True)
         tk["archive_dir"] = str(tk_archive_path)
 
     tk_src = tk.get("upload_src_dir")
     if tk_src:
-        tk_src_path = _normalize_path(tk_src)
+        tk_src_path = _project_path(tk_src)
         tk_src_path.mkdir(parents=True, exist_ok=True)
         tk["upload_src_dir"] = str(tk_src_path)
 
@@ -372,13 +387,19 @@ def append_history(cfg: dict, record: dict):
 
 
 def open_in_finder(path: Union[str, Path]):
-    path = str(_project_path(path))
+    resolved = _project_path(path)
+    if not resolved.exists():
+        try:
+            resolved.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+    target = str(resolved)
     if sys.platform == "darwin":
-        subprocess.Popen(["open", path])
+        subprocess.Popen(["open", target])
     elif sys.platform.startswith("win"):
-        subprocess.Popen(["explorer", path])
+        subprocess.Popen(["explorer", target])
     else:
-        subprocess.Popen(["xdg-open", path])
+        subprocess.Popen(["xdg-open", target])
 
 
 def send_tg(cfg: dict, text: str, timeout: float = 5.0) -> bool:
