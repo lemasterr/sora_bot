@@ -199,6 +199,52 @@ def go_back_to_drafts(page) -> None:
     page.locator(CARD_LINKS).first.wait_for(timeout=10000)
 
 
+def ensure_card_pool(page, desired: int) -> int:
+    """Прокручивает ленту, чтобы подгрузить достаточно карточек."""
+
+    cards = page.locator(CARD_LINKS)
+    try:
+        page.evaluate("window.scrollTo(0, 0)")
+    except Exception:
+        pass
+
+    jitter(0.15, 0.3)
+    print("[i] Прокручиваю ленту, чтобы подгрузить новые карточки…")
+
+    prev_count = -1
+    stagnation = 0
+    rounds = 0
+
+    while True:
+        count = cards.count()
+        if desired and count >= desired:
+            break
+        if count == prev_count:
+            stagnation += 1
+        else:
+            stagnation = 0
+            if prev_count >= 0 and count > prev_count:
+                print(f"[i] Карточек стало: {count}")
+        if (desired and stagnation >= 6) or (not desired and stagnation >= 4):
+            break
+        if rounds > 60:
+            break
+
+        prev_count = count
+        rounds += 1
+
+        target_idx = max(0, count - 1)
+        try:
+            cards.nth(target_idx).scroll_into_view_if_needed()
+        except Exception:
+            page.mouse.wheel(0, 1600)
+        long_jitter(0.6, 1.0)
+
+    final_count = cards.count()
+    print(f"[i] Доступно карточек после прокрутки: {final_count}")
+    return final_count
+
+
 def main() -> None:
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
     with sync_playwright() as p:
@@ -215,17 +261,17 @@ def main() -> None:
 
             cards = page.locator(CARD_LINKS)
             cards.first.wait_for(timeout=10000)
-            total_all = cards.count()
 
-            if MAX_VIDEOS and MAX_VIDEOS > 0:
-                start = max(0, total_all - MAX_VIDEOS)
-                indices = list(range(start, total_all))
-                print(f"[i] Ограничение: последние {len(indices)} из {total_all}")
+            desired = MAX_VIDEOS if MAX_VIDEOS > 0 else 0
+            total_all = ensure_card_pool(page, desired)
+
+            if desired:
+                count = min(desired, total_all)
+                indices = list(range(count))
+                print(f"[i] Скачаю первые {count} карточек из {total_all}")
             else:
                 indices = list(range(total_all))
-                print(f"[i] Ограничения нет. Всего карточек: {total_all}")
-
-            print(f"[i] Найдено карточек: {len(indices)}")
+                print(f"[i] Скачаю все доступные карточки: {total_all}")
 
             for k, i in enumerate(indices, 1):
                 print(f"[>] {k}/{len(indices)} — открываю карточку…")
@@ -254,6 +300,10 @@ def main() -> None:
                 long_jitter()
                 go_back_to_drafts(page)
                 long_jitter()
+                try:
+                    page.evaluate("window.scrollTo(0, 0)")
+                except Exception:
+                    pass
 
             print("[i] Готово.")
         except Exception as exc:  # noqa: BLE001

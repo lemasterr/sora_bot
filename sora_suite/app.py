@@ -22,7 +22,7 @@ from pathlib import Path
 from functools import partial
 from urllib.request import urlopen, Request
 from collections import deque
-from typing import Optional, List, Union, Tuple, Dict
+from typing import Optional, List, Union, Tuple, Dict, Callable
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 
@@ -628,6 +628,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_step_timer = QtCore.QTimer(self)
         self._current_step_timer.setInterval(1000)
         self._current_step_timer.timeout.connect(self._tick_step_timer)
+
+        self._scenario_waiters: Dict[str, threading.Event] = {}
+        self._scenario_results: Dict[str, int] = {}
+        self._scenario_wait_lock = Lock()
 
         self._build_ui()
         self._wire()
@@ -1657,8 +1661,17 @@ class MainWindow(QtWidgets.QMainWindow):
         prompts_stack.addWidget(grp_used)
 
         grp_instances = QtWidgets.QGroupBox("Окна Sora и параллельная подача")
+        grp_instances.setTitle("Параллельная подача (отключено)")
         inst_layout = QtWidgets.QVBoxLayout(grp_instances)
         inst_layout.setSpacing(10)
+        disabled_note = QtWidgets.QLabel(
+            "Параллельный запуск окон Sora временно отключён. Используйте стандартный автоген на вкладке слева."
+        )
+        disabled_note.setWordWrap(True)
+        disabled_note.setStyleSheet("color:#94a3b8;font-size:11px;")
+        inst_layout.addWidget(disabled_note)
+
+        grp_instances.setEnabled(False)
         top_row = QtWidgets.QHBoxLayout()
         self.lst_instances = QtWidgets.QListWidget()
         self.lst_instances.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -1715,11 +1728,10 @@ class MainWindow(QtWidgets.QMainWindow):
         run_row.addStretch(1)
         inst_layout.addLayout(run_row)
 
-        self.lbl_instances_hint = QtWidgets.QLabel("Выдели несколько окон, чтобы запустить их одновременно.")
-        self.lbl_instances_hint.setStyleSheet("color:#94a3b8;font-size:11px;")
-        inst_layout.addWidget(self.lbl_instances_hint)
+        self.lbl_instances_hint = QtWidgets.QLabel("—")
+        self.lbl_instances_hint.setVisible(False)
 
-        grp_instances.setMinimumHeight(220)
+        grp_instances.setMinimumHeight(160)
         prompts_stack.addWidget(grp_instances)
         prompts_stack.setStretchFactor(0, 4)
         prompts_stack.setStretchFactor(1, 2)
@@ -2638,6 +2650,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._current_step_started = None
         self._current_step_state = state
 
+        kind_map = {"idle": "info", "running": "running", "ok": "success", "error": "error"}
+        preserve = state == "running"
+        self._update_current_event(text, kind_map.get(state, "info"), preserve_timer=preserve)
+
     def _set_step_timer_label(self, seconds: float, prefix: str = "⌛"):
         if not hasattr(self, "lbl_current_event_timer"):
             return
@@ -3212,7 +3228,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         timestamp = time.strftime("%H:%M:%S")
         pretty = f"[{timestamp}] {normalized}"
-        self._append_activity(pretty, kind=kind, card_text=normalized)
+        self._append_activity(pretty, kind=kind, card_text=False)
 
     # helper для статуса
     def _post_status(self, text: str, progress: int = 0, total: int = 0, state: str = "idle"):
@@ -3223,7 +3239,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._post_status("Лента событий очищена", state="idle")
         self._update_current_event("—", "info")
 
-    def _update_current_event(self, text: str, kind: str = "info", persist: bool = False):
+    def _update_current_event(self, text: str, kind: str = "info", persist: bool = False, preserve_timer: bool = False):
         if not hasattr(self, "current_event_card"):
             return
 
@@ -3240,12 +3256,9 @@ class MainWindow(QtWidgets.QMainWindow):
             f"QLabel#currentEventBody{{color:{color};font-size:15px;font-weight:600;}}"
         )
         self.lbl_current_event_body.setText(text or "—")
-        if hasattr(self, "lbl_current_event_timer"):
-            self.lbl_current_event_timer.setText("—")
-        self._current_step_started = None
-        self._current_step_state = "idle"
-        if hasattr(self, "_current_step_timer"):
-            self._current_step_timer.stop()
+        if not preserve_timer:
+            if hasattr(self, "lbl_current_event_timer"):
+                self.lbl_current_event_timer.setText("—")
         self.cfg.setdefault("ui", {})["accent_kind"] = kind
         if persist:
             save_cfg(self.cfg)
@@ -3385,6 +3398,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._send_tg("TIKTOK: ok")
             self.ui(self._update_tiktok_queue_label)
         self._refresh_stats()
+
+        with self._scenario_wait_lock:
+            if tag in self._scenario_waiters:
+                self._scenario_results[tag] = rc
+                self._scenario_waiters[tag].set()
 
     # ----- Chrome (через тень профиля) -----
     def _open_chrome(self, instance: Optional[dict] = None):
@@ -3625,6 +3643,36 @@ class MainWindow(QtWidgets.QMainWindow):
     def _run_autogen(self):
         self._run_autogen_sync()
 
+    def _await_runner(self, runner: ProcRunner, tag: str, starter: Callable[[], None]) -> int:
+        if runner.proc and runner.proc.poll() is None:
+            self._append_activity(f"{tag}: задача уже выполняется", kind="error", card_text=False)
+            return 1
+
+        waiter = threading.Event()
+        with self._scenario_wait_lock:
+            self._scenario_waiters[tag] = waiter
+
+        try:
+            starter()
+        except Exception as exc:  # noqa: BLE001
+            with self._scenario_wait_lock:
+                self._scenario_waiters.pop(tag, None)
+                self._scenario_results.pop(tag, None)
+            self._append_activity(f"{tag}: запуск не удался ({exc})", kind="error", card_text=False)
+            return 1
+
+        # ждём завершения, обновляя ожидание пока сигнал не придёт
+        while not waiter.wait(0.25):
+            with self._scenario_wait_lock:
+                if tag not in self._scenario_waiters:
+                    break
+
+        with self._scenario_wait_lock:
+            self._scenario_waiters.pop(tag, None)
+            rc = self._scenario_results.pop(tag, 1)
+
+        return rc
+
     def _run_autogen_sync(self) -> bool:
         self._save_settings_clicked(silent=True)
         instances = [inst for inst in (self.cfg.get("autogen", {}).get("instances") or []) if inst.get("enabled", True)]
@@ -3634,16 +3682,10 @@ class MainWindow(QtWidgets.QMainWindow):
         entry=self.cfg.get("autogen",{}).get("entry","main.py")
         python=sys.executable; cmd=[python, entry]; env=os.environ.copy(); env["PYTHONUNBUFFERED"]="1"
         env["SORA_PROMPTS_FILE"]=str(self._prompts_path())  # FIX: синхронный запуск тоже
-        done = threading.Event(); rc_holder = {"rc":1}
-        def on_finish(rc, tag):
-            if tag=="AUTOGEN": rc_holder["rc"]=rc; done.set()
-        self.runner_autogen.finished.connect(on_finish)
         self._send_tg("✍️ Autogen запускается")
-        self.runner_autogen.run(cmd, cwd=workdir, env=env)
         self._post_status("Вставка промптов…", state="running")
-        done.wait()
-        self.runner_autogen.finished.disconnect(on_finish)
-        ok = rc_holder["rc"] == 0
+        rc = self._await_runner(self.runner_autogen, "AUTOGEN", lambda: self.runner_autogen.run(cmd, cwd=workdir, env=env))
+        ok = rc == 0
         self._send_tg("✍️ Autogen завершён" if ok else "⚠️ Autogen завершён с ошибками")
         return ok
 
@@ -3667,16 +3709,10 @@ class MainWindow(QtWidgets.QMainWindow):
         env["TITLES_FILE"] = str(self._titles_path())
         env["TITLES_CURSOR_FILE"] = str(self._cursor_path())
         env["MAX_VIDEOS"] = str(max_v if max_v > 0 else 0)
-        done = threading.Event(); rc_holder = {"rc":1}
-        def on_finish(rc, tag):
-            if tag=="DL": rc_holder["rc"]=rc; done.set()
-        self.runner_dl.finished.connect(on_finish)
         self._send_tg(f"⬇️ Скачивание запускается → {dest_dir}")
-        self.runner_dl.run(cmd, cwd=workdir, env=env)
         self._post_status("Скачивание…", state="running")
-        done.wait()
-        self.runner_dl.finished.disconnect(on_finish)
-        ok = rc_holder["rc"] == 0
+        rc = self._await_runner(self.runner_dl, "DL", lambda: self.runner_dl.run(cmd, cwd=workdir, env=env))
+        ok = rc == 0
         after = len(self._iter_videos(dest_dir)) if dest_dir.exists() else before
         delta = max(after - before, 0)
         status = "завершено" if ok else "завершено с ошибками"
@@ -3729,11 +3765,41 @@ class MainWindow(QtWidgets.QMainWindow):
         copy_audio = bool(ff_cfg.get("copy_audio", True))
         threads = int(ff_cfg.get("blur_threads", 2) or 1)
 
-        presets = ff_cfg.get("presets") or {}
-        active = (ff_cfg.get("active_preset") or "").strip()
-        if not active and presets:
-            active = next(iter(presets.keys()))
-        raw_zones = (presets.get(active) or {}).get("zones") or []
+        preset_lookup: Dict[str, List[Dict[str, int]]] = {}
+        if getattr(self, "_preset_cache", None):
+            preset_lookup = {name: [dict(zone) for zone in zones] for name, zones in self._preset_cache.items()}
+        else:
+            stored = ff_cfg.get("presets") or {}
+            for name, body in stored.items():
+                entries = [
+                    {
+                        "x": int(zone.get("x", 0)),
+                        "y": int(zone.get("y", 0)),
+                        "w": int(zone.get("w", 0)),
+                        "h": int(zone.get("h", 0)),
+                    }
+                    for zone in (body.get("zones") or [])
+                ]
+                if not entries:
+                    entries = [{"x": 0, "y": 0, "w": 0, "h": 0}]
+                preset_lookup[name] = entries
+
+        if not preset_lookup:
+            preset_lookup = {
+                "default": [{"x": 0, "y": 0, "w": 0, "h": 0}],
+            }
+
+        active_ui = ""
+        if hasattr(self, "cmb_active_preset"):
+            active_ui = self.cmb_active_preset.currentText().strip()
+        active = active_ui or (ff_cfg.get("active_preset") or "").strip()
+        if not active and preset_lookup:
+            active = next(iter(preset_lookup.keys()))
+
+        ff_cfg["active_preset"] = active
+        save_cfg(self.cfg)
+
+        raw_zones = preset_lookup.get(active, [])
         zones = []
         for zone in raw_zones:
             try:
@@ -3773,6 +3839,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         dst_dir = _project_path(self.cfg.get("blurred_dir", str(BLUR_DIR)))
         dst_dir.mkdir(parents=True, exist_ok=True)
+
+        source_display = src_primary if src_primary.exists() else (candidate_dirs[0] if candidate_dirs else downloads_dir)
 
         allowed_ext = {".mp4", ".mov", ".m4v", ".webm", ".mkv"}
         seen: set[str] = set()
@@ -3886,9 +3954,19 @@ class MainWindow(QtWidgets.QMainWindow):
             results = list(ex.map(blur_one, videos))
 
         ok_all = all(results)
-        append_history(self.cfg, {"event":"blur_finish","ok":ok_all,"count":total,"preset":active,"src":str(src_dir)})
+        append_history(
+            self.cfg,
+            {
+                "event": "blur_finish",
+                "ok": ok_all,
+                "count": total,
+                "preset": active,
+                "src": str(source_display) if source_display else "",
+            },
+        )
         status = "завершён" if ok_all else "с ошибками"
-        self._send_tg(f"🌫️ Блюр {status}: {total} файлов, пресет {active}, из {src_dir.name} → {dst_dir}")
+        src_name = source_display.name if isinstance(source_display, Path) else "—"
+        self._send_tg(f"🌫️ Блюр {status}: {total} файлов, пресет {active}, из {src_name} → {dst_dir}")
         if ok_all:
             self._post_status("Блюр завершён", state="ok")
         else:
@@ -4055,21 +4133,11 @@ class MainWindow(QtWidgets.QMainWindow):
         if publish_at:
             env["YOUTUBE_PUBLISH_AT"] = publish_at
 
-        done = threading.Event(); rc_holder = {"rc": 1}
-
-        def on_finish(rc, tag):
-            if tag == "YT":
-                rc_holder["rc"] = rc
-                done.set()
-
-        self.runner_upload.finished.connect(on_finish)
         draft_note = " (черновики)" if self.cb_youtube_draft_only.isChecked() else ""
         self._send_tg(f"📤 YouTube загрузка запускается: {len(videos)} файлов, канал {channel}{draft_note}")
-        self.runner_upload.run(cmd, cwd=workdir, env=env)
         self._post_status("Загрузка на YouTube…", state="running")
-        done.wait()
-        self.runner_upload.finished.disconnect(on_finish)
-        ok = rc_holder["rc"] == 0
+        rc = self._await_runner(self.runner_upload, "YT", lambda: self.runner_upload.run(cmd, cwd=workdir, env=env))
+        ok = rc == 0
         status = "завершена" if ok else "с ошибками"
         schedule_part = f", старт {schedule_text}" if schedule_text else draft_note
         self._send_tg(f"📤 YouTube загрузка {status}: {len(videos)} файлов, канал {channel}{schedule_part}")
@@ -5177,22 +5245,11 @@ class MainWindow(QtWidgets.QMainWindow):
         if publish_at_iso:
             env["TIKTOK_PUBLISH_AT"] = publish_at_iso
 
-        done = threading.Event()
-        rc_holder = {"rc": 1}
-
-        def on_finish(rc, tag):
-            if tag == "TT":
-                rc_holder["rc"] = rc
-                done.set()
-
-        self.runner_tiktok.finished.connect(on_finish)
         draft_note = " (черновики)" if self.cb_tiktok_draft.isChecked() else ""
         self._send_tg(f"📤 TikTok запускается: {len(videos)} роликов{draft_note}")
-        self.runner_tiktok.run([python, entry], cwd=workdir, env=env)
         self._post_status("Загрузка в TikTok…", state="running")
-        done.wait()
-        self.runner_tiktok.finished.disconnect(on_finish)
-        ok = rc_holder["rc"] == 0
+        rc = self._await_runner(self.runner_tiktok, "TT", lambda: self.runner_tiktok.run([python, entry], cwd=workdir, env=env))
+        ok = rc == 0
         status = "завершена" if ok else "с ошибками"
         schedule_part = f", старт {schedule_text}" if schedule_text else draft_note
         self._append_activity(f"TikTok загрузка {status}{schedule_part}", kind=("success" if ok else "error"))
