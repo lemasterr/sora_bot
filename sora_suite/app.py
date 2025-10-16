@@ -601,9 +601,6 @@ class MainWindow(QtWidgets.QMainWindow):
         auto_cfg = self.cfg.setdefault("autogen", {})
         key = auto_cfg.get("active_prompts_profile", PROMPTS_DEFAULT_KEY) or PROMPTS_DEFAULT_KEY
         self._current_prompt_profile_key = key
-        self._instance_prompt_last_auto = ""
-        self._last_instance_profile = ""
-
         self._ensure_all_profile_prompts()
 
         self._apply_theme()
@@ -651,7 +648,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._preset_cache: Dict[str, List[Dict[str, int]]] = {}
         self._preset_tables: Dict[str, QtWidgets.QTableWidget] = {}
-        self._autogen_instance_runners: Dict[str, ProcRunner] = {}
 
     # ----- helpers -----
     def _perform_delayed_startup(self):
@@ -663,7 +659,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_tiktok_ui()
         self._load_autogen_cfg_ui()
         self._load_readme_preview()
-        self._refresh_autogen_instances_ui()
         self._reload_used_prompts()
         maint_cfg = self.cfg.get("maintenance", {}) or {}
         if maint_cfg.get("auto_cleanup_on_start"):
@@ -689,6 +684,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self._ensure_path_exists(str(self._default_profile_prompts(profile_name)))
         except Exception:
             pass
+
+    def _default_profile_prompts(self, profile_name: Optional[str]) -> Path:
+        if not profile_name:
+            return WORKERS_DIR / "autogen" / "prompts.txt"
+        slug = slugify(profile_name) or "profile"
+        return WORKERS_DIR / "autogen" / f"prompts_{slug}.txt"
 
     def _apply_theme(self):
         app = QtWidgets.QApplication.instance()
@@ -1660,83 +1661,9 @@ class MainWindow(QtWidgets.QMainWindow):
         used_layout.addLayout(used_btns)
         prompts_stack.addWidget(grp_used)
 
-        grp_instances = QtWidgets.QGroupBox("Окна Sora и параллельная подача")
-        grp_instances.setTitle("Параллельная подача (отключено)")
-        inst_layout = QtWidgets.QVBoxLayout(grp_instances)
-        inst_layout.setSpacing(10)
-        disabled_note = QtWidgets.QLabel(
-            "Параллельный запуск окон Sora временно отключён. Используйте стандартный автоген на вкладке слева."
-        )
-        disabled_note.setWordWrap(True)
-        disabled_note.setStyleSheet("color:#94a3b8;font-size:11px;")
-        inst_layout.addWidget(disabled_note)
-
-        grp_instances.setEnabled(False)
-        top_row = QtWidgets.QHBoxLayout()
-        self.lst_instances = QtWidgets.QListWidget()
-        self.lst_instances.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
-        top_row.addWidget(self.lst_instances, 2)
-
-        form = QtWidgets.QFormLayout()
-        form.setVerticalSpacing(8)
-        self.ed_instance_name = QtWidgets.QLineEdit()
-        form.addRow("Название окна:", self.ed_instance_name)
-        self.sb_instance_port = QtWidgets.QSpinBox()
-        self.sb_instance_port.setRange(9000, 9999)
-        self.sb_instance_port.setValue(9222)
-        form.addRow("CDP порт:", self.sb_instance_port)
-        profile_wrap = QtWidgets.QWidget()
-        profile_layout = QtWidgets.QHBoxLayout(profile_wrap)
-        profile_layout.setContentsMargins(0, 0, 0, 0)
-        self.cmb_instance_profile = QtWidgets.QComboBox()
-        self.btn_instance_scan = QtWidgets.QPushButton("Автонайти")
-        profile_layout.addWidget(self.cmb_instance_profile, 1)
-        profile_layout.addWidget(self.btn_instance_scan)
-        form.addRow("Chrome профиль:", profile_wrap)
-        self.ed_instance_userdir = QtWidgets.QLineEdit()
-        form.addRow("user_data_dir (кастом):", self.ed_instance_userdir)
-        self.ed_instance_profile_dir = QtWidgets.QLineEdit()
-        form.addRow("profile_directory:", self.ed_instance_profile_dir)
-        src_wrap = QtWidgets.QWidget(); src_layout = QtWidgets.QHBoxLayout(src_wrap); src_layout.setContentsMargins(0,0,0,0)
-        self.ed_instance_prompts = QtWidgets.QLineEdit()
-        self.btn_instance_prompts = QtWidgets.QPushButton("…")
-        src_layout.addWidget(self.ed_instance_prompts, 1)
-        src_layout.addWidget(self.btn_instance_prompts)
-        form.addRow("Файл промптов:", src_wrap)
-        self.ed_instance_submitted = QtWidgets.QLineEdit()
-        form.addRow("Журнал отправок:", self.ed_instance_submitted)
-        self.cb_instance_enabled = QtWidgets.QCheckBox("Включить в автозапуск")
-        form.addRow(self.cb_instance_enabled)
-        top_row.addLayout(form, 3)
-        inst_layout.addLayout(top_row)
-
-        btn_row = QtWidgets.QHBoxLayout()
-        self.btn_instance_save = QtWidgets.QPushButton("Сохранить/обновить")
-        self.btn_instance_delete = QtWidgets.QPushButton("Удалить")
-        self.btn_instance_duplicate = QtWidgets.QPushButton("Дублировать")
-        btn_row.addWidget(self.btn_instance_save)
-        btn_row.addWidget(self.btn_instance_delete)
-        btn_row.addWidget(self.btn_instance_duplicate)
-        btn_row.addStretch(1)
-        inst_layout.addLayout(btn_row)
-
-        run_row = QtWidgets.QHBoxLayout()
-        self.btn_instance_launch = QtWidgets.QPushButton("Запустить окна Chrome")
-        self.btn_instance_run = QtWidgets.QPushButton("Параллельный автоген")
-        run_row.addWidget(self.btn_instance_launch)
-        run_row.addWidget(self.btn_instance_run)
-        run_row.addStretch(1)
-        inst_layout.addLayout(run_row)
-
-        self.lbl_instances_hint = QtWidgets.QLabel("—")
-        self.lbl_instances_hint.setVisible(False)
-
-        grp_instances.setMinimumHeight(160)
-        prompts_stack.addWidget(grp_instances)
-        prompts_stack.setStretchFactor(0, 4)
+        prompts_stack.setStretchFactor(0, 3)
         prompts_stack.setStretchFactor(1, 2)
-        prompts_stack.setStretchFactor(2, 3)
-        QtCore.QTimer.singleShot(0, lambda: prompts_stack.setSizes([360, 200, 220]))
+        QtCore.QTimer.singleShot(0, lambda: prompts_stack.setSizes([360, 220]))
         self.tabs.addTab(self.tab_prompts, "Промпты")
 
         # TAB: Названия
@@ -2497,16 +2424,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_used_refresh.clicked.connect(self._reload_used_prompts)
         self.btn_used_clear.clicked.connect(self._clear_used_prompts)
         self.lst_prompt_profiles.itemSelectionChanged.connect(self._on_prompt_profile_selection)
-        self.lst_instances.itemSelectionChanged.connect(self._on_instance_selected)
-        self.cmb_instance_profile.currentIndexChanged.connect(self._on_instance_profile_changed)
-        self.btn_instance_save.clicked.connect(self._on_instance_save)
-        self.btn_instance_delete.clicked.connect(self._on_instance_delete)
-        self.btn_instance_duplicate.clicked.connect(self._on_instance_duplicate)
-        self.btn_instance_prompts.clicked.connect(self._browse_instance_prompts)
-        self.btn_instance_launch.clicked.connect(self._launch_selected_instances)
-        self.btn_instance_run.clicked.connect(lambda: self._run_autogen_instances())
-        self.btn_instance_scan.clicked.connect(self._on_profile_scan)
-
         self.btn_load_titles.clicked.connect(self._load_titles)
         self.btn_save_titles.clicked.connect(self._save_titles)
         self.btn_reset_titles_cursor.clicked.connect(self._reset_titles_cursor)
@@ -2667,293 +2584,6 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         elapsed = time.monotonic() - self._current_step_started
         self._set_step_timer_label(elapsed, prefix="⌛")
-
-    # ----- автоген-инстансы -----
-    def _refresh_instance_profiles(self):
-        if not hasattr(self, "cmb_instance_profile"):
-            return
-        profiles = self.cfg.get("chrome", {}).get("profiles", []) or []
-        self.cmb_instance_profile.blockSignals(True)
-        self.cmb_instance_profile.clear()
-        self.cmb_instance_profile.addItem("Активный профиль (из настроек)", "")
-        for prof in profiles:
-            name = prof.get("name", "")
-            if name:
-                self.cmb_instance_profile.addItem(name, name)
-        self.cmb_instance_profile.blockSignals(False)
-
-    def _refresh_autogen_instances_ui(self):
-        if not hasattr(self, "lst_instances"):
-            return
-        auto_cfg = self.cfg.get("autogen", {}) or {}
-        instances = auto_cfg.get("instances", []) or []
-        self.lst_instances.clear()
-        for inst in instances:
-            name = inst.get("name") or f"Порт {inst.get('cdp_port', '—')}"
-            label = f"{name} · порт {inst.get('cdp_port', '—')}"
-            if not inst.get("enabled", True):
-                label = "🛑 " + label
-            item = QtWidgets.QListWidgetItem(label)
-            item.setData(QtCore.Qt.ItemDataRole.UserRole, dict(inst))
-            if not inst.get("enabled", True):
-                item.setForeground(QtGui.QColor("#64748b"))
-            self.lst_instances.addItem(item)
-        if instances:
-            self.lst_instances.setCurrentRow(0)
-        self._refresh_instance_profiles()
-
-    def _selected_instances(self) -> List[dict]:
-        if not hasattr(self, "lst_instances"):
-            return []
-        items = self.lst_instances.selectedItems()
-        if not items:
-            return []
-        return [dict(it.data(QtCore.Qt.ItemDataRole.UserRole) or {}) for it in items]
-
-    def _clear_instance_form(self):
-        self.ed_instance_name.clear()
-        self.sb_instance_port.setValue(9222)
-        self.cmb_instance_profile.setCurrentIndex(0)
-        self.ed_instance_userdir.clear()
-        self.ed_instance_profile_dir.clear()
-        general = str(self._default_profile_prompts(None))
-        self.ed_instance_prompts.setText(general)
-        self.ed_instance_submitted.clear()
-        self.cb_instance_enabled.setChecked(True)
-        self._instance_prompt_last_auto = general
-        self._last_instance_profile = ""
-
-    def _on_instance_selected(self):
-        items = self.lst_instances.selectedItems()
-        if not items:
-            self._clear_instance_form()
-            return
-        inst = dict(items[0].data(QtCore.Qt.ItemDataRole.UserRole) or {})
-        self.ed_instance_name.setText(inst.get("name", ""))
-        try:
-            self.sb_instance_port.setValue(int(inst.get("cdp_port", 9222)))
-        except Exception:
-            self.sb_instance_port.setValue(9222)
-        profile_name = inst.get("chrome_profile", "") or ""
-        self._last_instance_profile = profile_name
-        idx = self.cmb_instance_profile.findData(profile_name)
-        if idx < 0:
-            idx = 0
-        self.cmb_instance_profile.setCurrentIndex(idx)
-        self.ed_instance_userdir.setText(inst.get("user_data_dir", ""))
-        self.ed_instance_profile_dir.setText(inst.get("profile_directory", ""))
-        self.ed_instance_prompts.setText(inst.get("prompts_file", ""))
-        self._instance_prompt_last_auto = inst.get("prompts_file", "") or ""
-        self.ed_instance_submitted.setText(inst.get("submitted_log", ""))
-        self.cb_instance_enabled.setChecked(bool(inst.get("enabled", True)))
-
-    def _on_instance_profile_changed(self, idx: int):
-        if not hasattr(self, "cmb_instance_profile"):
-            return
-        profile_name = self.cmb_instance_profile.itemData(idx) or ""
-        fallback_name = profile_name or self.cfg.get("chrome", {}).get("active_profile", "") or ""
-        profile = self._find_profile(profile_name) or self._find_profile(fallback_name)
-
-        if profile:
-            if not self.ed_instance_userdir.text().strip():
-                self.ed_instance_userdir.setText(profile.get("user_data_dir", ""))
-            if not self.ed_instance_profile_dir.text().strip():
-                self.ed_instance_profile_dir.setText(profile.get("profile_directory", ""))
-
-        prompts_default = str(self._default_profile_prompts(fallback_name or None))
-        current_path = self.ed_instance_prompts.text().strip()
-        prev_default = str(self._default_profile_prompts(self._last_instance_profile or None))
-        if (not current_path) or current_path == self._instance_prompt_last_auto or current_path == prev_default:
-            self.ed_instance_prompts.setText(prompts_default)
-            self._instance_prompt_last_auto = prompts_default
-
-        self._last_instance_profile = profile_name
-
-    def _default_profile_prompts(self, profile_name: Optional[str]) -> Path:
-        if not profile_name:
-            return WORKERS_DIR / "autogen" / "prompts.txt"
-        slug = slugify(profile_name) or "profile"
-        return WORKERS_DIR / "autogen" / f"prompts_{slug}.txt"
-
-    def _default_instance_paths(self, name: str, profile: Optional[str] = None) -> Tuple[str, str]:
-        prompts = self._default_profile_prompts(profile)
-        slug = slugify(name) or "instance"
-        submitted = WORKERS_DIR / "autogen" / f"submitted_{slug}.log"
-        return str(prompts), str(submitted)
-
-    def _find_profile(self, name: str) -> Optional[dict]:
-        if not name:
-            return None
-        for profile in self.cfg.get("chrome", {}).get("profiles", []) or []:
-            if profile.get("name") == name:
-                return profile
-        return None
-
-    def _ensure_path_exists(self, path: str):
-        p = _project_path(path)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        if not p.exists():
-            try:
-                p.touch()
-            except Exception:
-                pass
-
-    def _on_instance_save(self):
-        name = self.ed_instance_name.text().strip()
-        if not name:
-            self._post_status("Укажи название окна", state="error")
-            return
-        port = int(self.sb_instance_port.value())
-        chrome_profile = self.cmb_instance_profile.currentData() or ""
-        prompts = self.ed_instance_prompts.text().strip()
-        submitted = self.ed_instance_submitted.text().strip()
-        if not prompts or not submitted:
-            default_prompts, default_sub = self._default_instance_paths(name, chrome_profile)
-            prompts = prompts or default_prompts
-            submitted = submitted or default_sub
-        self._ensure_path_exists(prompts)
-        self._ensure_path_exists(submitted)
-        self._ensure_profile_prompt_files(chrome_profile or None)
-        inst_cfg = {
-            "name": name,
-            "cdp_port": port,
-            "chrome_profile": chrome_profile,
-            "user_data_dir": self.ed_instance_userdir.text().strip(),
-            "profile_directory": self.ed_instance_profile_dir.text().strip(),
-            "prompts_file": prompts,
-            "submitted_log": submitted,
-            "enabled": bool(self.cb_instance_enabled.isChecked()),
-        }
-        auto_cfg = self.cfg.setdefault("autogen", {})
-        instances = auto_cfg.setdefault("instances", [])
-        for idx, existing in enumerate(instances):
-            if existing.get("name") == name:
-                instances[idx] = inst_cfg
-                break
-        else:
-            instances.append(inst_cfg)
-        save_cfg(self.cfg)
-        self._refresh_autogen_instances_ui()
-        self._post_status(f"Окно {name} сохранено", state="ok")
-
-    def _on_instance_delete(self):
-        selected = self._selected_instances()
-        if not selected:
-            return
-        names = {inst.get("name") for inst in selected if inst.get("name")}
-        auto_cfg = self.cfg.setdefault("autogen", {})
-        auto_cfg["instances"] = [inst for inst in auto_cfg.get("instances", []) if inst.get("name") not in names]
-        save_cfg(self.cfg)
-        self._refresh_autogen_instances_ui()
-        self._post_status("Инстансы удалены", state="ok")
-
-    def _on_instance_duplicate(self):
-        selected = self._selected_instances()
-        if not selected:
-            return
-        base = selected[0]
-        base_name = base.get("name", "Копия")
-        auto_cfg = self.cfg.setdefault("autogen", {})
-        instances = auto_cfg.setdefault("instances", [])
-        ports = {inst.get("cdp_port") for inst in instances}
-        new_port = base.get("cdp_port", 9222)
-        while new_port in ports:
-            new_port += 1
-        suffix = 2
-        new_name = f"{base_name} копия"
-        existing_names = {inst.get("name") for inst in instances}
-        while new_name in existing_names:
-            new_name = f"{base_name} копия {suffix}"
-            suffix += 1
-        clone = dict(base)
-        clone["name"] = new_name
-        clone["cdp_port"] = new_port
-        clone["enabled"] = False
-        prompts, submitted = self._default_instance_paths(new_name, clone.get("chrome_profile"))
-        clone["prompts_file"] = prompts
-        clone["submitted_log"] = submitted
-        self._ensure_profile_prompt_files(clone.get("chrome_profile") or None)
-        instances.append(clone)
-        save_cfg(self.cfg)
-        self._refresh_autogen_instances_ui()
-        self._post_status(f"Создан дубликат {new_name}", state="ok")
-
-    def _browse_instance_prompts(self):
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Файл промптов", str(WORKERS_DIR / "autogen"), "Текст (*.txt)")
-        if path:
-            self.ed_instance_prompts.setText(path)
-
-    def _launch_selected_instances(self):
-        instances = self._selected_instances()
-        if not instances:
-            instances = [inst for inst in (self.cfg.get("autogen", {}).get("instances") or []) if inst.get("enabled", True)]
-        if not instances:
-            self._post_status("Нет инстансов для запуска", state="error")
-            return
-        for inst in instances:
-            self._open_chrome(instance=inst)
-
-    def _run_autogen_instances(self, instances: Optional[List[dict]] = None) -> bool:
-        if instances is None:
-            instances = self._selected_instances()
-            if not instances:
-                instances = [inst for inst in (self.cfg.get("autogen", {}).get("instances") or []) if inst.get("enabled", True)]
-        if not instances:
-            self._post_status("Нет инстансов для автогена", state="error")
-            return False
-
-        auto_cfg = self.cfg.get("autogen", {}) or {}
-        workdir = auto_cfg.get("workdir", str(WORKERS_DIR / "autogen"))
-        entry = auto_cfg.get("entry", "main.py")
-        updated_names = set()
-
-        for inst in instances:
-            name = inst.get("name") or f"порт {inst.get('cdp_port', '—')}"
-            prompts = inst.get("prompts_file", "")
-            submitted = inst.get("submitted_log", "")
-            profile_name = inst.get("chrome_profile", "") or ""
-            if not prompts or not submitted:
-                default_prompts, default_sub = self._default_instance_paths(name, profile_name)
-                prompts = prompts or default_prompts
-                submitted = submitted or default_sub
-            inst["prompts_file"] = prompts
-            inst["submitted_log"] = submitted
-            self._ensure_path_exists(prompts)
-            self._ensure_path_exists(submitted)
-            self._ensure_profile_prompt_files(profile_name or None)
-            env = os.environ.copy()
-            env["PYTHONUNBUFFERED"] = "1"
-            env["SORA_PROMPTS_FILE"] = prompts
-            env["SORA_SUBMITTED_LOG"] = submitted
-            env["SORA_FAILED_LOG"] = inst.get("failed_log") or auto_cfg.get("failed_log", str(WORKERS_DIR / "autogen" / "failed.log"))
-            env["SORA_INSTANCE_NAME"] = name
-            port = int(inst.get("cdp_port", auto_cfg.get("cdp_port", 9222)))
-            endpoint = inst.get("cdp_endpoint") or f"http://localhost:{port}"
-            env["SORA_CDP_ENDPOINT"] = endpoint
-
-            runner = self._autogen_instance_runners.get(name)
-            if runner is None:
-                runner = ProcRunner(f"AUTOGEN:{name}")
-                runner.line.connect(self._slot_log)
-                runner.finished.connect(self._proc_done)
-                runner.notify.connect(self._notify)
-                self._autogen_instance_runners[name] = runner
-            if runner.proc and runner.proc.poll() is None:
-                self._post_status(f"{name}: процесс уже выполняется", state="error")
-                continue
-            self._post_status(f"Запуск автогена для {name}", state="running")
-            runner.run([sys.executable, entry], cwd=workdir, env=env)
-            updated_names.add(name)
-
-        if updated_names:
-            cfg_instances = self.cfg.setdefault("autogen", {}).setdefault("instances", [])
-            for stored in cfg_instances:
-                if stored.get("name") in updated_names:
-                    match = next((inst for inst in instances if inst.get("name") == stored.get("name")), None)
-                    if match:
-                        stored.update(match)
-            save_cfg(self.cfg)
-        return bool(updated_names)
 
     def _on_active_preset_changed(self, name: str):
         if not name:
@@ -3361,15 +2991,6 @@ class MainWindow(QtWidgets.QMainWindow):
     # ----- обработчик завершения подпроцессов -----
     @QtCore.pyqtSlot(int, str)
     def _proc_done(self, rc: int, tag: str):
-        if tag.startswith("AUTOGEN:"):
-            name = tag.split(":", 1)[1] or "Instance"
-            msg = f"Автоген ({name}) завершён" + (" ✓" if rc == 0 else " ✗")
-            self._post_status(msg, state=("ok" if rc == 0 else "error"))
-            append_history(self.cfg, {"event": "autogen_instance_finish", "rc": rc, "name": name})
-            if rc == 0:
-                self._send_tg(f"✍️ {name}: автоген завершён")
-            self._reload_used_prompts()
-            return
         if tag == "AUTOGEN":
             msg = "Вставка промптов завершена" + (" ✓" if rc == 0 else " ✗")
             self._post_status(msg, state=("ok" if rc == 0 else "error"))
@@ -3405,16 +3026,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._scenario_waiters[tag].set()
 
     # ----- Chrome (через тень профиля) -----
-    def _open_chrome(self, instance: Optional[dict] = None):
+    def _open_chrome(self):
         try:
             port = int(self.cfg.get("chrome", {}).get("cdp_port", 9222))
         except Exception:
             port = 9222
-        if instance:
-            try:
-                port = int(instance.get("cdp_port", port))
-            except Exception:
-                pass
 
         ch = self.cfg.get("chrome", {})
         if sys.platform == "darwin":
@@ -3425,9 +3041,8 @@ class MainWindow(QtWidgets.QMainWindow):
             default_chrome = "google-chrome"
         chrome_bin = os.path.expandvars(ch.get("binary") or default_chrome)
         profiles = ch.get("profiles", [])
-        active_name = (instance or {}).get("chrome_profile") or ch.get("active_profile", "")
-        fallback_userdir = (instance or {}).get("user_data_dir") or os.path.expandvars(ch.get("user_data_dir", "") or "")
-        profile_override = (instance or {}).get("profile_directory", "")
+        active_name = ch.get("active_profile", "")
+        fallback_userdir = os.path.expandvars(ch.get("user_data_dir", "") or "")
 
         # уже поднят CDP?
         if port_in_use(port) and cdp_ready(port):
@@ -3450,15 +3065,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
             if active:
                 shadow_root = _prepare_shadow_profile(active, shadow_base)
-                prof_dir = profile_override or active.get("profile_directory", "Default")
+                prof_dir = active.get("profile_directory", "Default")
             elif fallback_userdir:
                 fake_active = {
                     "name": "Imported",
                     "user_data_dir": fallback_userdir,
-                    "profile_directory": profile_override or "Default",
+                    "profile_directory": "Default",
                 }
                 shadow_root = _prepare_shadow_profile(fake_active, shadow_base)
-                prof_dir = profile_override or "Default"
+                prof_dir = "Default"
             else:
                 name = "Empty"
                 shadow_root = shadow_base / name
@@ -3675,9 +3290,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _run_autogen_sync(self) -> bool:
         self._save_settings_clicked(silent=True)
-        instances = [inst for inst in (self.cfg.get("autogen", {}).get("instances") or []) if inst.get("enabled", True)]
-        if instances:
-            return self._run_autogen_instances(instances)
         workdir=self.cfg.get("autogen",{}).get("workdir", str(WORKERS_DIR / "autogen"))
         entry=self.cfg.get("autogen",{}).get("entry","main.py")
         python=sys.executable; cmd=[python, entry]; env=os.environ.copy(); env["PYTHONUNBUFFERED"]="1"
@@ -4241,8 +3853,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.runner_autogen.stop()
         self.runner_dl.stop()
         self.runner_upload.stop()
-        for runner in self._autogen_instance_runners.values():
-            runner.stop()
         # стоп ffmpeg / любые активные
         with self._procs_lock:
             procs = list(self._active_procs)
@@ -4753,7 +4363,6 @@ class MainWindow(QtWidgets.QMainWindow):
             item = QtWidgets.QListWidgetItem(p.get("name", ""))
             self.lst_profiles.addItem(item)
         self.lbl_prof_active.setText(active if active else "—")
-        self._refresh_instance_profiles()
         self._refresh_prompt_profiles_ui()
 
     def _on_profile_selected(self):
