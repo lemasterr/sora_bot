@@ -3750,19 +3750,47 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
 
         # источник для BLUR
-        src_dir = _project_path(self.cfg.get("blur_src_dir", self.cfg.get("downloads_dir", str(DL_DIR))))
-        if not src_dir.exists():
-            self._post_status(f"Источник BLUR не найден: {src_dir}", state="error")
+        downloads_dir = _project_path(self.cfg.get("downloads_dir", str(DL_DIR)))
+        src_primary = _project_path(
+            self.cfg.get("blur_src_dir", self.cfg.get("downloads_dir", str(DL_DIR)))
+        )
+
+        candidate_dirs: List[Path] = []
+        if src_primary.exists():
+            candidate_dirs.append(src_primary)
+        else:
+            self._append_activity(
+                f"Источник BLUR отсутствует ({src_primary}). Беру файлы из основного Downloads.",
+                kind="warn",
+            )
+
+        if downloads_dir.exists() and not any(_same_path(d, downloads_dir) for d in candidate_dirs):
+            candidate_dirs.append(downloads_dir)
+
+        if not candidate_dirs:
+            self._post_status("Нет доступных папок для блюра", state="error")
             return False
 
         dst_dir = _project_path(self.cfg.get("blurred_dir", str(BLUR_DIR)))
         dst_dir.mkdir(parents=True, exist_ok=True)
 
         allowed_ext = {".mp4", ".mov", ".m4v", ".webm", ".mkv"}
-        videos = [
-            p for p in sorted(src_dir.iterdir())
-            if p.is_file() and p.suffix.lower() in allowed_ext
-        ]
+        seen: set[str] = set()
+        videos: List[Path] = []
+        for folder in candidate_dirs:
+            try:
+                entries = sorted(folder.iterdir())
+            except FileNotFoundError:
+                continue
+            for p in entries:
+                if not p.is_file():
+                    continue
+                if p.suffix.lower() not in allowed_ext:
+                    continue
+                if p.name in seen:
+                    continue
+                videos.append(p)
+                seen.add(p.name)
         total = len(videos)
         if not total:
             self._post_status("Нет видео для блюра", state="error")
