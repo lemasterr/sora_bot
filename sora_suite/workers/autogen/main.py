@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 from typing import List, Optional, Tuple, Set, Deque
 from collections import deque
+import time
 
 import yaml
 from playwright.sync_api import (
@@ -25,8 +26,9 @@ PROJECT_DIR = Path(__file__).parent
 CONFIG_FILE = PROJECT_DIR / "config.yaml"
 SELECTORS_FILE = PROJECT_DIR / "selectors.yaml"
 PROMPTS_FILE = Path(os.getenv("SORA_PROMPTS_FILE", str(PROJECT_DIR / "prompts.txt")))
-SUBMITTED_LOG = PROJECT_DIR / "submitted.log"
-FAILED_LOG = PROJECT_DIR / "failed.log"
+SUBMITTED_LOG = Path(os.getenv("SORA_SUBMITTED_LOG", str(PROJECT_DIR / "submitted.log")))
+FAILED_LOG = Path(os.getenv("SORA_FAILED_LOG", str(PROJECT_DIR / "failed.log")))
+INSTANCE_NAME = os.getenv("SORA_INSTANCE_NAME", "default")
 
 # ----------------- utils -----------------
 def load_yaml(path: Path) -> dict:
@@ -44,16 +46,32 @@ def load_prompts() -> List[str]:
 def load_submitted() -> Set[str]:
     if not SUBMITTED_LOG.exists():
         return set()
-    return {ln.strip() for ln in SUBMITTED_LOG.read_text(encoding="utf-8").splitlines() if ln.strip()}
+    submitted: Set[str] = set()
+    for raw in SUBMITTED_LOG.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if "\t" in line:
+            prompt = line.split("\t", 2)[-1].strip()
+        else:
+            prompt = line
+        if prompt:
+            submitted.add(prompt)
+    return submitted
 
 def mark_submitted(prompt: str) -> None:
+    SUBMITTED_LOG.parent.mkdir(parents=True, exist_ok=True)
+    ts = time.strftime("%Y-%m-%d %H:%M:%S")
+    clean = prompt.replace("\n", " ")
     with open(SUBMITTED_LOG, "a", encoding="utf-8") as f:
-        f.write(prompt.replace("\n", " ") + "\n")
+        f.write(f"{ts}\t{INSTANCE_NAME}\t{clean}\n")
 
 def mark_failed(prompt: str, reason: str) -> None:
     clean_prompt = prompt.replace("\n", " ")
+    FAILED_LOG.parent.mkdir(parents=True, exist_ok=True)
+    ts = time.strftime("%Y-%m-%d %H:%M:%S")
     with open(FAILED_LOG, "a", encoding="utf-8") as f:
-        f.write(f"{clean_prompt} || {reason}\n")
+        f.write(f"{ts}\t{INSTANCE_NAME}\t{clean_prompt}\t{reason}\n")
 
 # ----------------- page lookup -----------------
 def find_sora_page(ctx: BrowserContext, hint: str = "sora") -> Optional[Page]:
@@ -505,6 +523,9 @@ def main():
     if not prompts:
         print("[x] Нет промптов — выходим")
         return
+    endpoint_override = os.getenv("SORA_CDP_ENDPOINT")
+    if endpoint_override:
+        cfg["cdp_endpoint"] = endpoint_override
     with sync_playwright() as pw:
         browser, context, page = ensure_page(pw, cfg)
         try:
