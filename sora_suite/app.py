@@ -233,6 +233,20 @@ def _normalize_path(raw: Union[str, Path]) -> Path:
     return Path(os.path.expandvars(str(raw or ""))).expanduser()
 
 
+def _project_path(raw: Union[str, Path]) -> Path:
+    """Вернёт абсолютный путь в рамках проекта для относительных значений из конфига."""
+    p = _normalize_path(raw)
+    if p.is_absolute():
+        try:
+            return p.resolve()
+        except Exception:
+            return p
+    try:
+        return (PROJECT_ROOT / p).resolve()
+    except Exception:
+        return (PROJECT_ROOT / p)
+
+
 def _same_path(a: Union[str, Path], b: Union[str, Path]) -> bool:
     try:
         pa = _normalize_path(a)
@@ -335,7 +349,7 @@ def cdp_ready(port: int) -> bool:
 
 # --- История: JSONL + ротация, с обратной совместимостью ---
 def append_history(cfg: dict, record: dict):
-    hist_path = Path(cfg.get("history_file", HIST_FILE))
+    hist_path = _project_path(cfg.get("history_file", HIST_FILE))
     try:
         record["ts"] = int(time.time())
         line = json.dumps(record, ensure_ascii=False)
@@ -358,7 +372,7 @@ def append_history(cfg: dict, record: dict):
 
 
 def open_in_finder(path: Union[str, Path]):
-    path = str(path)
+    path = str(_project_path(path))
     if sys.platform == "darwin":
         subprocess.Popen(["open", path])
     elif sys.platform.startswith("win"):
@@ -2728,7 +2742,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return None
 
     def _ensure_path_exists(self, path: str):
-        p = Path(path)
+        p = _project_path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
         if not p.exists():
             try:
@@ -2977,9 +2991,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         zones = self._preset_cache.get(preset, [])
         dirs = [
-            Path(self.cfg.get("downloads_dir", str(DL_DIR))),
-            Path(self.cfg.get("blur_src_dir", self.cfg.get("downloads_dir", str(DL_DIR)))),
-            Path(self.cfg.get("blurred_dir", str(BLUR_DIR))),
+            _project_path(self.cfg.get("downloads_dir", str(DL_DIR))),
+            _project_path(self.cfg.get("blur_src_dir", self.cfg.get("downloads_dir", str(DL_DIR)))),
+            _project_path(self.cfg.get("blurred_dir", str(BLUR_DIR))),
         ]
         dlg = BlurPreviewDialog(self, preset, zones, dirs)
         if dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted:
@@ -3012,7 +3026,7 @@ class MainWindow(QtWidgets.QMainWindow):
         def collect(path_str: Optional[str], instance_name: str):
             if not path_str:
                 return
-            path = Path(path_str)
+            path = _project_path(path_str)
             if path in seen or not path.exists():
                 return
             seen.add(path)
@@ -3062,10 +3076,10 @@ class MainWindow(QtWidgets.QMainWindow):
         paths = set()
         auto_cfg = self.cfg.get("autogen", {}) or {}
         if auto_cfg.get("submitted_log"):
-            paths.add(Path(auto_cfg.get("submitted_log")))
+            paths.add(_project_path(auto_cfg.get("submitted_log")))
         for inst in auto_cfg.get("instances", []) or []:
             if inst.get("submitted_log"):
-                paths.add(Path(inst.get("submitted_log")))
+                paths.add(_project_path(inst.get("submitted_log")))
         if not paths:
             self._post_status("Журналов нет", state="idle")
             return
@@ -3462,7 +3476,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.runner_autogen.run([sys.executable, entry], cwd=workdir, env=env)
 
     def _titles_path(self)->Path:
-        return Path(self.cfg.get("titles_file", str(TITLES_FILE)))
+        return _project_path(self.cfg.get("titles_file", str(TITLES_FILE)))
 
     def _cursor_path(self)->Path:
         p = self._titles_path()
@@ -3594,13 +3608,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _run_download_sync(self) -> bool:
         self._save_settings_clicked(silent=True)
-        dest_dir = Path(self.cfg.get("downloads_dir", str(DL_DIR)))
+        dest_dir = _project_path(self.cfg.get("downloads_dir", str(DL_DIR)))
         before = len(self._iter_videos(dest_dir)) if dest_dir.exists() else 0
 
         workdir=self.cfg.get("downloader",{}).get("workdir", str(WORKERS_DIR / "downloader"))
         entry=self.cfg.get("downloader",{}).get("entry","download_all.py")
         python=sys.executable; cmd=[python, entry]; env=os.environ.copy(); env["PYTHONUNBUFFERED"]="1"
-        env["DOWNLOAD_DIR"] = self.cfg.get("downloads_dir", str(DL_DIR))
+        env["DOWNLOAD_DIR"] = str(dest_dir)
         env["TITLES_FILE"] = str(self._titles_path())
         env["TITLES_CURSOR_FILE"] = str(self._cursor_path())
         max_v = int(self.sb_max_videos.value())
@@ -3650,12 +3664,12 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
 
         # источник для BLUR
-        src_dir = Path(self.cfg.get("blur_src_dir", self.cfg.get("downloads_dir", str(DL_DIR))))
+        src_dir = _project_path(self.cfg.get("blur_src_dir", self.cfg.get("downloads_dir", str(DL_DIR))))
         if not src_dir.exists():
             self._post_status(f"Источник BLUR не найден: {src_dir}", state="error")
             return False
 
-        dst_dir = Path(self.cfg.get("blurred_dir", str(BLUR_DIR)))
+        dst_dir = _project_path(self.cfg.get("blurred_dir", str(BLUR_DIR)))
         dst_dir.mkdir(parents=True, exist_ok=True)
 
         videos = [*src_dir.glob("*.mp4"), *src_dir.glob("*.mov"), *src_dir.glob("*.m4v"), *src_dir.glob("*.webm")]
@@ -3755,12 +3769,12 @@ class MainWindow(QtWidgets.QMainWindow):
         ff = self.ed_ff_bin.text().strip() or "ffmpeg"
 
         # источник для MERGE
-        src_dir = Path(self.cfg.get("merge_src_dir", self.cfg.get("blurred_dir", str(BLUR_DIR))))
+        src_dir = _project_path(self.cfg.get("merge_src_dir", self.cfg.get("blurred_dir", str(BLUR_DIR))))
         if not src_dir.exists():
             self._post_status(f"Источник MERGE не найден: {src_dir}", state="error")
             return False
 
-        out_dir = Path(self.cfg.get("merged_dir", str(MERG_DIR)))
+        out_dir = _project_path(self.cfg.get("merged_dir", str(MERG_DIR)))
         out_dir.mkdir(parents=True, exist_ok=True)
 
         # собрать файлы (поддержка нескольких расширений при pattern="auto")
@@ -3865,7 +3879,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._post_status("Выбери YouTube канал в Настройках", state="error")
             return False
 
-        src_dir = Path(self.ed_youtube_src.text().strip() or yt_cfg.get("upload_src_dir", self.cfg.get("merged_dir", str(MERG_DIR))))
+        src_dir = _project_path(self.ed_youtube_src.text().strip() or yt_cfg.get("upload_src_dir", self.cfg.get("merged_dir", str(MERG_DIR))))
         if not src_dir.exists():
             self._post_status(f"Папка для загрузки не найдена: {src_dir}", state="error")
             return False
@@ -3895,7 +3909,7 @@ class MainWindow(QtWidgets.QMainWindow):
         env["YOUTUBE_CHANNEL_NAME"] = channel
         env["YOUTUBE_SRC_DIR"] = str(src_dir)
         env["YOUTUBE_DRAFT_ONLY"] = "1" if self.cb_youtube_draft_only.isChecked() else "0"
-        env["YOUTUBE_ARCHIVE_DIR"] = yt_cfg.get("archive_dir", str(PROJECT_ROOT / "uploaded"))
+        env["YOUTUBE_ARCHIVE_DIR"] = str(_project_path(yt_cfg.get("archive_dir", str(PROJECT_ROOT / "uploaded"))))
         env["YOUTUBE_BATCH_LIMIT"] = str(int(self.sb_youtube_batch_limit.value()))
         env["YOUTUBE_BATCH_STEP_MINUTES"] = str(int(self.sb_youtube_interval.value()))
         if publish_at:
@@ -3943,14 +3957,15 @@ class MainWindow(QtWidgets.QMainWindow):
             return [int(t) if t.isdigit() else t.lower() for t in re.split(r'(\d+)', s)]
         return _parts(p.name)
 
-    def _iter_videos(self, folder: Path):
+    def _iter_videos(self, folder: Union[str, Path]):
+        path = _project_path(folder)
         return sorted(
-            [*folder.glob("*.mp4"), *folder.glob("*.mov"), *folder.glob("*.m4v"), *folder.glob("*.webm")],
+            [*path.glob("*.mp4"), *path.glob("*.mov"), *path.glob("*.m4v"), *path.glob("*.webm")],
             key=self._natural_key
         )
 
     def _ren_run(self):
-        folder = Path(self.ed_ren_dir.text().strip() or self.cfg.get("downloads_dir", str(DL_DIR)))
+        folder = _project_path(self.ed_ren_dir.text().strip() or self.cfg.get("downloads_dir", str(DL_DIR)))
         if not folder.exists():
             self._post_status("Папка не найдена", state="error"); return
         files = self._iter_videos(folder)
@@ -4040,7 +4055,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ----- History -----
     def _reload_history(self):
-        hist = Path(self.cfg.get("history_file", str(HIST_FILE)))
+        hist = _project_path(self.cfg.get("history_file", str(HIST_FILE)))
         if not hist.exists():
             self.txt_history.setPlainText("История пуста"); return
         try:
@@ -4269,9 +4284,9 @@ class MainWindow(QtWidgets.QMainWindow):
         maint = self.cfg.get("maintenance", {}) or {}
         retention = maint.get("retention_days", {}) or {}
         mapping = [
-            ("RAW", Path(self.cfg.get("downloads_dir", str(DL_DIR))), int(retention.get("downloads", 0))),
-            ("BLURRED", Path(self.cfg.get("blurred_dir", str(BLUR_DIR))), int(retention.get("blurred", 0))),
-            ("MERGED", Path(self.cfg.get("merged_dir", str(MERG_DIR))), int(retention.get("merged", 0))),
+            ("RAW", _project_path(self.cfg.get("downloads_dir", str(DL_DIR))), int(retention.get("downloads", 0))),
+            ("BLURRED", _project_path(self.cfg.get("blurred_dir", str(BLUR_DIR))), int(retention.get("blurred", 0))),
+            ("MERGED", _project_path(self.cfg.get("merged_dir", str(MERG_DIR))), int(retention.get("merged", 0))),
         ]
 
         now = time.time()
@@ -4284,7 +4299,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for label, folder, days in mapping:
             if days <= 0:
                 continue
-            folder = Path(os.path.expandvars(str(folder))).expanduser()
+            folder = _project_path(folder)
             if not folder.exists():
                 continue
             threshold = now - days * 24 * 3600
@@ -4384,7 +4399,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self._post_status("Не удалось отправить тестовое уведомление в Telegram", state="error")
     # ----- автоген конфиг -----
     def _load_autogen_cfg_ui(self):
-        path = Path(self.cfg.get("autogen",{}).get("config_path",""))
+        cfg_path = self.cfg.get("autogen",{}).get("config_path", "")
+        if not cfg_path:
+            return
+        path = _project_path(cfg_path)
         if not path.exists():
             return
         try:
@@ -4396,9 +4414,10 @@ class MainWindow(QtWidgets.QMainWindow):
             pass
 
     def _save_autogen_cfg(self):
-        path = Path(self.cfg.get("autogen",{}).get("config_path",""))
-        if not path:
+        cfg_path = self.cfg.get("autogen",{}).get("config_path", "")
+        if not cfg_path:
             self._post_status("Не задан путь к autogen/config.yaml", state="error"); return
+        path = _project_path(cfg_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         try:
             data = {}
@@ -4420,11 +4439,11 @@ class MainWindow(QtWidgets.QMainWindow):
                     return 0
                 return sum(len(list(p.glob(x))) for x in ("*.mp4", "*.mov", "*.m4v", "*.webm"))
 
-            raw  = _count_vids(Path(self.cfg.get("downloads_dir", str(DL_DIR))))
-            blur = _count_vids(Path(self.cfg.get("blurred_dir", str(BLUR_DIR))))
-            merg = _count_vids(Path(self.cfg.get("merged_dir", str(MERG_DIR))))
-            upload_src = _count_vids(Path(self.cfg.get("youtube", {}).get("upload_src_dir", self.cfg.get("merged_dir", str(MERG_DIR)))))
-            tiktok_src = _count_vids(Path(self.cfg.get("tiktok", {}).get("upload_src_dir", self.cfg.get("merged_dir", str(MERG_DIR)))))
+            raw  = _count_vids(_project_path(self.cfg.get("downloads_dir", str(DL_DIR))))
+            blur = _count_vids(_project_path(self.cfg.get("blurred_dir", str(BLUR_DIR))))
+            merg = _count_vids(_project_path(self.cfg.get("merged_dir", str(MERG_DIR))))
+            upload_src = _count_vids(_project_path(self.cfg.get("youtube", {}).get("upload_src_dir", self.cfg.get("merged_dir", str(MERG_DIR)))))
+            tiktok_src = _count_vids(_project_path(self.cfg.get("tiktok", {}).get("upload_src_dir", self.cfg.get("merged_dir", str(MERG_DIR)))))
             self.sig_log.emit(f"[STAT] RAW={raw} BLURRED={blur} MERGED={merg} YT={upload_src} TT={tiktok_src}")
 
             # обновляем визуальные счетчики
@@ -4785,7 +4804,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _update_youtube_queue_label(self):
         src_text = self.ed_youtube_src.text().strip() or self.cfg.get("youtube", {}).get("upload_src_dir", "")
-        src = Path(src_text)
+        if not src_text:
+            self.lbl_youtube_queue.setText("Очередь: папка не выбрана")
+            return
+        src = _project_path(src_text)
         if not src.exists():
             self.lbl_youtube_queue.setText("Очередь: папка не найдена")
             return
@@ -4894,7 +4916,10 @@ class MainWindow(QtWidgets.QMainWindow):
         src_text = (self.ed_tiktok_src.text().strip() if hasattr(self, "ed_tiktok_src") else "")
         if not src_text:
             src_text = self.cfg.get("tiktok", {}).get("upload_src_dir", "")
-        src = Path(src_text)
+        if not src_text:
+            self.lbl_tiktok_queue.setText("Очередь: папка не выбрана")
+            return
+        src = _project_path(src_text)
         if not src.exists():
             self.lbl_tiktok_queue.setText("Очередь: папка не найдена")
             return
@@ -4973,7 +4998,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._post_status("Профиль TikTok не найден в настройках", state="error")
             return False
 
-        src_dir = Path(self.ed_tiktok_src.text().strip() or tk_cfg.get("upload_src_dir", self.cfg.get("merged_dir", str(MERG_DIR))))
+        src_dir = _project_path(self.ed_tiktok_src.text().strip() or tk_cfg.get("upload_src_dir", self.cfg.get("merged_dir", str(MERG_DIR))))
         if not src_dir.exists():
             self._post_status(f"Папка не найдена: {src_dir}", state="error")
             return False
@@ -5002,7 +5027,7 @@ class MainWindow(QtWidgets.QMainWindow):
         env["APP_CONFIG_PATH"] = str(CFG_PATH)
         env["TIKTOK_PROFILE_NAME"] = profile_name
         env["TIKTOK_SRC_DIR"] = str(src_dir)
-        env["TIKTOK_ARCHIVE_DIR"] = tk_cfg.get("archive_dir", str(PROJECT_ROOT / "uploaded_tiktok"))
+        env["TIKTOK_ARCHIVE_DIR"] = str(_project_path(tk_cfg.get("archive_dir", str(PROJECT_ROOT / "uploaded_tiktok"))))
         env["TIKTOK_BATCH_LIMIT"] = str(int(self.sb_tiktok_batch_limit.value()))
         env["TIKTOK_BATCH_STEP_MINUTES"] = str(int(self.sb_tiktok_interval.value()))
         env["TIKTOK_DRAFT_ONLY"] = "1" if self.cb_tiktok_draft.isChecked() else "0"
