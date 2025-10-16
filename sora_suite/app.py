@@ -567,6 +567,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.setWindowTitle("Sora Suite — Control Panel")
         self.resize(1500, 950)
+        self.setMinimumSize(1024, 720)
 
         # tray notifications
         self.tray = QtWidgets.QSystemTrayIcon(self)
@@ -822,8 +823,14 @@ class MainWindow(QtWidgets.QMainWindow):
     # ----- UI -----
     def _build_ui(self):
         central = QtWidgets.QWidget(self)
+        central.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
         self.setCentralWidget(central)
         v = QtWidgets.QVBoxLayout(central)
+        v.setContentsMargins(12, 12, 12, 12)
+        v.setSpacing(12)
 
         banner = QtWidgets.QLabel("<b>Sora Suite</b>: выбери шаги и запусти сценарий. Уведомления появятся в системном трее.")
         banner.setObjectName("statusBanner")
@@ -952,10 +959,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self._apply_activity_visibility(self.chk_activity_visible.isChecked(), persist=False)
 
         # TAB: Задачи
-        self.tab_tasks = QtWidgets.QWidget()
-        lt = QtWidgets.QVBoxLayout(self.tab_tasks)
-        lt.setContentsMargins(12, 12, 12, 12)
-        lt.setSpacing(12)
+        def make_scroll_tab(margins=(12, 12, 12, 12), spacing=12):
+            area = QtWidgets.QScrollArea()
+            area.setWidgetResizable(True)
+            area.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+            area.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            area.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            body = QtWidgets.QWidget()
+            layout = QtWidgets.QVBoxLayout(body)
+            layout.setContentsMargins(*margins)
+            layout.setSpacing(spacing)
+            area.setWidget(body)
+            return area, layout
+
+        self.tab_tasks, lt = make_scroll_tab(margins=(0, 0, 0, 0))
         tasks_intro = QtWidgets.QLabel(
             "Основная панель запуска: отметь нужные этапы, нажми старт и следи за прогрессом и статистикой."
         )
@@ -964,7 +981,7 @@ class MainWindow(QtWidgets.QMainWindow):
         lt.addWidget(tasks_intro)
 
         self.task_tabs = QtWidgets.QTabWidget()
-        lt.addWidget(self.task_tabs)
+        lt.addWidget(self.task_tabs, 1)
 
         grp_choose = QtWidgets.QGroupBox("Что выполнить")
         f = QtWidgets.QFormLayout(grp_choose)
@@ -1097,12 +1114,11 @@ class MainWindow(QtWidgets.QMainWindow):
         strip.addStretch(1)
         vb.addWidget(stats_strip)
 
-        pipeline_tab = QtWidgets.QWidget()
-        pipeline_layout = QtWidgets.QVBoxLayout(pipeline_tab)
+        pipeline_tab, pipeline_layout = make_scroll_tab()
         pipeline_layout.addWidget(grp_choose)
         pipeline_layout.addWidget(grp_run)
         pipeline_layout.addWidget(grp_stat)
-        pipeline_layout.addSpacing(8)
+        pipeline_layout.addStretch(1)
         self.task_tabs.addTab(pipeline_tab, "Пайплайн")
 
         # --- Скачка: лимит N ---
@@ -1115,14 +1131,13 @@ class MainWindow(QtWidgets.QMainWindow):
         hb.addWidget(self.btn_apply_dl)
         hb.addStretch(1)
 
-        tab_download = QtWidgets.QWidget()
-        download_layout = QtWidgets.QVBoxLayout(tab_download)
+        tab_download, download_layout = make_scroll_tab()
         dl_hint = QtWidgets.QLabel("Галочку \"Авто-скачка видео\" можно оставить включённой для сценария или запускать скачку отдельно.")
         dl_hint.setWordWrap(True)
         dl_hint.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
         download_layout.addWidget(dl_hint)
         download_layout.addWidget(grp_dl)
-        download_layout.addSpacing(8)
+        download_layout.addStretch(1)
         self.task_tabs.addTab(tab_download, "Скачка")
 
         # --- Переименование файлов ---
@@ -1149,14 +1164,13 @@ class MainWindow(QtWidgets.QMainWindow):
         ren_l.addWidget(self.ed_ren_start, row, 1)
         ren_l.addWidget(self.btn_ren_run, row, 2); row += 1
 
-        rename_tab = QtWidgets.QWidget()
-        rename_layout = QtWidgets.QVBoxLayout(rename_tab)
+        rename_tab, rename_layout = make_scroll_tab()
         ren_hint = QtWidgets.QLabel("Переименуй ролики перед блюром: можно тянуть названия из titles.txt или нумеровать автоматически.")
         ren_hint.setWordWrap(True)
         ren_hint.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
         rename_layout.addWidget(ren_hint)
         rename_layout.addWidget(grp_ren)
-        rename_layout.addSpacing(8)
+        rename_layout.addStretch(1)
         self.task_tabs.addTab(rename_tab, "Переименование")
 
         # --- Склейка: сколько клипов в один ---
@@ -1170,24 +1184,20 @@ class MainWindow(QtWidgets.QMainWindow):
         mg.addWidget(self.btn_apply_merge)
         mg.addStretch(1)
 
-        merge_tab = QtWidgets.QWidget()
-        merge_layout = QtWidgets.QVBoxLayout(merge_tab)
+        merge_tab, merge_layout = make_scroll_tab()
         merge_hint = QtWidgets.QLabel("После блюра можно склеить клипы в ленты — выбери размер группы и нажми применить.")
         merge_hint.setWordWrap(True)
         merge_hint.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
         merge_layout.addWidget(merge_hint)
         merge_layout.addWidget(grp_merge)
-        merge_layout.addSpacing(8)
+        merge_layout.addStretch(1)
         self.task_tabs.addTab(merge_tab, "Склейка")
 
         self.tabs.addTab(self.tab_tasks, "Задачи")
 
         # TAB: YouTube uploader
         yt_cfg = self.cfg.get("youtube", {}) or {}
-        self.tab_youtube = QtWidgets.QWidget()
-        ty = QtWidgets.QVBoxLayout(self.tab_youtube)
-        ty.setContentsMargins(12, 12, 12, 12)
-        ty.setSpacing(12)
+        self.tab_youtube, ty = make_scroll_tab()
 
         grp_channels = QtWidgets.QGroupBox("Каналы и доступы")
         gc_layout = QtWidgets.QHBoxLayout(grp_channels)
@@ -1301,10 +1311,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tabs.addTab(self.tab_youtube, "YouTube")
 
         tk_cfg = self.cfg.get("tiktok", {}) or {}
-        self.tab_tiktok = QtWidgets.QWidget()
-        tt = QtWidgets.QVBoxLayout(self.tab_tiktok)
-        tt.setContentsMargins(12, 12, 12, 12)
-        tt.setSpacing(12)
+        self.tab_tiktok, tt = make_scroll_tab()
 
         grp_tt_profiles = QtWidgets.QGroupBox("Профили и авторизация")
         tp_layout = QtWidgets.QHBoxLayout(grp_tt_profiles)
