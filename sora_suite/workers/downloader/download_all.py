@@ -130,17 +130,24 @@ def find_or_open_drafts_page(context):
     return page
 
 
-def open_card(page, nth: int) -> bool:
-    cards = page.locator(CARD_LINKS)
-    cards.first.wait_for(timeout=10000)
-    count = cards.count()
-    if nth >= count:
+def open_card(page, href: str) -> bool:
+    """Открывает карточку по прямой ссылке."""
+
+    if not href:
         return False
-    card = cards.nth(nth)
-    card.scroll_into_view_if_needed()
-    jitter()
-    card.click()
-    page.locator(RIGHT_PANEL).wait_for(state="visible", timeout=10000)
+
+    try:
+        page.goto(href, wait_until="domcontentloaded")
+    except Exception:
+        try:
+            page.goto(href)
+        except Exception:
+            return False
+
+    try:
+        page.locator(RIGHT_PANEL).wait_for(state="visible", timeout=10000)
+    except PwTimeout:
+        return False
     return True
 
 
@@ -199,50 +206,67 @@ def go_back_to_drafts(page) -> None:
     page.locator(CARD_LINKS).first.wait_for(timeout=10000)
 
 
-def ensure_card_pool(page, desired: int) -> int:
-    """Прокручивает ленту, чтобы подгрузить достаточно карточек."""
+def collect_card_links(page, desired: int) -> list[str]:
+    """Собирает уникальные ссылки карточек, подгружая их по мере прокрутки."""
 
-    cards = page.locator(CARD_LINKS)
+    print("[i] Сканирую карточки Sora…")
+    links: list[str] = []
+    seen: set[str] = set()
+    stagnation = 0
+    rounds = 0
+
     try:
         page.evaluate("window.scrollTo(0, 0)")
     except Exception:
         pass
 
-    jitter(0.15, 0.3)
-    print("[i] Прокручиваю ленту, чтобы подгрузить новые карточки…")
-
-    prev_count = -1
-    stagnation = 0
-    rounds = 0
+    cards = page.locator(CARD_LINKS)
+    cards.first.wait_for(timeout=10000)
 
     while True:
-        count = cards.count()
-        if desired and count >= desired:
-            break
-        if count == prev_count:
-            stagnation += 1
-        else:
+        current = []
+        try:
+            current = page.eval_on_selector_all(
+                CARD_LINKS,
+                "elements => elements.map(el => el.href).filter(Boolean)",
+            )
+        except Exception:
+            # fall back на count/scroll при ошибке
+            current = []
+
+        added = 0
+        for href in current:
+            if href not in seen:
+                seen.add(href)
+                links.append(href)
+                added += 1
+
+        if added:
+            print(f"[i] Найдено карточек: {len(links)}")
             stagnation = 0
-            if prev_count >= 0 and count > prev_count:
-                print(f"[i] Карточек стало: {count}")
+        else:
+            stagnation += 1
+
+        if desired and len(links) >= desired:
+            break
         if (desired and stagnation >= 6) or (not desired and stagnation >= 4):
             break
-        if rounds > 60:
+        if rounds > 80:
             break
 
-        prev_count = count
         rounds += 1
 
-        target_idx = max(0, count - 1)
         try:
-            cards.nth(target_idx).scroll_into_view_if_needed()
+            page.mouse.wheel(0, 2000)
         except Exception:
-            page.mouse.wheel(0, 1600)
+            try:
+                cards.nth(cards.count() - 1).scroll_into_view_if_needed()
+            except Exception:
+                pass
         long_jitter(0.6, 1.0)
 
-    final_count = cards.count()
-    print(f"[i] Доступно карточек после прокрутки: {final_count}")
-    return final_count
+    print(f"[i] Итого уникальных карточек: {len(links)}")
+    return links
 
 
 def main() -> None:
@@ -259,24 +283,19 @@ def main() -> None:
             page = find_or_open_drafts_page(context)
             print(f"[i] Работаю в существующем окне: {page.url}")
 
-            cards = page.locator(CARD_LINKS)
-            cards.first.wait_for(timeout=10000)
-
             desired = MAX_VIDEOS if MAX_VIDEOS > 0 else 0
-            total_all = ensure_card_pool(page, desired)
+            links = collect_card_links(page, desired)
 
             if desired:
-                count = min(desired, total_all)
-                indices = list(range(count))
-                print(f"[i] Скачаю первые {count} карточек из {total_all}")
+                links = links[:desired]
+                print(f"[i] Скачаю первые {len(links)} карточек")
             else:
-                indices = list(range(total_all))
-                print(f"[i] Скачаю все доступные карточки: {total_all}")
+                print(f"[i] Скачаю все найденные карточки: {len(links)}")
 
-            for k, i in enumerate(indices, 1):
-                print(f"[>] {k}/{len(indices)} — открываю карточку…")
-                if not open_card(page, i):
-                    print("[!] Карточка исчезла при открытии — пропускаю.")
+            for k, href in enumerate(links, 1):
+                print(f"[>] {k}/{len(links)} — открываю карточку…")
+                if not open_card(page, href):
+                    print("[!] Карточка недоступна — пропускаю.")
                     continue
                 long_jitter()
                 try:
