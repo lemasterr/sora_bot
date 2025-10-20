@@ -213,6 +213,7 @@ def collect_card_links(page, desired: int) -> list[str]:
     links: list[str] = []
     seen: set[str] = set()
     stagnation = 0
+    satisfied_rounds = 0
     rounds = 0
 
     try:
@@ -248,8 +249,13 @@ def collect_card_links(page, desired: int) -> list[str]:
             stagnation += 1
 
         if desired and len(links) >= desired:
-            break
-        if (desired and stagnation >= 6) or (not desired and stagnation >= 4):
+            satisfied_rounds += 1
+        else:
+            satisfied_rounds = 0
+
+        if (desired and satisfied_rounds >= 3) or (desired and stagnation >= 8) or (
+            not desired and stagnation >= 4
+        ):
             break
         if rounds > 80:
             break
@@ -257,13 +263,15 @@ def collect_card_links(page, desired: int) -> list[str]:
         rounds += 1
 
         try:
-            page.mouse.wheel(0, 2000)
+            page.mouse.wheel(0, 1400)
+            page.wait_for_timeout(450)
+            page.mouse.wheel(0, 1400)
         except Exception:
             try:
                 cards.nth(cards.count() - 1).scroll_into_view_if_needed()
             except Exception:
                 pass
-        long_jitter(0.6, 1.0)
+        long_jitter(0.9, 1.4)
 
     print(f"[i] Итого уникальных карточек: {len(links)}")
     return links

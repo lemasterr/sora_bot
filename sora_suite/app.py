@@ -754,6 +754,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._scenario_results: Dict[str, int] = {}
         self._scenario_wait_lock = Lock()
 
+        # кеши пресетов блюра должны существовать до построения UI,
+        # иначе _load_zones_into_ui() перезапишет их, а позже мы бы обнулили значения
+        self._preset_cache: Dict[str, List[Dict[str, int]]] = {}
+        self._preset_tables: Dict[str, QtWidgets.QTableWidget] = {}
+
         self._build_ui()
         self._wire()
         self._init_state()
@@ -770,9 +775,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._settings_autosave_timer.setSingleShot(True)
         self._settings_autosave_timer.timeout.connect(self._autosave_settings)
         self._register_settings_autosave_sources()
-
-        self._preset_cache: Dict[str, List[Dict[str, int]]] = {}
-        self._preset_tables: Dict[str, QtWidgets.QTableWidget] = {}
 
     # ----- helpers -----
     def _ensure_path_exists(self, raw: Union[str, Path]) -> Path:
@@ -3423,7 +3425,7 @@ class MainWindow(QtWidgets.QMainWindow):
         }
         summary = " → ".join(label_map.get(step, step) for step in steps)
         if summary:
-            self._send_tg(f"🚀 Сценарий запущен: {summary}")
+            self._append_activity(f"Сценарий: {summary}", kind="info", card_text=False)
 
         def flow():
             ok_all = True
@@ -3457,7 +3459,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self._post_status("Сценарий завершён", state=("ok" if ok_all else "error"))
             append_history(self.cfg, {"event":"scenario_finish","ok":ok_all})
             self._refresh_stats()
-            self._send_tg("✅ Сценарий завершён" if ok_all else "⚠️ Сценарий завершён с ошибками")
 
         threading.Thread(target=flow, daemon=True).start()
 
