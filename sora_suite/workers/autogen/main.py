@@ -1,19 +1,23 @@
 # -*- coding: utf-8 -*-
-"""
-Sora autogen (Chrome CDP)
+"""Sora autogen (Chrome CDP).
+
 - Строгая валидация старта (очищение поля/рост очереди)
 - Бэк-офф при лимите
 - Автоматическая переподача промптов до успеха (бесконечная, с паузой)
 - Статистика/метки для GUI (OK/FAIL/RETRY + NOTIFY)
 - PROMPTS_FILE берётся из env SORA_PROMPTS_FILE (если задан)
+- Поддержка генерации изображений через Google AI Studio
 """
 
+import json
 import os
+import re
 import time
-from pathlib import Path
-from typing import List, Optional, Tuple, Set, Deque
+import uuid
 from collections import deque
-import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Callable, Deque, Dict, List, Optional, Set, Tuple
 
 import yaml
 from playwright.sync_api import (
@@ -29,6 +33,187 @@ PROMPTS_FILE = Path(os.getenv("SORA_PROMPTS_FILE", str(PROJECT_DIR / "prompts.tx
 SUBMITTED_LOG = Path(os.getenv("SORA_SUBMITTED_LOG", str(PROJECT_DIR / "submitted.log")))
 FAILED_LOG = Path(os.getenv("SORA_FAILED_LOG", str(PROJECT_DIR / "failed.log")))
 INSTANCE_NAME = os.getenv("SORA_INSTANCE_NAME", "default")
+PROMPTS_DIR = PROMPTS_FILE.parent.resolve()
+BASE_MEDIA_DIR = Path(os.getenv("GENAI_BASE_DIR", str(PROJECT_DIR.parent))).expanduser()
+PROMPTS_BASE_DIR = Path(os.getenv("GENAI_PROMPTS_DIR", str(PROMPTS_DIR))).expanduser()
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _to_int(value: Optional[str], fallback: int) -> int:
+    if value is None:
+        return fallback
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return fallback
+
+
+def _slugify(value: str) -> str:
+    slug = re.sub(r"[^a-zA-Z0-9]+", "-", value.strip().lower())
+    slug = re.sub(r"-+", "-", slug).strip("-")
+    return slug or "prompt"
+
+
+@dataclass
+class PromptEntry:
+    key: str
+    prompt: str
+    raw: str
+    image_prompts: List[str] = field(default_factory=list)
+    attachment_paths: List[str] = field(default_factory=list)
+    images_per_prompt: Optional[int] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    generated_files: List[Path] = field(default_factory=list)
+
+    def resolved_key(self) -> str:
+        return self.key or self.prompt
+
+
+@dataclass
+class GenAiConfig:
+    enabled: bool
+    api_key: str
+    model: str
+    person_generation: str
+    aspect_ratio: str
+    image_size: str
+    output_dir: Path
+    mime_type: str
+    number_of_images: int
+    rate_limit: int
+    max_retries: int
+
+    @classmethod
+    def from_env(cls) -> "GenAiConfig":
+        enabled = _env_bool("GENAI_ENABLED", False)
+        api_key = os.getenv("GENAI_API_KEY", "").strip()
+        model = os.getenv("GENAI_MODEL", "models/imagen-4.0-generate-001").strip()
+        person = os.getenv("GENAI_PERSON_GENERATION", "ALLOW_ALL").strip() or "ALLOW_ALL"
+        aspect = os.getenv("GENAI_ASPECT_RATIO", "1:1").strip() or "1:1"
+        size = os.getenv("GENAI_IMAGE_SIZE", "1K").strip() or "1K"
+        mime_type = os.getenv("GENAI_OUTPUT_MIME_TYPE", "image/jpeg").strip() or "image/jpeg"
+        number = _to_int(os.getenv("GENAI_NUMBER_OF_IMAGES"), 1)
+        rate = max(_to_int(os.getenv("GENAI_RATE_LIMIT"), 0), 0)
+        retries = max(_to_int(os.getenv("GENAI_MAX_RETRIES"), 3), 0)
+        output_raw = os.getenv("GENAI_OUTPUT_DIR", str(PROJECT_DIR / "generated"))
+        output_dir = Path(output_raw).expanduser()
+        if not output_dir.is_absolute():
+            output_dir = (BASE_MEDIA_DIR / output_dir).resolve()
+        return cls(
+            enabled=enabled and bool(api_key),
+            api_key=api_key,
+            model=model or "models/imagen-4.0-generate-001",
+            person_generation=person,
+            aspect_ratio=aspect,
+            image_size=size,
+            output_dir=output_dir,
+            mime_type=mime_type,
+            number_of_images=max(1, number),
+            rate_limit=rate,
+            max_retries=retries,
+        )
+
+
+class RateLimiter:
+    def __init__(self, per_minute: int):
+        self.per_minute = max(per_minute, 0)
+        self._events: Deque[float] = deque()
+
+    def wait(self):
+        if not self.per_minute:
+            return
+        now = time.time()
+        window = 60.0
+        while self._events and now - self._events[0] > window:
+            self._events.popleft()
+        if len(self._events) >= self.per_minute:
+            sleep_for = window - (now - self._events[0])
+            if sleep_for > 0:
+                print(f"[i] Rate limit: пауза {sleep_for:.1f}с")
+                time.sleep(sleep_for)
+        self._events.append(time.time())
+
+
+class GenAiClient:
+    def __init__(self, cfg: GenAiConfig):
+        self.cfg = cfg
+        self._rate = RateLimiter(cfg.rate_limit)
+        self._client = None
+        self._available = False
+        if not cfg.enabled:
+            return
+        try:
+            from google import genai  # type: ignore
+
+            self._client = genai.Client(api_key=cfg.api_key)
+            self._available = True
+        except ModuleNotFoundError:
+            print("[!] Модуль google-genai не установлен. Установи зависимости requirements.txt")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[!] Не удалось инициализировать google-genai: {exc}")
+
+    @property
+    def enabled(self) -> bool:
+        return self._available
+
+    def generate(self, prompt: str, count: int, tag: str) -> List[Path]:
+        if not self.enabled:
+            return []
+        self.cfg.output_dir.mkdir(parents=True, exist_ok=True)
+        attempt = 0
+        last_err: Optional[Exception] = None
+        while attempt <= self.cfg.max_retries:
+            attempt += 1
+            try:
+                self._rate.wait()
+                result = self._client.models.generate_images(  # type: ignore[union-attr]
+                    model=self.cfg.model,
+                    prompt=prompt,
+                    config=dict(
+                        number_of_images=max(1, count),
+                        output_mime_type=self.cfg.mime_type,
+                        person_generation=self.cfg.person_generation,
+                        aspect_ratio=self.cfg.aspect_ratio,
+                        image_size=self.cfg.image_size,
+                    ),
+                )
+                if not getattr(result, "generated_images", None):
+                    print(f"[WARN] API не вернуло изображений для промпта: {prompt!r}")
+                    return []
+                saved: List[Path] = []
+                timestamp = int(time.time())
+                slug = _slugify(prompt)[:48]
+                ext = "jpg"
+                if self.cfg.mime_type.lower().endswith("png"):
+                    ext = "png"
+                for idx, generated in enumerate(result.generated_images):
+                    fname = f"{slug}-{tag}-{timestamp}-{idx+1:02d}.{ext}"
+                    dest = self.cfg.output_dir / fname
+                    try:
+                        generated.image.save(dest)  # type: ignore[attr-defined]
+                        saved.append(dest)
+                    except Exception as save_err:  # noqa: BLE001
+                        print(f"[WARN] Не удалось сохранить изображение {fname}: {save_err}")
+                if saved:
+                    print(f"[OK] Сгенерировано {len(saved)} изображений → {self.cfg.output_dir}")
+                return saved
+            except Exception as exc:  # noqa: BLE001
+                last_err = exc
+                print(f"[WARN] Ошибка генерации (попытка {attempt}/{self.cfg.max_retries + 1}): {exc}")
+                if attempt <= self.cfg.max_retries:
+                    time.sleep(min(5 * attempt, 20))
+        if last_err:
+            print(f"[x] Генерация не удалась окончательно: {last_err}")
+        return []
 
 # ----------------- utils -----------------
 def load_yaml(path: Path) -> dict:
@@ -37,11 +222,82 @@ def load_yaml(path: Path) -> dict:
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
 
-def load_prompts() -> List[str]:
+def _parse_prompt_line(line: str) -> Optional[PromptEntry]:
+    raw = line.strip()
+    if not raw or raw.startswith("#"):
+        return None
+
+    if raw.startswith("{"):
+        try:
+            data = json.loads(raw)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[WARN] Не удалось разобрать JSON промпта: {exc}")
+            return None
+        if isinstance(data, str):
+            data = {"prompt": data}
+        if not isinstance(data, dict):
+            print(f"[WARN] Неподдерживаемый формат строки: {raw[:80]}")
+            return None
+        prompt = str(data.get("prompt") or data.get("sora_prompt") or "").strip()
+        if not prompt:
+            print(f"[WARN] В JSON отсутствует поле prompt: {raw[:120]}")
+            return None
+        key = str(data.get("key") or data.get("id") or raw)
+
+        image_prompts_field = data.get("image_prompts") or data.get("image_prompt") or []
+        if isinstance(image_prompts_field, str):
+            image_prompts = [image_prompts_field.strip()]
+        elif isinstance(image_prompts_field, list):
+            image_prompts = [str(item).strip() for item in image_prompts_field if str(item).strip()]
+        else:
+            image_prompts = []
+
+        attachments: List[str] = []
+        for key_name in ("attachments", "image_paths"):
+            value = data.get(key_name)
+            if isinstance(value, str) and value.strip():
+                attachments.append(value.strip())
+            elif isinstance(value, list):
+                attachments.extend(str(item).strip() for item in value if str(item).strip())
+
+        images_value = data.get("number_of_images")
+        if isinstance(images_value, int) and images_value > 0:
+            images_per_prompt = images_value
+        elif isinstance(data.get("images"), int) and int(data.get("images")) > 0:
+            images_per_prompt = int(data.get("images"))
+        elif isinstance(data.get("count"), int) and int(data.get("count")) > 0:
+            images_per_prompt = int(data.get("count"))
+        else:
+            images_per_prompt = None
+
+        if isinstance(data.get("images"), list):
+            attachments.extend(str(item).strip() for item in data.get("images", []) if str(item).strip())
+
+        entry = PromptEntry(
+            key=key.strip() or raw,
+            prompt=prompt,
+            raw=raw,
+            image_prompts=image_prompts,
+            attachment_paths=attachments,
+            images_per_prompt=images_per_prompt,
+            metadata=data,
+        )
+        return entry
+
+    return PromptEntry(key=raw, prompt=raw, raw=raw)
+
+
+def load_prompts() -> List[PromptEntry]:
     if not PROMPTS_FILE.exists():
         print(f"[!] Нет файла {PROMPTS_FILE}. Создай его и добавь промпты по одному в строке.")
         return []
-    return [ln.strip() for ln in PROMPTS_FILE.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    entries: List[PromptEntry] = []
+    for line in PROMPTS_FILE.read_text(encoding="utf-8").splitlines():
+        entry = _parse_prompt_line(line)
+        if entry:
+            entries.append(entry)
+    return entries
+
 
 def load_submitted() -> Set[str]:
     if not SUBMITTED_LOG.exists():
@@ -51,27 +307,106 @@ def load_submitted() -> Set[str]:
         line = raw.strip()
         if not line:
             continue
-        if "\t" in line:
-            prompt = line.split("\t", 2)[-1].strip()
+        parts = line.split("\t")
+        if len(parts) >= 4:
+            key = parts[2].strip() or parts[3].strip()
+        elif len(parts) == 3:
+            key = parts[2].strip()
+        elif len(parts) == 2:
+            key = parts[1].strip()
         else:
-            prompt = line
-        if prompt:
-            submitted.add(prompt)
+            key = line
+        if key:
+            submitted.add(key)
     return submitted
 
-def mark_submitted(prompt: str) -> None:
+
+def mark_submitted(entry: PromptEntry, attachments: Optional[List[Path]] = None) -> None:
     SUBMITTED_LOG.parent.mkdir(parents=True, exist_ok=True)
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
-    clean = prompt.replace("\n", " ")
+    clean_prompt = entry.prompt.replace("\n", " ")
+    key = entry.resolved_key().replace("\n", " ")
+    suffix = ""
+    if attachments:
+        names = [p.name for p in attachments if isinstance(p, Path)]
+        if names:
+            suffix = f" [media: {', '.join(names)}]"
     with open(SUBMITTED_LOG, "a", encoding="utf-8") as f:
-        f.write(f"{ts}\t{INSTANCE_NAME}\t{clean}\n")
+        f.write(f"{ts}\t{INSTANCE_NAME}\t{key}\t{clean_prompt}{suffix}\n")
 
-def mark_failed(prompt: str, reason: str) -> None:
-    clean_prompt = prompt.replace("\n", " ")
+
+def mark_failed(entry: PromptEntry, reason: str) -> None:
+    clean_prompt = entry.prompt.replace("\n", " ")
+    key = entry.resolved_key().replace("\n", " ")
     FAILED_LOG.parent.mkdir(parents=True, exist_ok=True)
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
     with open(FAILED_LOG, "a", encoding="utf-8") as f:
-        f.write(f"{ts}\t{INSTANCE_NAME}\t{clean_prompt}\t{reason}\n")
+        f.write(f"{ts}\t{INSTANCE_NAME}\t{key}\t{clean_prompt}\t{reason}\n")
+
+
+def _resolve_media_path(raw: str) -> Path:
+    candidate = Path(str(raw).strip())
+    if not str(candidate):
+        return candidate
+    if candidate.is_absolute():
+        return candidate
+    probes = [
+        PROMPTS_BASE_DIR / candidate,
+        BASE_MEDIA_DIR / candidate,
+        PROMPTS_DIR / candidate,
+        PROJECT_DIR / candidate,
+        Path.cwd() / candidate,
+    ]
+    for probe in probes:
+        try:
+            resolved = probe.expanduser().resolve()
+        except Exception:
+            resolved = probe.expanduser()
+        if resolved.exists():
+            return resolved
+    try:
+        return (PROMPTS_BASE_DIR / candidate).resolve()
+    except Exception:
+        return PROMPTS_BASE_DIR / candidate
+
+
+def gather_media(entry: PromptEntry, client: GenAiClient) -> List[Path]:
+    attachments: List[Path] = []
+    for raw in entry.attachment_paths:
+        if not raw:
+            continue
+        path = _resolve_media_path(raw)
+        if path.exists():
+            attachments.append(path)
+        else:
+            print(f"[WARN] Файл вложения не найден: {raw}")
+
+    if entry.image_prompts:
+        if not client.enabled:
+            print(f"[WARN] Генерация изображений отключена — пропускаю image_prompt для {entry.prompt!r}")
+        else:
+            if not entry.generated_files:
+                tag = _slugify(entry.resolved_key())[:16] or uuid.uuid4().hex[:8]
+                for prompt in entry.image_prompts:
+                    if not prompt:
+                        continue
+                    count = entry.images_per_prompt or client.cfg.number_of_images
+                    generated = client.generate(prompt, count, tag)
+                    entry.generated_files.extend(generated)
+            attachments.extend([p for p in entry.generated_files if isinstance(p, Path) and p.exists()])
+
+    unique: List[Path] = []
+    seen: Set[str] = set()
+    for path in attachments:
+        try:
+            key = str(path.resolve())
+        except Exception:
+            key = str(path)
+        if key not in seen:
+            seen.add(key)
+            unique.append(path)
+    return unique
+
 
 # ----------------- page lookup -----------------
 def find_sora_page(ctx: BrowserContext, hint: str = "sora") -> Optional[Page]:
@@ -217,6 +552,57 @@ def find_button_in_same_container(page: Page, ta_handle: ElementHandle, debug: b
     return rightmost[0]
 
 # ----------------- typing / start checks -----------------
+def upload_images(page: Page, sels: dict, files: List[Path], debug: bool=False) -> bool:
+    if not files:
+        return True
+    upload_cfg = (sels.get("image_upload") or {})
+    clear_sel = upload_cfg.get("clear")
+    if clear_sel:
+        try:
+            loc = page.locator(clear_sel)
+            for i in range(loc.count()):
+                loc.nth(i).click(timeout=2000)
+                time.sleep(0.1)
+        except Exception as exc:  # noqa: BLE001
+            if debug:
+                print(f"[WARN] Не удалось очистить предыдущие вложения: {exc}")
+
+    trigger_sel = upload_cfg.get("trigger") or upload_cfg.get("button")
+    if trigger_sel:
+        try:
+            page.locator(trigger_sel).first.click(timeout=5000)
+            time.sleep(0.2)
+        except Exception as exc:  # noqa: BLE001
+            if debug:
+                print(f"[WARN] Не удалось нажать кнопку добавления: {exc}")
+
+    input_sel = upload_cfg.get("css") or "input[type='file']"
+    try:
+        locator = page.locator(input_sel)
+        if not locator.count():
+            raise PWTimeout(f"Не найден input для загрузки: {input_sel}")
+        resolved: List[str] = []
+        for f in files:
+            path = Path(f)
+            if path.exists():
+                resolved.append(str(path))
+            else:
+                print(f"[WARN] Пропускаю отсутствующий файл: {path}")
+        if not resolved:
+            return False
+        locator.first.set_input_files(resolved)
+        wait_sel = upload_cfg.get("wait_for")
+        wait_timeout = int(upload_cfg.get("wait_timeout_ms", 8000) or 8000)
+        if wait_sel:
+            page.locator(wait_sel).first.wait_for(state="visible", timeout=wait_timeout)
+        else:
+            time.sleep(min(len(resolved) * 0.6, 2.5))
+        return True
+    except Exception as exc:  # noqa: BLE001
+        print(f"[WARN] Не удалось загрузить изображения: {exc}")
+        return False
+
+
 def js_inject_text(page: Page, element_handle: ElementHandle, text: str) -> None:
     page.evaluate(
         """({ el, text }) => {
@@ -310,15 +696,20 @@ def submit_prompt_once(page: Page,
                        ta_kind: str,
                        ta_sel: str,
                        btn_handle: ElementHandle,
-                       prompt: str,
+                       entry: PromptEntry,
                        typing_delay_ms: int,
                        start_confirm_timeout_ms: int,
                        retry_interval_ms: int,
                        backoff_seconds_on_reject: int,
+                       prepare_media: Optional[Callable[[], bool]] = None,
                        debug: bool=False) -> Tuple[bool, str]:
+    prompt = entry.prompt
     cur = textarea_value(page, ta_kind, ta_sel)
     if cur.strip() != prompt.strip():
         type_prompt(page, ta_kind, ta_sel, prompt, typing_delay_ms, debug)
+
+    if prepare_media and not prepare_media():
+        return False, "media-upload"
 
     q_before = queue_count_snapshot(page, sels)
 
@@ -341,6 +732,8 @@ def submit_prompt_once(page: Page,
 
     print("[RETRY] slot-locked")
     while True:
+        if prepare_media and not prepare_media():
+            return False, "media-upload"
         while not is_button_enabled_handle(page, btn_handle):
             time.sleep(retry_interval_ms / 1000.0)
         q_before = queue_count_snapshot(page, sels)
@@ -390,7 +783,7 @@ def ensure_page(pw, cfg: dict) -> Tuple[Browser, BrowserContext, Page]:
     print(f"[i] Текущая вкладка: {page.url}")
     return browser, context, page
 
-def run_loop(page: Page, cfg: dict, selectors: dict, prompts: List[str], already: Set[str]) -> None:
+def run_loop(page: Page, cfg: dict, selectors: dict, prompts: List[PromptEntry], already: Set[str]) -> None:
     poll_interval = int(cfg.get("poll_interval_ms", 1500)) / 1000.0
     typing_delay_ms = int(cfg.get("human_typing_delay_ms", 12))
     start_confirm_timeout_ms = int(cfg.get("start_confirmation_timeout_ms", 8000))
@@ -399,6 +792,14 @@ def run_loop(page: Page, cfg: dict, selectors: dict, prompts: List[str], already
     success_pause_every_n = int((cfg.get("queue_retry") or {}).get("success_pause_every_n", 0))
     success_pause_seconds = int((cfg.get("queue_retry") or {}).get("success_pause_seconds", 0))
     debug = bool(cfg.get("debug", False))
+
+    genai_cfg = GenAiConfig.from_env()
+    genai_client = GenAiClient(genai_cfg)
+    if genai_cfg.enabled:
+        if genai_client.enabled:
+            print(f"[i] Генерация изображений включена → {genai_cfg.output_dir}")
+        else:
+            print("[WARN] Генерация изображений была включена, но клиент не инициализирован.")
 
     print("[NOTIFY] AUTOGEN_START")
 
@@ -420,7 +821,7 @@ def run_loop(page: Page, cfg: dict, selectors: dict, prompts: List[str], already
 
     print("[i] Кнопка-стрелка определена.")
 
-    queue = deque([p for p in prompts if p not in already])
+    queue = deque([p for p in prompts if p.resolved_key() not in already])
     if not queue:
         print("[i] Нет новых промптов — всё уже отправлено.")
         print("[NOTIFY] AUTOGEN_FINISH_OK")
@@ -430,32 +831,42 @@ def run_loop(page: Page, cfg: dict, selectors: dict, prompts: List[str], already
 
     success = 0
     failed = 0
-    retry_queue: Deque[str] = deque()
+    retry_queue: Deque[PromptEntry] = deque()
 
     idx_total = len(queue)
     idx_counter = 0
     t_start = time.time()
 
     while queue:
-        prompt = queue.popleft()
+        entry = queue.popleft()
         idx_counter += 1
         print(f"[STEP] {idx_counter}/{idx_total} — отправляю…")
+        attachments_cache: List[Path] = []
+
+        def ensure_media() -> bool:
+            nonlocal attachments_cache
+            attachments_cache = gather_media(entry, genai_client)
+            if not attachments_cache:
+                return True
+            return upload_images(page, selectors, attachments_cache, debug=debug)
+
         ok, reason = submit_prompt_once(
             page=page,
             sels=selectors,
             ta_kind=ta_kind,
             ta_sel=ta_sel,
             btn_handle=btn_handle,
-            prompt=prompt,
+            entry=entry,
             typing_delay_ms=typing_delay_ms,
             start_confirm_timeout_ms=start_confirm_timeout_ms,
             retry_interval_ms=retry_interval_ms,
             backoff_seconds_on_reject=backoff_on_reject,
+            prepare_media=ensure_media,
             debug=debug,
         )
         if ok:
             print("[OK] принято UI.")
-            mark_submitted(prompt)
+            mark_submitted(entry, attachments_cache)
             success += 1
             if (success_pause_every_n and success_pause_seconds
                 and success % success_pause_every_n == 0
@@ -464,8 +875,8 @@ def run_loop(page: Page, cfg: dict, selectors: dict, prompts: List[str], already
                 time.sleep(success_pause_seconds)
         else:
             print(f"[WARN] не удалось отправить (пока): {reason}")
-            mark_failed(prompt, reason)
-            retry_queue.append(prompt)
+            mark_failed(entry, reason)
+            retry_queue.append(entry)
             failed += 1
 
         time.sleep(poll_interval)
@@ -478,24 +889,34 @@ def run_loop(page: Page, cfg: dict, selectors: dict, prompts: List[str], already
         while retry_queue:
             cur_round.append(retry_queue.popleft())
 
-        for prompt in cur_round:
+        for entry in cur_round:
             print(f"[STEP] RETRY — пробую снова…")
+            attachments_cache: List[Path] = []
+
+            def ensure_media_retry() -> bool:
+                nonlocal attachments_cache
+                attachments_cache = gather_media(entry, genai_client)
+                if not attachments_cache:
+                    return True
+                return upload_images(page, selectors, attachments_cache, debug=debug)
+
             ok, reason = submit_prompt_once(
                 page=page,
                 sels=selectors,
                 ta_kind=ta_kind,
                 ta_sel=ta_sel,
                 btn_handle=btn_handle,
-                prompt=prompt,
+                entry=entry,
                 typing_delay_ms=typing_delay_ms,
                 start_confirm_timeout_ms=start_confirm_timeout_ms,
                 retry_interval_ms=retry_interval_ms,
                 backoff_seconds_on_reject=backoff_on_reject,
+                prepare_media=ensure_media_retry,
                 debug=debug,
             )
             if ok:
                 print("[OK] принято UI.")
-                mark_submitted(prompt)
+                mark_submitted(entry, attachments_cache)
                 success += 1
                 if (success_pause_every_n and success_pause_seconds
                     and success % success_pause_every_n == 0
@@ -504,8 +925,8 @@ def run_loop(page: Page, cfg: dict, selectors: dict, prompts: List[str], already
                     time.sleep(success_pause_seconds)
             else:
                 print(f"[WARN] снова отказ: {reason}")
-                mark_failed(prompt, f"retry:{reason}")
-                retry_queue.append(prompt)
+                mark_failed(entry, f"retry:{reason}")
+                retry_queue.append(entry)
             time.sleep(poll_interval)
 
         time.sleep(20)

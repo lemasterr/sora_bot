@@ -9,6 +9,13 @@ textarea_alternatives:
 generate_button:
   css: "button:has(svg), [role='button']:has(svg)"
 
+image_upload:
+  css: "input[type='file']"
+  trigger: "button:has-text('Upload'), button:has-text('Add media'), [data-testid*='add-media']"
+  wait_for: "img, video"
+  wait_timeout_ms: 8000
+  clear: "[data-testid*='remove'], button:has-text('Remove media')"
+
 error_toast:
   container: "[role='alert'], [data-testid*='toast'], .toast, .SnackbarRoot"
   text_contains:

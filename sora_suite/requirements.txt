@@ -10,4 +10,5 @@ google-api-python-client==2.129.0
 google-auth==2.34.0
 google-auth-oauthlib==1.2.1
 google-auth-httplib2==0.2.0
+google-genai==0.8.1
 backports.zoneinfo==0.2.1; python_version < "3.9"

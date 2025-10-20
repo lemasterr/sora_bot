@@ -12,6 +12,18 @@ autogen:
   failed_log: ./workers/autogen/failed.log
   instances: []
   active_prompts_profile: __general__
+google_genai:
+  enabled: false
+  api_key: ""
+  model: models/imagen-4.0-generate-001
+  aspect_ratio: "1:1"
+  image_size: 1K
+  number_of_images: 1
+  output_dir: ./workers/autogen/generated
+  rate_limit_per_minute: 0
+  max_retries: 3
+  person_generation: ALLOW_ALL
+  output_mime_type: image/jpeg
 downloader:
   workdir: ./workers/downloader
   entry: download_all.py

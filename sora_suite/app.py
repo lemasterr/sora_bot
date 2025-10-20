@@ -180,6 +180,19 @@ def load_cfg() -> dict:
     autogen.setdefault("instances", [])
     autogen.setdefault("active_prompts_profile", PROMPTS_DEFAULT_KEY)
 
+    genai = data.setdefault("google_genai", {})
+    genai.setdefault("enabled", False)
+    genai.setdefault("api_key", "")
+    genai.setdefault("model", "models/imagen-4.0-generate-001")
+    genai.setdefault("aspect_ratio", "1:1")
+    genai.setdefault("image_size", "1K")
+    genai.setdefault("number_of_images", 1)
+    genai.setdefault("output_dir", str(WORKERS_DIR / "autogen" / "generated"))
+    genai.setdefault("rate_limit_per_minute", 0)
+    genai.setdefault("max_retries", 3)
+    genai.setdefault("person_generation", "ALLOW_ALL")
+    genai.setdefault("output_mime_type", "image/jpeg")
+
     downloader = data.setdefault("downloader", {})
     downloader.setdefault("workdir", str(WORKERS_DIR / "downloader"))
     downloader.setdefault("entry", "download_all.py")
@@ -434,6 +447,12 @@ def ensure_dirs(cfg: dict):
         merge_path = blurred_path
     merge_path.mkdir(parents=True, exist_ok=True)
     cfg["merge_src_dir"] = str(merge_path)
+
+    genai_cfg = cfg.get("google_genai", {}) or {}
+    output_raw = genai_cfg.get("output_dir") or (WORKERS_DIR / "autogen" / "generated")
+    output_path = _project_path(output_raw)
+    output_path.mkdir(parents=True, exist_ok=True)
+    genai_cfg["output_dir"] = str(output_path)
 
     yt = cfg.get("youtube", {}) or {}
     archive = yt.get("archive_dir")
@@ -2275,6 +2294,75 @@ class MainWindow(QtWidgets.QMainWindow):
         fa.addRow("Длительность паузы, сек:", self.sb_auto_success_pause)
         fa.addRow(self.btn_save_autogen_cfg)
         auto_layout.addWidget(grp_auto)
+
+        genai_cfg = self.cfg.get("google_genai", {}) or {}
+        grp_genai = QtWidgets.QGroupBox("Генерация изображений (Google AI Studio)")
+        fg = QtWidgets.QFormLayout(grp_genai)
+        self.cb_genai_enabled = QtWidgets.QCheckBox("Включить автоматическую генерацию изображений перед отправкой промпта")
+        self.cb_genai_enabled.setChecked(bool(genai_cfg.get("enabled", False)))
+        fg.addRow(self.cb_genai_enabled)
+
+        self.ed_genai_api_key = QtWidgets.QLineEdit(genai_cfg.get("api_key", ""))
+        self.ed_genai_api_key.setPlaceholderText("AIza...")
+        self.ed_genai_api_key.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
+        fg.addRow("API ключ:", self.ed_genai_api_key)
+
+        self.ed_genai_model = QtWidgets.QLineEdit(genai_cfg.get("model", "models/imagen-4.0-generate-001"))
+        fg.addRow("Модель:", self.ed_genai_model)
+
+        self.cmb_genai_person = QtWidgets.QComboBox()
+        self.cmb_genai_person.addItem("Разрешить людей", "ALLOW_ALL")
+        self.cmb_genai_person.addItem("Без людей", "BLOCK_ALL")
+        person_val = genai_cfg.get("person_generation", "ALLOW_ALL") or "ALLOW_ALL"
+        idx_person = self.cmb_genai_person.findData(person_val)
+        if idx_person < 0:
+            self.cmb_genai_person.addItem(person_val, person_val)
+            idx_person = self.cmb_genai_person.count() - 1
+        self.cmb_genai_person.setCurrentIndex(idx_person)
+        fg.addRow("Генерация людей:", self.cmb_genai_person)
+
+        self.ed_genai_aspect = QtWidgets.QLineEdit(str(genai_cfg.get("aspect_ratio", "1:1")))
+        fg.addRow("Соотношение сторон:", self.ed_genai_aspect)
+
+        self.ed_genai_size = QtWidgets.QLineEdit(str(genai_cfg.get("image_size", "1K")))
+        fg.addRow("Размер:", self.ed_genai_size)
+
+        self.ed_genai_mime = QtWidgets.QLineEdit(str(genai_cfg.get("output_mime_type", "image/jpeg")))
+        fg.addRow("MIME-тип:", self.ed_genai_mime)
+
+        self.sb_genai_images = QtWidgets.QSpinBox()
+        self.sb_genai_images.setRange(1, 8)
+        self.sb_genai_images.setValue(int(genai_cfg.get("number_of_images", 1) or 1))
+        fg.addRow("Картинок на промпт:", self.sb_genai_images)
+
+        self.sb_genai_rpm = QtWidgets.QSpinBox()
+        self.sb_genai_rpm.setRange(0, 120)
+        self.sb_genai_rpm.setSpecialValueText("без ограничений")
+        self.sb_genai_rpm.setValue(int(genai_cfg.get("rate_limit_per_minute", 0) or 0))
+        fg.addRow("Лимит запросов в минуту:", self.sb_genai_rpm)
+
+        self.sb_genai_retries = QtWidgets.QSpinBox()
+        self.sb_genai_retries.setRange(0, 10)
+        self.sb_genai_retries.setValue(int(genai_cfg.get("max_retries", 3) or 0))
+        fg.addRow("Повторов при ошибке:", self.sb_genai_retries)
+
+        output_dir = genai_cfg.get("output_dir", str(WORKERS_DIR / "autogen" / "generated"))
+        self.ed_genai_output_dir = QtWidgets.QLineEdit(str(output_dir))
+        self.btn_genai_output_browse = QtWidgets.QPushButton("…")
+        row_widget = QtWidgets.QWidget()
+        row_layout = QtWidgets.QHBoxLayout(row_widget)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(6)
+        row_layout.addWidget(self.ed_genai_output_dir, 1)
+        row_layout.addWidget(self.btn_genai_output_browse, 0)
+        fg.addRow("Папка вывода:", row_widget)
+
+        hint = QtWidgets.QLabel("Настройки применяются при запуске автогена. Папка вывода будет создана автоматически.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
+        fg.addRow(hint)
+
+        auto_layout.addWidget(grp_genai)
         auto_layout.addStretch(1)
         self.settings_tabs.addTab(page_auto, "Автоген")
 
@@ -2304,6 +2392,8 @@ class MainWindow(QtWidgets.QMainWindow):
             (self.ed_merge_src, self.cfg.get("merge_src_dir", self.cfg.get("blurred_dir", str(BLUR_DIR)))),
             (getattr(self, "ed_tiktok_src", None), self.cfg.get("tiktok", {}).get("upload_src_dir", self.cfg.get("merged_dir", str(MERG_DIR))))
         ]
+        if hasattr(self, "ed_genai_output_dir"):
+            mapping.append((self.ed_genai_output_dir, self.cfg.get("google_genai", {}).get("output_dir", str(WORKERS_DIR / "autogen" / "generated"))))
         for line, value in mapping:
             if not isinstance(line, QtWidgets.QLineEdit):
                 continue
@@ -2365,6 +2455,17 @@ class MainWindow(QtWidgets.QMainWindow):
             (self.sb_youtube_interval, "valueChanged"),
             (self.sb_youtube_batch_limit, "valueChanged"),
             (self.ed_youtube_src, "textEdited"),
+            (self.cb_genai_enabled, "toggled"),
+            (self.ed_genai_api_key, "textEdited"),
+            (self.ed_genai_model, "textEdited"),
+            (self.cmb_genai_person, "currentIndexChanged"),
+            (self.ed_genai_aspect, "textEdited"),
+            (self.ed_genai_size, "textEdited"),
+            (self.ed_genai_mime, "textEdited"),
+            (self.sb_genai_images, "valueChanged"),
+            (self.sb_genai_rpm, "valueChanged"),
+            (self.sb_genai_retries, "valueChanged"),
+            (self.ed_genai_output_dir, "textEdited"),
         ]
         for widget, signal_name in watchers:
             signal = getattr(widget, signal_name, None)
@@ -2721,6 +2822,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_browse_merged.clicked.connect(lambda: self._browse_dir(self.ed_merged, "Выбери папку MERGED"))
         self.btn_browse_blur_src.clicked.connect(lambda: self._browse_dir(self.ed_blur_src, "Выбери ИСТОЧНИК для BLUR"))
         self.btn_browse_merge_src.clicked.connect(lambda: self._browse_dir(self.ed_merge_src, "Выбери ИСТОЧНИК для MERGE"))
+        self.btn_genai_output_browse.clicked.connect(lambda: self._browse_dir(self.ed_genai_output_dir, "Выбери папку для изображений"))
 
     def _init_state(self):
         self.runner_autogen = ProcRunner("AUTOGEN")
@@ -3342,6 +3444,26 @@ class MainWindow(QtWidgets.QMainWindow):
             self.lbl_prompts_path.setText(str(path))
         self._post_status("Промпты сохранены", state="ok")
 
+    def _autogen_env(self) -> dict:
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
+        env["SORA_PROMPTS_FILE"] = str(self._prompts_path())
+        genai_cfg = self.cfg.get("google_genai", {}) or {}
+        env["GENAI_ENABLED"] = "1" if genai_cfg.get("enabled") else "0"
+        env["GENAI_API_KEY"] = genai_cfg.get("api_key", "").strip()
+        env["GENAI_MODEL"] = genai_cfg.get("model", "").strip()
+        env["GENAI_PERSON_GENERATION"] = genai_cfg.get("person_generation", "").strip()
+        env["GENAI_ASPECT_RATIO"] = genai_cfg.get("aspect_ratio", "").strip()
+        env["GENAI_IMAGE_SIZE"] = genai_cfg.get("image_size", "").strip()
+        env["GENAI_OUTPUT_MIME_TYPE"] = genai_cfg.get("output_mime_type", "").strip()
+        env["GENAI_NUMBER_OF_IMAGES"] = str(int(genai_cfg.get("number_of_images", 1) or 1))
+        env["GENAI_RATE_LIMIT"] = str(int(genai_cfg.get("rate_limit_per_minute", 0) or 0))
+        env["GENAI_MAX_RETRIES"] = str(int(genai_cfg.get("max_retries", 3) or 0))
+        env["GENAI_OUTPUT_DIR"] = str(_project_path(genai_cfg.get("output_dir", str(WORKERS_DIR / "autogen" / "generated"))))
+        env["GENAI_BASE_DIR"] = str(_project_path(self.cfg.get("project_root", PROJECT_ROOT)))
+        env["GENAI_PROMPTS_DIR"] = str(self._prompts_path().parent.resolve())
+        return env
+
     def _save_and_run_autogen(self):
         self._save_prompts()
         sl = WORKERS_DIR / "autogen" / "submitted.log"
@@ -3354,8 +3476,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # НЕ блокируем UI: запускаем через ProcRunner
         workdir=self.cfg.get("autogen",{}).get("workdir", str(WORKERS_DIR / "autogen"))
         entry=self.cfg.get("autogen",{}).get("entry","main.py")
-        env=os.environ.copy(); env["PYTHONUNBUFFERED"]="1"
-        env["SORA_PROMPTS_FILE"]=str(self._prompts_path())  # FIX: автоген читает именно этот файл
+        env = self._autogen_env()
         self._post_status("Вставка промптов…", state="running")
         self.runner_autogen.run([sys.executable, entry], cwd=workdir, env=env)
 
@@ -3500,8 +3621,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._save_settings_clicked(silent=True)
         workdir=self.cfg.get("autogen",{}).get("workdir", str(WORKERS_DIR / "autogen"))
         entry=self.cfg.get("autogen",{}).get("entry","main.py")
-        python=sys.executable; cmd=[python, entry]; env=os.environ.copy(); env["PYTHONUNBUFFERED"]="1"
-        env["SORA_PROMPTS_FILE"]=str(self._prompts_path())  # FIX: синхронный запуск тоже
+        python=sys.executable; cmd=[python, entry]; env=self._autogen_env()
         self._send_tg("✍️ Autogen запускается")
         self._post_status("Вставка промптов…", state="running")
         rc = self._await_runner(self.runner_autogen, "AUTOGEN", lambda: self.runner_autogen.run(cmd, cwd=workdir, env=env))
@@ -4161,6 +4281,19 @@ class MainWindow(QtWidgets.QMainWindow):
         ui_cfg = self.cfg.setdefault("ui", {})
         ui_cfg["show_activity"] = bool(self.cb_ui_show_activity.isChecked())
         ui_cfg["activity_density"] = self.cmb_ui_activity_density.currentData() or "compact"
+
+        genai_cfg = self.cfg.setdefault("google_genai", {})
+        genai_cfg["enabled"] = bool(self.cb_genai_enabled.isChecked())
+        genai_cfg["api_key"] = self.ed_genai_api_key.text().strip()
+        genai_cfg["model"] = self.ed_genai_model.text().strip() or "models/imagen-4.0-generate-001"
+        genai_cfg["person_generation"] = self.cmb_genai_person.currentData() or "ALLOW_ALL"
+        genai_cfg["aspect_ratio"] = self.ed_genai_aspect.text().strip() or "1:1"
+        genai_cfg["image_size"] = self.ed_genai_size.text().strip() or "1K"
+        genai_cfg["output_mime_type"] = self.ed_genai_mime.text().strip() or "image/jpeg"
+        genai_cfg["number_of_images"] = int(self.sb_genai_images.value())
+        genai_cfg["rate_limit_per_minute"] = int(self.sb_genai_rpm.value())
+        genai_cfg["max_retries"] = int(self.sb_genai_retries.value())
+        genai_cfg["output_dir"] = self.ed_genai_output_dir.text().strip() or str(WORKERS_DIR / "autogen" / "generated")
 
         maint_cfg = self.cfg.setdefault("maintenance", {})
         maint_cfg["auto_cleanup_on_start"] = bool(self.cb_maintenance_auto.isChecked())
