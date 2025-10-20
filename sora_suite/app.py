@@ -193,7 +193,7 @@ def load_cfg() -> dict:
     genai.setdefault("manifest_file", str(Path("generated_images") / "manifest.json"))
     genai.setdefault("rate_limit_per_minute", 0)
     genai.setdefault("max_retries", 3)
-    genai.setdefault("person_generation", "ALLOW_ALL")
+    genai.setdefault("person_generation", "")
     genai.setdefault("output_mime_type", "image/jpeg")
     genai.setdefault("attach_to_sora", True)
 
@@ -2386,14 +2386,22 @@ class MainWindow(QtWidgets.QMainWindow):
         fg.addRow("Модель:", self.ed_genai_model)
 
         self.cmb_genai_person = QtWidgets.QComboBox()
-        self.cmb_genai_person.addItem("Разрешить людей", "ALLOW_ALL")
-        self.cmb_genai_person.addItem("Без людей", "BLOCK_ALL")
-        person_val = genai_cfg.get("person_generation", "ALLOW_ALL") or "ALLOW_ALL"
+        self.cmb_genai_person.setEditable(True)
+        self.cmb_genai_person.setInsertPolicy(QtWidgets.QComboBox.InsertPolicy.NoInsert)
+        self.cmb_genai_person.addItem("По умолчанию (без явного запрета)", "")
+        self.cmb_genai_person.addItem("ALLOW_ALL (устар.)", "ALLOW_ALL")
+        self.cmb_genai_person.addItem("BLOCK_ALL (устар.)", "BLOCK_ALL")
+        person_val = str(genai_cfg.get("person_generation", "") or "")
         idx_person = self.cmb_genai_person.findData(person_val)
         if idx_person < 0:
-            self.cmb_genai_person.addItem(person_val, person_val)
-            idx_person = self.cmb_genai_person.count() - 1
+            label = person_val or ""
+            if label:
+                self.cmb_genai_person.addItem(label, person_val)
+                idx_person = self.cmb_genai_person.count() - 1
+            else:
+                idx_person = 0
         self.cmb_genai_person.setCurrentIndex(idx_person)
+        self.cmb_genai_person.lineEdit().setPlaceholderText("оставь пустым, чтобы следовать политике модели")
         fg.addRow("Генерация людей:", self.cmb_genai_person)
 
         self.ed_genai_aspect = QtWidgets.QLineEdit(str(genai_cfg.get("aspect_ratio", "1:1")))
@@ -2535,6 +2543,7 @@ class MainWindow(QtWidgets.QMainWindow):
             (self.ed_genai_api_key, "textEdited"),
             (self.ed_genai_model, "textEdited"),
             (self.cmb_genai_person, "currentIndexChanged"),
+            (self.cmb_genai_person.lineEdit(), "textEdited"),
             (self.ed_genai_aspect, "textEdited"),
             (self.ed_genai_size, "textEdited"),
             (self.ed_genai_mime, "textEdited"),
@@ -4445,7 +4454,12 @@ class MainWindow(QtWidgets.QMainWindow):
         genai_cfg["attach_to_sora"] = bool(self.cb_genai_attach.isChecked())
         genai_cfg["api_key"] = self.ed_genai_api_key.text().strip()
         genai_cfg["model"] = self.ed_genai_model.text().strip() or "models/imagen-4.0-generate-001"
-        genai_cfg["person_generation"] = self.cmb_genai_person.currentData() or "ALLOW_ALL"
+        current_person = self.cmb_genai_person.currentData()
+        if isinstance(current_person, str) and current_person:
+            value = current_person
+        else:
+            value = self.cmb_genai_person.currentText()
+        genai_cfg["person_generation"] = value.strip()
         genai_cfg["aspect_ratio"] = self.ed_genai_aspect.text().strip() or "1:1"
         genai_cfg["image_size"] = self.ed_genai_size.text().strip() or "1K"
         genai_cfg["output_mime_type"] = self.ed_genai_mime.text().strip() or "image/jpeg"

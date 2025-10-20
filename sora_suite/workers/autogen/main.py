@@ -102,7 +102,7 @@ class GenAiConfig:
     enabled: bool
     api_key: str
     model: str
-    person_generation: str
+    person_generation: Optional[str]
     aspect_ratio: str
     image_size: str
     output_dir: Path
@@ -118,7 +118,8 @@ class GenAiConfig:
         enabled = _env_bool("GENAI_ENABLED", False)
         api_key = os.getenv("GENAI_API_KEY", "").strip()
         model = os.getenv("GENAI_MODEL", "models/imagen-4.0-generate-001").strip()
-        person = os.getenv("GENAI_PERSON_GENERATION", "ALLOW_ALL").strip() or "ALLOW_ALL"
+        person_raw = os.getenv("GENAI_PERSON_GENERATION", "").strip()
+        person = person_raw or None
         aspect = os.getenv("GENAI_ASPECT_RATIO", "1:1").strip() or "1:1"
         size = os.getenv("GENAI_IMAGE_SIZE", "1K").strip() or "1K"
         mime_type = os.getenv("GENAI_OUTPUT_MIME_TYPE", "image/jpeg").strip() or "image/jpeg"
@@ -306,6 +307,12 @@ class GenAiClient:
     def enabled(self) -> bool:
         return self._available
 
+    @staticmethod
+    def _is_person_generation_error(exc: Exception) -> bool:
+        message = str(exc)
+        lowered = message.lower()
+        return "persongeneration" in lowered or "person_generation" in lowered or "allow_all" in lowered or "block_all" in lowered
+
     def generate(self, prompt: str, count: int, tag: str) -> List[Path]:
         if not self.enabled:
             return []
@@ -316,16 +323,18 @@ class GenAiClient:
             attempt += 1
             try:
                 self._rate.wait()
+                config_payload = dict(
+                    number_of_images=max(1, count),
+                    output_mime_type=self.cfg.mime_type,
+                    aspect_ratio=self.cfg.aspect_ratio,
+                    image_size=self.cfg.image_size,
+                )
+                if self.cfg.person_generation:
+                    config_payload["person_generation"] = self.cfg.person_generation
                 result = self._client.models.generate_images(  # type: ignore[union-attr]
                     model=self.cfg.model,
                     prompt=prompt,
-                    config=dict(
-                        number_of_images=max(1, count),
-                        output_mime_type=self.cfg.mime_type,
-                        person_generation=self.cfg.person_generation,
-                        aspect_ratio=self.cfg.aspect_ratio,
-                        image_size=self.cfg.image_size,
-                    ),
+                    config=config_payload,
                 )
                 if not getattr(result, "generated_images", None):
                     print(f"[WARN] API не вернуло изображений для промпта: {prompt!r}")
@@ -349,6 +358,12 @@ class GenAiClient:
                 return saved
             except Exception as exc:  # noqa: BLE001
                 last_err = exc
+                if self.cfg.person_generation and self._is_person_generation_error(exc):
+                    print("[WARN] person_generation отклонён API. Повтор без этого параметра.")
+                    self.cfg.person_generation = None
+                    attempt -= 1
+                    time.sleep(1)
+                    continue
                 print(f"[WARN] Ошибка генерации (попытка {attempt}/{self.cfg.max_retries + 1}): {exc}")
                 if attempt <= self.cfg.max_retries:
                     time.sleep(min(5 * attempt, 20))
