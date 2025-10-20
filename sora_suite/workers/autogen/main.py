@@ -68,6 +68,54 @@ def _slugify(value: str) -> str:
     return slug or "prompt"
 
 
+def _image_extension_for_mime(mime: str) -> str:
+    mime = (mime or "").lower()
+    if "png" in mime:
+        return ".png"
+    if "webp" in mime:
+        return ".webp"
+    if "jpeg" in mime or "jpg" in mime:
+        return ".jpg"
+    if "gif" in mime:
+        return ".gif"
+    return ".jpg"
+
+
+def _next_image_path(directory: Path, ext: str) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    ext = (ext if ext.startswith(".") else f".{ext}").lower() or ".jpg"
+    numbers: List[int] = []
+    for existing in directory.iterdir():
+        if not existing.is_file():
+            continue
+        if existing.suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
+            continue
+        stem = existing.stem.strip()
+        if stem.isdigit():
+            try:
+                numbers.append(int(stem))
+            except ValueError:
+                continue
+    next_number = max(numbers) + 1 if numbers else 1
+    while True:
+        candidate = directory / f"{next_number}{ext}"
+        if not candidate.exists():
+            return candidate
+        next_number += 1
+
+
+def _natural_sort_key(path: Path) -> List[Any]:
+    name = path.name if isinstance(path, Path) else str(path)
+    parts = re.split(r"(\d+)", name.lower())
+    key: List[Any] = []
+    for part in parts:
+        if part.isdigit():
+            key.append(int(part))
+        elif part:
+            key.append(part)
+    return key
+
+
 @dataclass
 class PromptEntry:
     key: str
@@ -340,21 +388,17 @@ class GenAiClient:
                     print(f"[WARN] API не вернуло изображений для промпта: {prompt!r}")
                     return []
                 saved: List[Path] = []
-                timestamp = int(time.time())
-                slug = _slugify(prompt)[:48]
-                ext = "jpg"
-                if self.cfg.mime_type.lower().endswith("png"):
-                    ext = "png"
-                for idx, generated in enumerate(result.generated_images):
-                    fname = f"{slug}-{tag}-{timestamp}-{idx+1:02d}.{ext}"
-                    dest = self.cfg.output_dir / fname
+                ext = _image_extension_for_mime(self.cfg.mime_type)
+                for generated in result.generated_images:
+                    dest = _next_image_path(self.cfg.output_dir, ext)
                     try:
                         generated.image.save(dest)  # type: ignore[attr-defined]
                         saved.append(dest)
                     except Exception as save_err:  # noqa: BLE001
-                        print(f"[WARN] Не удалось сохранить изображение {fname}: {save_err}")
+                        print(f"[WARN] Не удалось сохранить изображение {dest.name}: {save_err}")
                 if saved:
-                    print(f"[OK] Сгенерировано {len(saved)} изображений → {self.cfg.output_dir}")
+                    names = ", ".join(p.name for p in saved)
+                    print(f"[OK] Сгенерировано {len(saved)} изображений → {self.cfg.output_dir} ({names})")
                 return saved
             except Exception as exc:  # noqa: BLE001
                 last_err = exc
@@ -772,10 +816,11 @@ def gather_media(entry: PromptEntry, client: GenAiClient, manifest: Optional[Ima
             if path.exists():
                 existing.append(path)
         if existing:
-            entry.generated_files = existing
-            _record_manifest(existing)
+            existing_sorted = sorted(existing, key=_natural_sort_key)
+            entry.generated_files = existing_sorted
+            _record_manifest(existing_sorted)
             if client.cfg.attach_to_sora:
-                attachments.extend(existing)
+                attachments.extend(existing_sorted)
             else:
                 if existing:
                     sample = existing[0]
@@ -794,6 +839,7 @@ def gather_media(entry: PromptEntry, client: GenAiClient, manifest: Optional[Ima
                 if generated:
                     generated_total.extend(generated)
             if generated_total:
+                generated_total = sorted(generated_total, key=_natural_sort_key)
                 entry.generated_files = generated_total
                 _record_manifest(generated_total)
                 if client.cfg.attach_to_sora:
@@ -822,6 +868,7 @@ def gather_media(entry: PromptEntry, client: GenAiClient, manifest: Optional[Ima
         if key not in seen:
             seen.add(key)
             unique.append(path)
+    unique.sort(key=_natural_sort_key)
     return unique
 
 
@@ -993,31 +1040,60 @@ def upload_images(page: Page, sels: dict, files: List[Path], debug: bool=False) 
             if debug:
                 print(f"[WARN] Не удалось нажать кнопку добавления: {exc}")
 
-    input_sel = upload_cfg.get("css") or "input[type='file']"
+    selectors_try: List[str] = []
+    if upload_cfg.get("css"):
+        selectors_try.append(upload_cfg["css"])
+    selectors_try.extend([
+        "input[type='file'][accept*='image']",
+        "input[type='file'][accept*='jpeg']",
+        "input[type='file'][accept*='png']",
+        "input[type='file']",
+    ])
+
+    resolved: List[str] = []
+    for f in files:
+        path = Path(f)
+        if path.exists():
+            resolved.append(str(path))
+        else:
+            print(f"[WARN] Пропускаю отсутствующий файл: {path}")
+    if not resolved:
+        return False
+
+    last_exc: Optional[Exception] = None
+    applied = False
+    for css in selectors_try:
+        if not css:
+            continue
+        try:
+            locator = page.locator(css)
+            if not locator.count():
+                continue
+            locator.first.set_input_files(resolved)
+            applied = True
+            break
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            continue
+
+    if not applied:
+        if last_exc and debug:
+            print(f"[WARN] Не удалось загрузить изображения: {last_exc}")
+        elif debug:
+            print("[WARN] Не найден подходящий input[type=file] для изображений")
+        return False
+
+    wait_sel = upload_cfg.get("wait_for")
+    wait_timeout = int(upload_cfg.get("wait_timeout_ms", 8000) or 8000)
     try:
-        locator = page.locator(input_sel)
-        if not locator.count():
-            raise PWTimeout(f"Не найден input для загрузки: {input_sel}")
-        resolved: List[str] = []
-        for f in files:
-            path = Path(f)
-            if path.exists():
-                resolved.append(str(path))
-            else:
-                print(f"[WARN] Пропускаю отсутствующий файл: {path}")
-        if not resolved:
-            return False
-        locator.first.set_input_files(resolved)
-        wait_sel = upload_cfg.get("wait_for")
-        wait_timeout = int(upload_cfg.get("wait_timeout_ms", 8000) or 8000)
         if wait_sel:
             page.locator(wait_sel).first.wait_for(state="visible", timeout=wait_timeout)
         else:
             time.sleep(min(len(resolved) * 0.6, 2.5))
-        return True
     except Exception as exc:  # noqa: BLE001
-        print(f"[WARN] Не удалось загрузить изображения: {exc}")
-        return False
+        if debug:
+            print(f"[WARN] Ожидание загрузки медиа завершилось ошибкой: {exc}")
+    return True
 
 
 def js_inject_text(page: Page, element_handle: ElementHandle, text: str) -> None:
