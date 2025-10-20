@@ -190,6 +190,7 @@ def load_cfg() -> dict:
     genai.setdefault("image_size", "1K")
     genai.setdefault("number_of_images", 1)
     genai.setdefault("output_dir", str(IMAGES_DIR))
+    genai.setdefault("manifest_file", str(Path("generated_images") / "manifest.json"))
     genai.setdefault("rate_limit_per_minute", 0)
     genai.setdefault("max_retries", 3)
     genai.setdefault("person_generation", "ALLOW_ALL")
@@ -456,6 +457,9 @@ def ensure_dirs(cfg: dict):
     output_path = _project_path(output_raw)
     output_path.mkdir(parents=True, exist_ok=True)
     genai_cfg["output_dir"] = str(output_path)
+    manifest_raw = genai_cfg.get("manifest_file") or (Path(output_path) / "manifest.json")
+    manifest_path = _project_path(manifest_raw)
+    genai_cfg["manifest_file"] = str(manifest_path)
 
     auto_cfg = cfg.get("autogen", {}) or {}
     img_prompts_raw = auto_cfg.get("image_prompts_file") or (WORKERS_DIR / "autogen" / "image_prompts.txt")
@@ -3551,7 +3555,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if path:
             open_in_finder(path)
 
-    def _autogen_env(self, force_images: Optional[bool] = None) -> dict:
+    def _autogen_env(self, force_images: Optional[bool] = None, *, images_only: bool = False) -> dict:
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
         env["SORA_PROMPTS_FILE"] = str(self._prompts_path())
@@ -3578,10 +3582,16 @@ class MainWindow(QtWidgets.QMainWindow):
         env["GENAI_PROMPTS_DIR"] = str(self._prompts_path().parent.resolve())
         env["GENAI_IMAGE_PROMPTS_FILE"] = str(self._image_prompts_path())
         env["GENAI_ATTACH_TO_SORA"] = "1" if bool(genai_cfg.get("attach_to_sora", True)) else "0"
+        manifest_raw = genai_cfg.get("manifest_file") or (Path(genai_cfg.get("output_dir", str(IMAGES_DIR))) / "manifest.json")
+        env["GENAI_MANIFEST_FILE"] = str(_project_path(manifest_raw))
+        env["GENAI_IMAGES_ONLY"] = "1" if images_only else "0"
         return env
 
-    def _save_and_run_autogen(self, force_images: Optional[bool] = None):
-        self._save_prompts()
+    def _save_and_run_autogen(self, force_images: Optional[bool] = None, *, images_only: bool = False):
+        if images_only:
+            self._save_image_prompts()
+        else:
+            self._save_prompts()
         if force_images:
             genai_cfg = self.cfg.get("google_genai", {}) or {}
             if not genai_cfg.get("api_key", "").strip():
@@ -3591,26 +3601,28 @@ class MainWindow(QtWidgets.QMainWindow):
                     "Укажи API-ключ Google AI Studio в настройках, чтобы запустить генерацию изображений.",
                 )
                 return
-        sl = WORKERS_DIR / "autogen" / "submitted.log"
-        if sl.exists():
-            box = QtWidgets.QMessageBox.question(self, "Очистить submitted.log?", "Очистить submitted.log перед запуском?",
-                                                 QtWidgets.QMessageBox.StandardButton.Yes|QtWidgets.QMessageBox.StandardButton.No)
-            if box == QtWidgets.QMessageBox.StandardButton.Yes:
-                try: sl.unlink()
-                except: pass
+        if not images_only:
+            sl = WORKERS_DIR / "autogen" / "submitted.log"
+            if sl.exists():
+                box = QtWidgets.QMessageBox.question(self, "Очистить submitted.log?", "Очистить submitted.log перед запуском?",
+                                                     QtWidgets.QMessageBox.StandardButton.Yes|QtWidgets.QMessageBox.StandardButton.No)
+                if box == QtWidgets.QMessageBox.StandardButton.Yes:
+                    try: sl.unlink()
+                    except: pass
         # НЕ блокируем UI: запускаем через ProcRunner
         workdir=self.cfg.get("autogen",{}).get("workdir", str(WORKERS_DIR / "autogen"))
         entry=self.cfg.get("autogen",{}).get("entry","main.py")
-        env = self._autogen_env(force_images=force_images)
+        env = self._autogen_env(force_images=force_images, images_only=images_only)
         status_msg = "Вставка промптов…"
-        if force_images:
+        if images_only:
+            status_msg = "Только генерация картинок…"
+        elif force_images:
             status_msg = "Генерация картинок и вставка промптов…"
         self._post_status(status_msg, state="running")
         self.runner_autogen.run([sys.executable, entry], cwd=workdir, env=env)
 
     def _save_and_run_autogen_images(self):
-        self._save_image_prompts()
-        self._save_and_run_autogen(force_images=True)
+        self._save_and_run_autogen(force_images=True, images_only=True)
 
     def _titles_path(self)->Path:
         return _project_path(self.cfg.get("titles_file", str(TITLES_FILE)))
@@ -3720,7 +3732,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._run_autogen_sync()
 
     def _run_autogen_images(self):
-        self._run_autogen_sync(force_images=True)
+        self._run_autogen_sync(force_images=True, images_only=True)
 
     def _await_runner(self, runner: ProcRunner, tag: str, starter: Callable[[], None]) -> int:
         if runner.proc and runner.proc.poll() is None:
@@ -3752,12 +3764,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
         return rc
 
-    def _run_autogen_sync(self, force_images: Optional[bool] = None) -> bool:
+    def _run_autogen_sync(self, force_images: Optional[bool] = None, *, images_only: bool = False) -> bool:
         self._save_settings_clicked(silent=True)
         workdir=self.cfg.get("autogen",{}).get("workdir", str(WORKERS_DIR / "autogen"))
         entry=self.cfg.get("autogen",{}).get("entry","main.py")
-        python=sys.executable; cmd=[python, entry]; env=self._autogen_env(force_images=force_images)
-        if force_images:
+        python=sys.executable; cmd=[python, entry]; env=self._autogen_env(force_images=force_images, images_only=images_only)
+        if images_only:
+            self._send_tg("🖼️ Autogen (картинки) запускается")
+            status_msg = "Только генерация картинок…"
+        elif force_images:
             self._send_tg("🖼️ Autogen (картинки) запускается")
             status_msg = "Генерация картинок и вставка промптов…"
         else:
@@ -3766,7 +3781,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._post_status(status_msg, state="running")
         rc = self._await_runner(self.runner_autogen, "AUTOGEN", lambda: self.runner_autogen.run(cmd, cwd=workdir, env=env))
         ok = rc == 0
-        if force_images:
+        if images_only or force_images:
             self._send_tg("🖼️ Autogen (картинки) завершён" if ok else "⚠️ Autogen (картинки) завершён с ошибками")
         else:
             self._send_tg("✍️ Autogen завершён" if ok else "⚠️ Autogen завершён с ошибками")
@@ -4438,6 +4453,7 @@ class MainWindow(QtWidgets.QMainWindow):
         genai_cfg["rate_limit_per_minute"] = int(self.sb_genai_rpm.value())
         genai_cfg["max_retries"] = int(self.sb_genai_retries.value())
         genai_cfg["output_dir"] = self.ed_genai_output_dir.text().strip() or str(IMAGES_DIR)
+        genai_cfg["manifest_file"] = str(Path(genai_cfg["output_dir"]) / "manifest.json")
 
         maint_cfg = self.cfg.setdefault("maintenance", {})
         maint_cfg["auto_cleanup_on_start"] = bool(self.cb_maintenance_auto.isChecked())

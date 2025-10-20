@@ -19,7 +19,8 @@ google_genai:
   aspect_ratio: "1:1"
   image_size: 1K
   number_of_images: 1
-  output_dir: ./workers/autogen/generated
+  output_dir: ./generated_images
+  manifest_file: ./generated_images/manifest.json
   rate_limit_per_minute: 0
   max_retries: 3
   person_generation: ALLOW_ALL
