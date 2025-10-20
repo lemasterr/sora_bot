@@ -53,6 +53,10 @@ def _coerce_int(value) -> Optional[int]:
         clean = value.strip()
         if not clean:
             return None
+        # поддержка значений вроде "128px" или "45.6%"
+        match = re.search(r"-?\d+(?:\.\d+)?", clean)
+        if match:
+            clean = match.group(0)
         value = clean
     try:
         return int(round(float(value)))
@@ -67,6 +71,40 @@ def _pick_first(zone: Dict, keys: Tuple[str, ...]) -> Optional[int]:
             if val is not None:
                 return val
     return None
+
+
+def _as_zone_sequence(body: object) -> List[Dict]:
+    """Вернёт список зон из произвольных старых структур конфигурации."""
+    if body is None:
+        return []
+    if isinstance(body, list):
+        return list(body)
+    if isinstance(body, tuple):
+        return list(body)
+    if isinstance(body, dict):
+        # классический формат {"zones": [...]}
+        if "zones" in body:
+            zones = body.get("zones")
+            if isinstance(zones, dict):
+                # YAML мог сохранить список как отображение
+                try:
+                    # сортируем по ключу, чтобы сохранялся порядок
+                    return [zones[k] for k in sorted(zones.keys(), key=str)]
+                except Exception:
+                    return list(zones.values())
+            if isinstance(zones, (list, tuple)):
+                return list(zones)
+        # формат, где сама запись является зоной
+        keys = set(k.lower() for k in body.keys())
+        if {"x", "y"}.issubset(keys) and ({"w", "h"}.issubset(keys) or {"width", "height"}.issubset(keys)):
+            return [body]
+        # вложенные словари с координатами
+        for candidate_key in ("rect", "zone", "coords", "geometry"):
+            candidate = body.get(candidate_key)
+            if isinstance(candidate, dict):
+                return [candidate]
+        return []
+    return []
 
 
 def normalize_zone(zone: object) -> Optional[Dict[str, int]]:
@@ -158,6 +196,15 @@ def load_cfg() -> dict:
     ff.setdefault("copy_audio", True)
     ff.setdefault("blur_threads", 2)
     presets = ff.setdefault("presets", {})
+    if isinstance(presets, list):
+        migrated: Dict[str, dict] = {}
+        for idx, entry in enumerate(presets):
+            if isinstance(entry, dict):
+                name = entry.get("name") or f"preset_{idx+1}"
+                migrated[name] = entry
+        presets = migrated
+        ff["presets"] = presets
+
     presets.setdefault("portrait_9x16", {
         "zones": [
             {"x": 30,  "y": 105,  "w": 157, "h": 62},
@@ -174,8 +221,8 @@ def load_cfg() -> dict:
     })
     sanitized_presets: Dict[str, Dict[str, List[Dict[str, int]]]] = {}
     for name, body in list(presets.items()):
-        raw = body.get("zones") if isinstance(body, dict) else None
-        norm = normalize_zone_list(raw if isinstance(raw, list) else None)
+        raw_list = _as_zone_sequence(body)
+        norm = normalize_zone_list(raw_list)
         display = norm or [{"x": 0, "y": 0, "w": 0, "h": 0}]
         sanitized_presets[name] = {"zones": [dict(zone) for zone in display]}
     ff["presets"] = sanitized_presets
@@ -710,6 +757,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._build_ui()
         self._wire()
         self._init_state()
+        self._refresh_update_buttons()
 
         QtCore.QTimer.singleShot(0, self._perform_delayed_startup)
 
@@ -791,6 +839,28 @@ class MainWindow(QtWidgets.QMainWindow):
             self._ensure_path_exists(str(self._default_profile_prompts(profile_name)))
         except Exception:
             pass
+
+    def _refresh_update_buttons(self):
+        available = bool(shutil.which("git")) and (PROJECT_ROOT / ".git").exists()
+        tooltip_disabled = (
+            "Кнопка доступна только при запуске из git-репозитория. "
+            "См. раздел README → Обновления для альтернативного сценария."
+        )
+        buttons = [
+            getattr(self, "btn_update_check", None),
+            getattr(self, "btn_update_pull", None),
+            getattr(self, "btn_quick_update", None),
+        ]
+        for btn in buttons:
+            if not btn:
+                continue
+            btn.setEnabled(available)
+            if available:
+                # вернём короткий тултип, если он был задан ранее
+                if btn is self.btn_quick_update:
+                    btn.setToolTip("Выполнить git pull для текущего репозитория")
+            else:
+                btn.setToolTip(tooltip_disabled)
 
     def _default_profile_prompts(self, profile_name: Optional[str]) -> Path:
         if not profile_name:
@@ -2370,7 +2440,18 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _load_zones_into_ui(self):
         ff = self.cfg.get("ffmpeg", {}) or {}
-        presets = ff.get("presets", {}) or {}
+        presets_obj = ff.get("presets", {}) or {}
+
+        if isinstance(presets_obj, list):
+            # поддержка очень старых конфигов
+            presets = {}
+            for idx, entry in enumerate(presets_obj):
+                if not isinstance(entry, dict):
+                    continue
+                key = entry.get("name") or f"preset_{idx+1}"
+                presets[key] = entry
+        else:
+            presets = dict(presets_obj)
 
         self._preset_cache = {}
         self._preset_tables = {}
@@ -2390,8 +2471,20 @@ class MainWindow(QtWidgets.QMainWindow):
         canonical: Dict[str, List[Dict[str, int]]] = {}
         changed = False
         for name, body in presets.items():
-            raw_list = body.get("zones") if isinstance(body, dict) else None
-            normalized = normalize_zone_list(raw_list if isinstance(raw_list, list) else None)
+            raw_list = _as_zone_sequence(body)
+            normalized = normalize_zone_list(raw_list)
+            if not normalized and raw_list:
+                # сохраним исходные значения в таблицу, чтобы пользователь мог поправить вручную
+                normalized = []
+                for item in raw_list:
+                    if isinstance(item, dict):
+                        zone = {
+                            "x": _coerce_int(item.get("x") or item.get("left") or item.get("start_x") or item.get("sx") or 0) or 0,
+                            "y": _coerce_int(item.get("y") or item.get("top") or item.get("start_y") or item.get("sy") or 0) or 0,
+                            "w": _coerce_int(item.get("w") or item.get("width") or item.get("right") or item.get("x2")) or 0,
+                            "h": _coerce_int(item.get("h") or item.get("height") or item.get("bottom") or item.get("y2")) or 0,
+                        }
+                        normalized.append(zone)
             if not normalized:
                 normalized = [{"x": 0, "y": 0, "w": 0, "h": 0}]
             canonical[name] = [dict(zone) for zone in normalized]
