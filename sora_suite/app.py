@@ -1125,34 +1125,50 @@ class MainWindow(QtWidgets.QMainWindow):
         toolbar = QtWidgets.QFrame()
         toolbar.setObjectName("topToolbar")
         toolbar.setStyleSheet(
-            "QFrame#topToolbar{background:rgba(15,23,42,0.9);border:1px solid #1e293b;"
+            "QFrame#topToolbar{background:rgba(15,23,42,0.92);border:1px solid #1e293b;"
             "border-radius:12px;}"
-            "QComboBox#chromeProfileTop{min-width:160px;}"
-            "QToolButton#topFolderButton{padding:4px 10px;border-radius:8px;"
-            "background:#1e293b;color:#e2e8f0;}"
+            "QComboBox#chromeProfileTop{min-width:150px;}"
+            "QToolButton#topFolderButton{padding:2px 8px;border-radius:8px;"
+            "background:#1e293b;color:#e2e8f0;font-size:11px;}"
             "QToolButton#topFolderButton::hover{background:#27364d;}"
         )
         tb = QtWidgets.QHBoxLayout(toolbar)
-        tb.setContentsMargins(14, 8, 14, 8)
-        tb.setSpacing(8)
+        tb.setContentsMargins(12, 6, 12, 6)
+        tb.setSpacing(6)
 
-        chrome_block = QtWidgets.QHBoxLayout()
-        chrome_block.setContentsMargins(0, 0, 0, 0)
+        chrome_frame = QtWidgets.QFrame()
+        chrome_frame.setObjectName("chromeTopFrame")
+        chrome_frame.setStyleSheet(
+            "QFrame#chromeTopFrame{background:rgba(30,41,59,0.85);border-radius:10px;padding:4px 8px;}"
+            "QPushButton#chromeLaunchBtn{padding:4px 10px;}"
+            "QToolButton#chromeScanBtn{padding:4px;border-radius:8px;}"
+            "QToolButton#chromeScanBtn::hover{background:#27364d;}"
+        )
+        chrome_block = QtWidgets.QHBoxLayout(chrome_frame)
+        chrome_block.setContentsMargins(4, 0, 4, 0)
         chrome_block.setSpacing(6)
-        lbl_chrome = QtWidgets.QLabel("Chrome:")
-        lbl_chrome.setStyleSheet("QLabel{color:#94a3b8;font-weight:600;}")
+        lbl_chrome = QtWidgets.QLabel("Chrome")
+        lbl_chrome.setStyleSheet("QLabel{color:#cbd5f5;font-weight:600;}")
         chrome_block.addWidget(lbl_chrome)
         self.cmb_chrome_profile_top = QtWidgets.QComboBox()
         self.cmb_chrome_profile_top.setObjectName("chromeProfileTop")
-        self.cmb_chrome_profile_top.setPlaceholderText("Профиль Chrome")
+        self.cmb_chrome_profile_top.setPlaceholderText("Профиль…")
         self.cmb_chrome_profile_top.setSizeAdjustPolicy(
             QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToContents
         )
+        self.cmb_chrome_profile_top.setMaximumWidth(220)
         chrome_block.addWidget(self.cmb_chrome_profile_top)
+        self.btn_scan_profiles_top = QtWidgets.QToolButton()
+        self.btn_scan_profiles_top.setObjectName("chromeScanBtn")
+        self.btn_scan_profiles_top.setIcon(
+            self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_BrowserReload)
+        )
+        self.btn_scan_profiles_top.setToolTip("Автообнаружение профилей Chrome в системе")
+        chrome_block.addWidget(self.btn_scan_profiles_top)
         self.btn_open_chrome = QtWidgets.QPushButton("Запустить Chrome")
-        self.btn_open_chrome.setMinimumWidth(150)
+        self.btn_open_chrome.setObjectName("chromeLaunchBtn")
         chrome_block.addWidget(self.btn_open_chrome)
-        tb.addLayout(chrome_block)
+        tb.addWidget(chrome_frame)
 
         tb.addSpacing(12)
 
@@ -1166,11 +1182,17 @@ class MainWindow(QtWidgets.QMainWindow):
             btn.setText(text)
             return btn
 
-        folders_block = QtWidgets.QHBoxLayout()
-        folders_block.setContentsMargins(0, 0, 0, 0)
-        folders_block.setSpacing(6)
-        lbl_folders = QtWidgets.QLabel("Каталоги:")
-        lbl_folders.setStyleSheet("QLabel{color:#94a3b8;font-weight:600;}")
+        folders_frame = QtWidgets.QFrame()
+        folders_frame.setObjectName("foldersTopFrame")
+        folders_frame.setStyleSheet(
+            "QFrame#foldersTopFrame{background:rgba(15,23,42,0.85);border-radius:10px;padding:2px 8px;}"
+            "QLabel#foldersTopLabel{color:#cbd5f5;font-weight:600;}"
+        )
+        folders_block = QtWidgets.QHBoxLayout(folders_frame)
+        folders_block.setContentsMargins(4, 0, 4, 0)
+        folders_block.setSpacing(4)
+        lbl_folders = QtWidgets.QLabel("Каталоги")
+        lbl_folders.setObjectName("foldersTopLabel")
         folders_block.addWidget(lbl_folders)
         self.btn_open_root = make_folder_button("Проект")
         self.btn_open_raw = make_folder_button("RAW")
@@ -1184,8 +1206,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.btn_open_merge,
             self.btn_open_images_top,
         ):
+            btn.setMaximumWidth(110)
             folders_block.addWidget(btn)
-        tb.addLayout(folders_block)
+        tb.addWidget(folders_frame)
 
         tb.addStretch(1)
 
@@ -1230,9 +1253,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.current_event_card = QtWidgets.QFrame()
         self.current_event_card.setObjectName("currentEventCard")
         self.current_event_card.setStyleSheet(
-            "QFrame#currentEventCard{background:#162132;border:1px solid #27364d;border-radius:14px;padding:0;}"
+            "QFrame#currentEventCard{background:transparent;border:1px solid #27364d;border-radius:14px;padding:0;}"
             "QLabel#currentEventTitle{color:#9fb7ff;font-size:11px;letter-spacing:1px;text-transform:uppercase;}"
-            "QLabel#currentEventBody{color:#f8fafc;font-size:15px;font-weight:600;}")
+            "QLabel#currentEventBody{color:#f8fafc;font-size:15px;font-weight:600;background:rgba(76,110,245,0.18);"
+            "border-radius:10px;padding:8px 12px;}")
         card_layout = QtWidgets.QVBoxLayout(self.current_event_card)
         card_layout.setContentsMargins(14, 12, 14, 12)
         self.lbl_current_event_title = QtWidgets.QLabel("Сейчас")
@@ -1576,16 +1600,29 @@ class MainWindow(QtWidgets.QMainWindow):
         # TAB: YouTube uploader
         yt_cfg = self.cfg.get("youtube", {}) or {}
         self.tab_youtube, ty = make_scroll_tab()
+        yt_intro = QtWidgets.QLabel(
+            "Здесь настраивается отложенный постинг YouTube. Для авторизации скачай"
+            " <a href=\"https://console.cloud.google.com/apis/credentials\">client_secret.json</a>"
+            " в Google Cloud Console (OAuth 2.0) и разреши приложению доступ к каналу."
+            " После первого запуска рядом появится credentials.json."
+        )
+        yt_intro.setWordWrap(True)
+        yt_intro.setOpenExternalLinks(True)
+        yt_intro.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
+        ty.addWidget(yt_intro)
 
         grp_channels = QtWidgets.QGroupBox("Каналы и доступы")
         gc_layout = QtWidgets.QHBoxLayout(grp_channels)
-        gc_layout.setSpacing(12)
+        gc_layout.setSpacing(8)
+        gc_layout.setContentsMargins(12, 12, 12, 12)
 
         self.lst_youtube_channels = QtWidgets.QListWidget()
         self.lst_youtube_channels.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
         gc_layout.addWidget(self.lst_youtube_channels, 1)
 
         ch_form = QtWidgets.QFormLayout()
+        ch_form.setVerticalSpacing(6)
+        ch_form.setHorizontalSpacing(8)
         self.ed_yt_name = QtWidgets.QLineEdit()
 
         client_wrap = QtWidgets.QWidget(); client_l = QtWidgets.QHBoxLayout(client_wrap); client_l.setContentsMargins(0,0,0,0)
@@ -1624,8 +1661,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         grp_run = QtWidgets.QGroupBox("Публикация и расписание")
         gr_form = QtWidgets.QGridLayout(grp_run)
-        gr_form.setVerticalSpacing(4)
-        gr_form.setHorizontalSpacing(10)
+        gr_form.setContentsMargins(12, 12, 12, 12)
+        gr_form.setVerticalSpacing(6)
+        gr_form.setHorizontalSpacing(8)
         row = 0
 
         self.cmb_youtube_channel = QtWidgets.QComboBox()
@@ -1692,11 +1730,20 @@ class MainWindow(QtWidgets.QMainWindow):
         ty.addStretch(1)
         tk_cfg = self.cfg.get("tiktok", {}) or {}
         self.tab_tiktok, tt = make_scroll_tab()
+        tt_intro = QtWidgets.QLabel(
+            "TikTok требует токен, который выдаёт <a href=\"https://developers.tiktok.com/\">TikTok for Developers</a>."
+            " Загрузите JSON/YAML с client_key, client_secret, open_id и refresh_token и укажите путь ниже."
+            " Расписание можно запускать локально или через GitHub Actions."
+        )
+        tt_intro.setWordWrap(True)
+        tt_intro.setOpenExternalLinks(True)
+        tt_intro.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
+        tt.addWidget(tt_intro)
 
         grp_tt_profiles = QtWidgets.QGroupBox("Профили и авторизация")
         tp_layout = QtWidgets.QHBoxLayout(grp_tt_profiles)
-        tp_layout.setSpacing(16)
-        tp_layout.setContentsMargins(16, 16, 16, 16)
+        tp_layout.setSpacing(10)
+        tp_layout.setContentsMargins(12, 12, 12, 12)
 
         self.lst_tiktok_profiles = QtWidgets.QListWidget()
         self.lst_tiktok_profiles.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
@@ -1707,7 +1754,7 @@ class MainWindow(QtWidgets.QMainWindow):
         profile_panel = QtWidgets.QWidget()
         profile_layout = QtWidgets.QVBoxLayout(profile_panel)
         profile_layout.setContentsMargins(0, 0, 0, 0)
-        profile_layout.setSpacing(10)
+        profile_layout.setSpacing(8)
 
         tt_hint = QtWidgets.QLabel("Укажи client_key, client_secret, open_id и refresh_token TikTok. Можно загрузить их из JSON/" "YAML файла и хранить вне конфига.")
         tt_hint.setWordWrap(True)
@@ -1715,7 +1762,8 @@ class MainWindow(QtWidgets.QMainWindow):
         profile_layout.addWidget(tt_hint)
 
         tt_form = QtWidgets.QFormLayout()
-        tt_form.setSpacing(10)
+        tt_form.setVerticalSpacing(6)
+        tt_form.setHorizontalSpacing(8)
         tt_form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         tt_form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
 
@@ -1777,7 +1825,7 @@ class MainWindow(QtWidgets.QMainWindow):
         tt_form.addRow("Шаблон подписи:", self.txt_tt_caption)
 
         btn_tt_row = QtWidgets.QHBoxLayout()
-        btn_tt_row.setSpacing(8)
+        btn_tt_row.setSpacing(6)
         self.btn_tt_add = QtWidgets.QPushButton("Сохранить")
         self.btn_tt_delete = QtWidgets.QPushButton("Удалить")
         self.btn_tt_set_active = QtWidgets.QPushButton("Сделать активным")
@@ -1797,8 +1845,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         grp_tt_run = QtWidgets.QGroupBox("Очередь и запуск")
         tr_layout = QtWidgets.QGridLayout(grp_tt_run)
-        tr_layout.setVerticalSpacing(4)
-        tr_layout.setHorizontalSpacing(10)
+        tr_layout.setContentsMargins(12, 12, 12, 12)
+        tr_layout.setVerticalSpacing(6)
+        tr_layout.setHorizontalSpacing(8)
         tr_layout.setColumnStretch(1, 1)
         row = 0
 
@@ -2080,8 +2129,11 @@ class MainWindow(QtWidgets.QMainWindow):
         settings_layout.addLayout(controls_row)
 
         self.tab_settings.setWidget(settings_body)
-        # TAB: Ошибки
-        self.tab_errors = QtWidgets.QWidget(); err_layout = QtWidgets.QVBoxLayout(self.tab_errors)
+        # Справочники (перенесены в настройки)
+        self.tab_errors = QtWidgets.QWidget()
+        err_layout = QtWidgets.QVBoxLayout(self.tab_errors)
+        err_layout.setContentsMargins(12, 12, 12, 12)
+        err_layout.setSpacing(8)
         self.tbl_errors = QtWidgets.QTableWidget(len(ERROR_GUIDE), 3)
         self.tbl_errors.setHorizontalHeaderLabels(["Код", "Что означает", "Что сделать"])
         self.tbl_errors.verticalHeader().setVisible(False)
@@ -2095,21 +2147,18 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tbl_errors.setItem(row, 1, QtWidgets.QTableWidgetItem(meaning))
             self.tbl_errors.setItem(row, 2, QtWidgets.QTableWidgetItem(action))
         err_layout.addWidget(self.tbl_errors)
-        # TAB: История
-        self.tab_history = QtWidgets.QWidget(); h = QtWidgets.QVBoxLayout(self.tab_history)
-        self.btn_reload_history = QtWidgets.QPushButton("Обновить")
-        self.txt_history = QtWidgets.QPlainTextEdit(); self.txt_history.setReadOnly(True)
-        h.addWidget(self.btn_reload_history, 0, QtCore.Qt.AlignmentFlag.AlignLeft)
+        self.tab_history = QtWidgets.QWidget()
+        h = QtWidgets.QVBoxLayout(self.tab_history)
+        h.setContentsMargins(12, 12, 12, 12)
+        h.setSpacing(8)
+        self.txt_history = QtWidgets.QPlainTextEdit()
+        self.txt_history.setReadOnly(True)
         h.addWidget(self.txt_history, 1)
+
         overview_host = QtWidgets.QWidget()
         overview_layout = QtWidgets.QVBoxLayout(overview_host)
         overview_layout.setContentsMargins(0, 0, 0, 0)
-        self.overview_tabs = QtWidgets.QTabWidget()
-        self.overview_tabs.setTabPosition(QtWidgets.QTabWidget.TabPosition.North)
-        self.overview_tabs.addTab(self.tab_tasks, "Сценарии")
-        self.overview_tabs.addTab(self.tab_history, "История")
-        self.overview_tabs.addTab(self.tab_errors, "Ошибки")
-        overview_layout.addWidget(self.overview_tabs)
+        overview_layout.addWidget(self.tab_tasks, 1)
         self.tabs.addTab(overview_host, "Обзор")
 
         content_host = QtWidgets.QWidget()
@@ -2144,7 +2193,22 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # --- Пути проекта ---
         page_paths = QtWidgets.QWidget()
-        grid_paths = QtWidgets.QGridLayout(page_paths)
+        paths_layout = QtWidgets.QVBoxLayout(page_paths)
+        paths_layout.setContentsMargins(12, 12, 12, 12)
+        paths_layout.setSpacing(8)
+
+        paths_hint = QtWidgets.QLabel(
+            "Рабочие папки используются сценариями автогена, блюра и загрузчиков."
+            " Убедись, что каталоги существуют или выбери другие через кнопку «…»."
+            " Подробности смотри на вкладке «Документация → Каталоги» внутри приложения."
+        )
+        paths_hint.setWordWrap(True)
+        paths_hint.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
+        paths_layout.addWidget(paths_hint)
+
+        grid_holder = QtWidgets.QWidget()
+        grid_paths = QtWidgets.QGridLayout(grid_holder)
+        grid_paths.setContentsMargins(0, 0, 0, 0)
         grid_paths.setColumnStretch(1, 1)
         grid_paths.setVerticalSpacing(4)
         grid_paths.setHorizontalSpacing(10)
@@ -2248,6 +2312,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.cfg.get("titles_file", str(TITLES_FILE)),
             "Открыть файл titles.txt",
         )
+
+        paths_layout.addWidget(grid_holder)
+        paths_layout.addStretch(1)
 
         self._blur_src_autofollow = _same_path(self.cfg.get("blur_src_dir"), self.cfg.get("downloads_dir"))
         self._merge_src_autofollow = _same_path(self.cfg.get("merge_src_dir"), self.cfg.get("blurred_dir"))
@@ -2648,6 +2715,9 @@ class MainWindow(QtWidgets.QMainWindow):
         genai_layout.addStretch(1)
         self.settings_tabs.addTab(page_genai, "Генерация картинок")
 
+        self.settings_tabs.addTab(self.tab_history, "История")
+        self.settings_tabs.addTab(self.tab_errors, "Ошибки")
+
         page_docs = QtWidgets.QWidget()
         docs_layout = QtWidgets.QVBoxLayout(page_docs)
         docs_layout.setContentsMargins(8, 8, 8, 8)
@@ -2667,12 +2737,14 @@ class MainWindow(QtWidgets.QMainWindow):
             ("Каталоги", page_paths),
             ("Генерация картинок", page_genai),
             ("Автоген", page_auto),
+            ("FFmpeg", page_ff),
+            ("Chrome", page_chrome),
             ("YouTube", page_yt),
             ("TikTok", page_tt),
             ("Telegram", page_tg),
-            ("Chrome", page_chrome),
-            ("FFmpeg", page_ff),
             ("Интерфейс", page_ui),
+            ("История", self.tab_history),
+            ("Ошибки", self.tab_errors),
             ("Обслуживание", page_maint),
             ("Документация", page_docs),
         ]
@@ -2786,6 +2858,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 signal.connect(self._mark_settings_dirty)
 
     def _on_settings_tab_changed(self, index: int):
+        widget = self.settings_tabs.widget(index) if hasattr(self, "settings_tabs") else None
+        if widget is self.tab_history:
+            self._reload_history()
         if hasattr(self, "idx_settings_docs") and index == self.idx_settings_docs:
             self._load_readme_preview()
 
@@ -3038,6 +3113,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sig_log.connect(self._slot_log)
 
         self.cmb_chrome_profile_top.currentIndexChanged.connect(self._on_top_chrome_profile_changed)
+        self.btn_scan_profiles_top.clicked.connect(self._on_toolbar_scan_profiles)
         self.btn_open_chrome.clicked.connect(self._open_chrome)
         self.btn_open_root.clicked.connect(lambda: open_in_finder(self.cfg.get("project_root", PROJECT_ROOT)))
         self.btn_open_raw.clicked.connect(lambda: open_in_finder(self.cfg.get("downloads_dir", DL_DIR)))
@@ -3068,7 +3144,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_run_autogen_images.clicked.connect(self._save_and_run_autogen_images)
         self.btn_open_genai_output.clicked.connect(self._open_genai_output_dir)
 
-        self.btn_reload_history.clicked.connect(self._reload_history)
         self.btn_save_settings.clicked.connect(self._save_settings_clicked)
         self.btn_save_autogen_cfg.clicked.connect(self._save_autogen_cfg)
         self.btn_reload_readme.clicked.connect(lambda: self._load_readme_preview(force=True))
@@ -5382,6 +5457,17 @@ class MainWindow(QtWidgets.QMainWindow):
         data = self.cmb_chrome_profile_top.itemData(index)
         name = data if isinstance(data, str) else str(data or "")
         self._set_active_chrome_profile(name, notify=True)
+
+    def _on_toolbar_scan_profiles(self):
+        added, total = self._apply_profile_scan(auto=False)
+        if total:
+            if added:
+                self._post_status(f"Найдено {total} профилей Chrome, добавлено {added}", state="ok")
+            else:
+                self._post_status("Профили Chrome уже добавлены", state="idle")
+        else:
+            self._post_status("Профили Chrome не найдены", state="error")
+        self._refresh_profiles_ui()
 
     def _auto_scan_profiles_at_start(self):
         chrome_cfg = self.cfg.get("chrome", {})
