@@ -75,15 +75,22 @@ class PromptEntry:
     images_per_prompt: Optional[int] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
     generated_files: List[Path] = field(default_factory=list)
+    video_prompt: Optional[str] = None
 
     def resolved_key(self) -> str:
         return self.key or self.prompt
+
+    def effective_prompt(self) -> str:
+        if self.video_prompt and self.video_prompt.strip():
+            return self.video_prompt.strip()
+        return self.prompt
 
 
 @dataclass
 class ImagePromptSpec:
     prompts: List[str]
     count: Optional[int] = None
+    video_prompt: Optional[str] = None
 
 
 @dataclass
@@ -99,6 +106,7 @@ class GenAiConfig:
     number_of_images: int
     rate_limit: int
     max_retries: int
+    attach_to_sora: bool
 
     @classmethod
     def from_env(cls) -> "GenAiConfig":
@@ -116,6 +124,7 @@ class GenAiConfig:
         output_dir = Path(output_raw).expanduser()
         if not output_dir.is_absolute():
             output_dir = (BASE_MEDIA_DIR / output_dir).resolve()
+        attach = _env_bool("GENAI_ATTACH_TO_SORA", True)
         return cls(
             enabled=enabled and bool(api_key),
             api_key=api_key,
@@ -128,6 +137,7 @@ class GenAiConfig:
             number_of_images=max(1, number),
             rate_limit=rate,
             max_retries=retries,
+            attach_to_sora=attach,
         )
 
 
@@ -281,6 +291,8 @@ def _parse_prompt_line(line: str) -> Optional[PromptEntry]:
         if isinstance(data.get("images"), list):
             attachments.extend(str(item).strip() for item in data.get("images", []) if str(item).strip())
 
+        video_prompt = str(data.get("video_prompt", "")).strip() or None
+
         entry = PromptEntry(
             key=key.strip() or raw,
             prompt=prompt,
@@ -289,6 +301,7 @@ def _parse_prompt_line(line: str) -> Optional[PromptEntry]:
             attachment_paths=attachments,
             images_per_prompt=images_per_prompt,
             metadata=data,
+            video_prompt=video_prompt,
         )
         return entry
 
@@ -341,7 +354,11 @@ def _parse_image_prompt_spec(raw: str) -> ImagePromptSpec:
             if ivalue > 0:
                 count = ivalue
                 break
-        return ImagePromptSpec(prompts=prompts, count=count)
+        video_prompt = None
+        raw_video = data.get("video_prompt")
+        if isinstance(raw_video, str) and raw_video.strip():
+            video_prompt = raw_video.strip()
+        return ImagePromptSpec(prompts=prompts, count=count, video_prompt=video_prompt)
 
     prompts = [part.strip() for part in raw.split("||") if part.strip()]
     return ImagePromptSpec(prompts=prompts)
@@ -380,6 +397,8 @@ def apply_image_prompt_specs(entries: List[PromptEntry], specs: List[ImagePrompt
         entry.image_prompts = list(spec.prompts)
         if spec.count and not entry.images_per_prompt:
             entry.images_per_prompt = spec.count
+        if spec.video_prompt:
+            entry.video_prompt = spec.video_prompt
         applied += 1
     if applied:
         print(f"[INFO] Image-промпты сопоставлены: {applied} из {total_specs}")
@@ -413,7 +432,7 @@ def load_submitted() -> Set[str]:
 def mark_submitted(entry: PromptEntry, attachments: Optional[List[Path]] = None) -> None:
     SUBMITTED_LOG.parent.mkdir(parents=True, exist_ok=True)
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
-    clean_prompt = entry.prompt.replace("\n", " ")
+    clean_prompt = entry.effective_prompt().replace("\n", " ")
     key = entry.resolved_key().replace("\n", " ")
     suffix = ""
     if attachments:
@@ -482,7 +501,19 @@ def gather_media(entry: PromptEntry, client: GenAiClient) -> List[Path]:
                     count = entry.images_per_prompt or client.cfg.number_of_images
                     generated = client.generate(prompt, count, tag)
                     entry.generated_files.extend(generated)
-            attachments.extend([p for p in entry.generated_files if isinstance(p, Path) and p.exists()])
+            attach_generated = client.cfg.attach_to_sora
+            if attach_generated:
+                attachments.extend([p for p in entry.generated_files if isinstance(p, Path) and p.exists()])
+            elif entry.generated_files:
+                meta = entry.metadata if isinstance(entry.metadata, dict) else {}
+                flag_key = "_genai_attach_notice"
+                if not meta.get(flag_key):
+                    sample = entry.generated_files[0]
+                    print(
+                        f"[i] Изображения сохранены ({sample.parent}), но прикрепление к заявке отключено."
+                    )
+                    meta[flag_key] = True
+                    entry.metadata = meta
 
     unique: List[Path] = []
     seen: Set[str] = set()
@@ -792,7 +823,7 @@ def submit_prompt_once(page: Page,
                        backoff_seconds_on_reject: int,
                        prepare_media: Optional[Callable[[], bool]] = None,
                        debug: bool=False) -> Tuple[bool, str]:
-    prompt = entry.prompt
+    prompt = entry.effective_prompt()
     cur = textarea_value(page, ta_kind, ta_sel)
     if cur.strip() != prompt.strip():
         type_prompt(page, ta_kind, ta_sel, prompt, typing_delay_ms, debug)

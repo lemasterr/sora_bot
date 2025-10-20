@@ -194,6 +194,7 @@ def load_cfg() -> dict:
     genai.setdefault("max_retries", 3)
     genai.setdefault("person_generation", "ALLOW_ALL")
     genai.setdefault("output_mime_type", "image/jpeg")
+    genai.setdefault("attach_to_sora", True)
 
     downloader = data.setdefault("downloader", {})
     downloader.setdefault("workdir", str(WORKERS_DIR / "downloader"))
@@ -2368,6 +2369,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cb_genai_enabled.setChecked(bool(genai_cfg.get("enabled", False)))
         fg.addRow(self.cb_genai_enabled)
 
+        self.cb_genai_attach = QtWidgets.QCheckBox("Прикреплять сгенерированные изображения к заявке в Sora")
+        self.cb_genai_attach.setChecked(bool(genai_cfg.get("attach_to_sora", True)))
+        fg.addRow(self.cb_genai_attach)
+
         self.ed_genai_api_key = QtWidgets.QLineEdit(genai_cfg.get("api_key", ""))
         self.ed_genai_api_key.setPlaceholderText("AIza...")
         self.ed_genai_api_key.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
@@ -2522,6 +2527,7 @@ class MainWindow(QtWidgets.QMainWindow):
             (self.sb_youtube_batch_limit, "valueChanged"),
             (self.ed_youtube_src, "textEdited"),
             (self.cb_genai_enabled, "toggled"),
+            (self.cb_genai_attach, "toggled"),
             (self.ed_genai_api_key, "textEdited"),
             (self.ed_genai_model, "textEdited"),
             (self.cmb_genai_person, "currentIndexChanged"),
@@ -3571,6 +3577,7 @@ class MainWindow(QtWidgets.QMainWindow):
         env["GENAI_BASE_DIR"] = str(_project_path(self.cfg.get("project_root", PROJECT_ROOT)))
         env["GENAI_PROMPTS_DIR"] = str(self._prompts_path().parent.resolve())
         env["GENAI_IMAGE_PROMPTS_FILE"] = str(self._image_prompts_path())
+        env["GENAI_ATTACH_TO_SORA"] = "1" if bool(genai_cfg.get("attach_to_sora", True)) else "0"
         return env
 
     def _save_and_run_autogen(self, force_images: Optional[bool] = None):
@@ -4420,6 +4427,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         genai_cfg = self.cfg.setdefault("google_genai", {})
         genai_cfg["enabled"] = bool(self.cb_genai_enabled.isChecked())
+        genai_cfg["attach_to_sora"] = bool(self.cb_genai_attach.isChecked())
         genai_cfg["api_key"] = self.ed_genai_api_key.text().strip()
         genai_cfg["model"] = self.ed_genai_model.text().strip() or "models/imagen-4.0-generate-001"
         genai_cfg["person_generation"] = self.cmb_genai_person.currentData() or "ALLOW_ALL"

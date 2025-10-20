@@ -24,6 +24,7 @@ google_genai:
   max_retries: 3
   person_generation: ALLOW_ALL
   output_mime_type: image/jpeg
+  attach_to_sora: true
 downloader:
   workdir: ./workers/downloader
   entry: download_all.py
