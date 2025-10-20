@@ -785,6 +785,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._scenario_waiters: Dict[str, threading.Event] = {}
         self._scenario_results: Dict[str, int] = {}
         self._scenario_wait_lock = Lock()
+        self._stat_cache: Dict[Tuple[str, Tuple[str, ...]], Tuple[float, int, int]] = {}
+        self._activity_filter_text: str = ""
+        self._readme_loaded = False
 
         # кеши пресетов блюра должны существовать до построения UI,
         # иначе _load_zones_into_ui() перезапишет их, а позже мы бы обнулили значения
@@ -848,7 +851,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_youtube_ui()
         self._refresh_tiktok_ui()
         self._load_autogen_cfg_ui()
-        self._load_readme_preview()
         self._reload_used_prompts()
         maint_cfg = self.cfg.get("maintenance", {}) or {}
         if maint_cfg.get("auto_cleanup_on_start"):
@@ -1023,6 +1025,29 @@ class MainWindow(QtWidgets.QMainWindow):
             if sel:
                 line.setText(sel[0])
 
+    def _open_path_from_edit(self, line: QtWidgets.QLineEdit):
+        if not isinstance(line, QtWidgets.QLineEdit):
+            return
+        target = line.text().strip()
+        if not target:
+            return
+        open_in_finder(target)
+
+    def _sync_image_dirs(self, from_catalog: bool):
+        if not hasattr(self, "ed_images_dir") or not hasattr(self, "ed_genai_output_dir"):
+            return
+        catalog = self.ed_images_dir.text().strip()
+        genai = self.ed_genai_output_dir.text().strip()
+        if from_catalog:
+            target = catalog
+            dest = self.ed_genai_output_dir
+        else:
+            target = genai
+            dest = self.ed_images_dir
+        dest.blockSignals(True)
+        dest.setText(target)
+        dest.blockSignals(False)
+
     def _toggle_youtube_schedule(self):
         enable = self.cb_youtube_schedule.isChecked() and not self.cb_youtube_draft_only.isChecked()
         self.dt_youtube_publish.setEnabled(enable)
@@ -1103,11 +1128,19 @@ class MainWindow(QtWidgets.QMainWindow):
         v.addWidget(banner)
 
         tb = QtWidgets.QHBoxLayout()
+        self.cmb_chrome_profile_top = QtWidgets.QComboBox()
+        self.cmb_chrome_profile_top.setMinimumWidth(180)
+        self.cmb_chrome_profile_top.setPlaceholderText("Профиль Chrome")
+        self.cmb_chrome_profile_top.setSizeAdjustPolicy(
+            QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToContents
+        )
+        tb.addWidget(self.cmb_chrome_profile_top)
         self.btn_open_chrome = QtWidgets.QPushButton("Открыть Chrome (CDP)")
         self.btn_open_root = QtWidgets.QPushButton("Открыть папку проекта")
         self.btn_open_raw = QtWidgets.QPushButton("RAW (downloads)")
         self.btn_open_blur = QtWidgets.QPushButton("BLURRED")
         self.btn_open_merge = QtWidgets.QPushButton("MERGED")
+        self.btn_open_images_top = QtWidgets.QPushButton("Images (generated)")
         self.btn_quick_update = QtWidgets.QPushButton("Обновить из GitHub")
         self.btn_quick_update.setToolTip("Выполнить git pull для текущего репозитория")
         self.btn_start_selected = QtWidgets.QPushButton("Старт выбранного")
@@ -1117,6 +1150,7 @@ class MainWindow(QtWidgets.QMainWindow):
         tb.addWidget(self.btn_open_raw)
         tb.addWidget(self.btn_open_blur)
         tb.addWidget(self.btn_open_merge)
+        tb.addWidget(self.btn_open_images_top)
         tb.addWidget(self.btn_quick_update)
         tb.addStretch(1)
         tb.addWidget(self.btn_start_selected)
@@ -1191,6 +1225,15 @@ class MainWindow(QtWidgets.QMainWindow):
         act_header.addWidget(self.btn_activity_clear)
         history_layout.addLayout(act_header)
 
+        filter_row = QtWidgets.QHBoxLayout()
+        self.ed_activity_filter = QtWidgets.QLineEdit()
+        self.ed_activity_filter.setPlaceholderText("Фильтр по тексту или тегу…")
+        self.ed_activity_filter.setClearButtonEnabled(True)
+        self.btn_activity_export = QtWidgets.QPushButton("Экспорт")
+        filter_row.addWidget(self.ed_activity_filter, 1)
+        filter_row.addWidget(self.btn_activity_export)
+        history_layout.addLayout(filter_row)
+
         self.lst_activity = QtWidgets.QListWidget()
         self.lst_activity.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
         self.lst_activity.setUniformItemSizes(False)
@@ -1213,6 +1256,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # справа — вкладки
         self.tabs = QtWidgets.QTabWidget()
+        self.tabs.setTabPosition(QtWidgets.QTabWidget.TabPosition.West)
+        self.tabs.setDocumentMode(True)
+        self.tabs.setMovable(False)
         split.addWidget(self.tabs)
         split.setStretchFactor(0, 1)
         split.setStretchFactor(1, 3)
@@ -1303,6 +1349,8 @@ class MainWindow(QtWidgets.QMainWindow):
         strip.setContentsMargins(18, 14, 18, 14)
         strip.setSpacing(16)
 
+        self._stat_desc_labels = {}
+
         def make_stat_card(key: str, title: str, desc: str, tooltip: str, accent: str) -> QtWidgets.QLabel:
             card = QtWidgets.QFrame()
             card.setObjectName(f"statCard_{key}")
@@ -1340,6 +1388,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
             card.setToolTip(tooltip)
             strip.addWidget(card, 1)
+            self._stat_desc_labels[key] = desc_lbl
             return value_lbl
 
         self.lbl_stat_raw = make_stat_card(
@@ -1376,6 +1425,14 @@ class MainWindow(QtWidgets.QMainWindow):
             "Очередь TikTok",
             "Сколько файлов ожидают выгрузку в TikTok",
             "#f472b6",
+        )
+
+        self.lbl_stat_images = make_stat_card(
+            "images",
+            "IMAGES",
+            "Сгенерированные картинки",
+            "Количество файлов в каталоге generated_images",
+            "#60a5fa",
         )
 
         strip.addStretch(1)
@@ -1462,8 +1519,6 @@ class MainWindow(QtWidgets.QMainWindow):
         merge_layout.addStretch(1)
         self.task_tabs.addTab(merge_tab, "Склейка")
 
-        self.tabs.addTab(self.tab_tasks, "Задачи")
-
         # TAB: YouTube uploader
         yt_cfg = self.cfg.get("youtube", {}) or {}
         self.tab_youtube, ty = make_scroll_tab()
@@ -1515,6 +1570,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         grp_run = QtWidgets.QGroupBox("Публикация и расписание")
         gr_form = QtWidgets.QGridLayout(grp_run)
+        gr_form.setVerticalSpacing(6)
         row = 0
 
         self.cmb_youtube_channel = QtWidgets.QComboBox()
@@ -1577,8 +1633,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
         ty.addWidget(grp_run)
         ty.addStretch(1)
-        self.tabs.addTab(self.tab_youtube, "YouTube")
-
         tk_cfg = self.cfg.get("tiktok", {}) or {}
         self.tab_tiktok, tt = make_scroll_tab()
 
@@ -1686,6 +1740,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         grp_tt_run = QtWidgets.QGroupBox("Очередь и запуск")
         tr_layout = QtWidgets.QGridLayout(grp_tt_run)
+        tr_layout.setVerticalSpacing(6)
         tr_layout.setColumnStretch(1, 1)
         row = 0
 
@@ -1767,8 +1822,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
         tt.addWidget(grp_tt_run)
         tt.addSpacing(6)
-        self.tabs.addTab(self.tab_tiktok, "TikTok")
-
         self._toggle_tiktok_schedule()
 
         # TAB: Промпты
@@ -1883,8 +1936,6 @@ class MainWindow(QtWidgets.QMainWindow):
         prompts_stack.setStretchFactor(0, 3)
         prompts_stack.setStretchFactor(1, 2)
         QtCore.QTimer.singleShot(0, lambda: prompts_stack.setSizes([360, 220]))
-        self.tabs.addTab(self.tab_prompts, "Промпты")
-
         # TAB: Промпты картинок
         self.tab_image_prompts = QtWidgets.QWidget()
         ip_layout = QtWidgets.QVBoxLayout(self.tab_image_prompts)
@@ -1926,8 +1977,6 @@ class MainWindow(QtWidgets.QMainWindow):
         ip_hint.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
         ip_layout.addWidget(ip_hint)
 
-        self.tabs.addTab(self.tab_image_prompts, "Промпты картинок")
-
         # TAB: Названия
         self.tab_titles = QtWidgets.QWidget(); pt = QtWidgets.QVBoxLayout(self.tab_titles)
         titles_intro = QtWidgets.QLabel("Редактор имён для переименования скачанных роликов — каждое имя на новой строке.")
@@ -1943,8 +1992,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ed_titles = QtWidgets.QPlainTextEdit()
         self.ed_titles.setPlaceholderText("Желаемые имена (по строке)…")
         pt.addWidget(self.ed_titles, 1)
-        self.tabs.addTab(self.tab_titles, "Названия")
-
         # TAB: Настройки
         self.tab_settings = QtWidgets.QScrollArea()
         self.tab_settings.setWidgetResizable(True)
@@ -1971,7 +2018,6 @@ class MainWindow(QtWidgets.QMainWindow):
         settings_layout.addLayout(controls_row)
 
         self.tab_settings.setWidget(settings_body)
-        self.tabs.addTab(self.tab_settings, "Настройки")
         # TAB: Ошибки
         self.tab_errors = QtWidgets.QWidget(); err_layout = QtWidgets.QVBoxLayout(self.tab_errors)
         self.tbl_errors = QtWidgets.QTableWidget(len(ERROR_GUIDE), 3)
@@ -1987,14 +2033,42 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tbl_errors.setItem(row, 1, QtWidgets.QTableWidgetItem(meaning))
             self.tbl_errors.setItem(row, 2, QtWidgets.QTableWidgetItem(action))
         err_layout.addWidget(self.tbl_errors)
-        self.tabs.addTab(self.tab_errors, "Ошибки")
         # TAB: История
         self.tab_history = QtWidgets.QWidget(); h = QtWidgets.QVBoxLayout(self.tab_history)
         self.btn_reload_history = QtWidgets.QPushButton("Обновить")
         self.txt_history = QtWidgets.QPlainTextEdit(); self.txt_history.setReadOnly(True)
         h.addWidget(self.btn_reload_history, 0, QtCore.Qt.AlignmentFlag.AlignLeft)
         h.addWidget(self.txt_history, 1)
-        self.tabs.addTab(self.tab_history, "История")
+        overview_host = QtWidgets.QWidget()
+        overview_layout = QtWidgets.QVBoxLayout(overview_host)
+        overview_layout.setContentsMargins(0, 0, 0, 0)
+        self.overview_tabs = QtWidgets.QTabWidget()
+        self.overview_tabs.addTab(self.tab_tasks, "Сценарии")
+        self.overview_tabs.addTab(self.tab_history, "История")
+        self.overview_tabs.addTab(self.tab_errors, "Ошибки")
+        overview_layout.addWidget(self.overview_tabs)
+        self.tabs.addTab(overview_host, "Обзор")
+
+        content_host = QtWidgets.QWidget()
+        content_layout = QtWidgets.QVBoxLayout(content_host)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        self.content_tabs = QtWidgets.QTabWidget()
+        self.content_tabs.addTab(self.tab_prompts, "Промпты Sora")
+        self.content_tabs.addTab(self.tab_image_prompts, "Промпты картинок")
+        self.content_tabs.addTab(self.tab_titles, "Названия")
+        content_layout.addWidget(self.content_tabs)
+        self.tabs.addTab(content_host, "Контент")
+
+        autopost_host = QtWidgets.QWidget()
+        autopost_layout = QtWidgets.QVBoxLayout(autopost_host)
+        autopost_layout.setContentsMargins(0, 0, 0, 0)
+        self.autopost_tabs = QtWidgets.QTabWidget()
+        self.autopost_tabs.addTab(self.tab_youtube, "YouTube")
+        self.autopost_tabs.addTab(self.tab_tiktok, "TikTok")
+        autopost_layout.addWidget(self.autopost_tabs)
+        self.tabs.addTab(autopost_host, "Автопостинг")
+
+        self.tabs.addTab(self.tab_settings, "Настройки")
 
         self._load_zones_into_ui()
         self._toggle_youtube_schedule()
@@ -2007,50 +2081,108 @@ class MainWindow(QtWidgets.QMainWindow):
         page_paths = QtWidgets.QWidget()
         grid_paths = QtWidgets.QGridLayout(page_paths)
         grid_paths.setColumnStretch(1, 1)
-        grid_paths.setVerticalSpacing(8)
+        grid_paths.setVerticalSpacing(4)
         grid_paths.setHorizontalSpacing(10)
         row = 0
 
-        self.ed_root = QtWidgets.QLineEdit(self.cfg.get("project_root", str(PROJECT_ROOT)))
-        self.btn_browse_root = QtWidgets.QPushButton("…")
-        grid_paths.addWidget(QtWidgets.QLabel("Папка проекта:"), row, 0)
-        grid_paths.addWidget(self.ed_root, row, 1)
-        grid_paths.addWidget(self.btn_browse_root, row, 2)
-        row += 1
+        def add_path_row(label_text: str, line_attr: str, browse_attr: str, open_attr: str, value: str, tooltip: str = "Открыть папку"):
+            nonlocal row
+            label = QtWidgets.QLabel(label_text)
+            wrap = QtWidgets.QWidget()
+            wrap_layout = QtWidgets.QHBoxLayout(wrap)
+            wrap_layout.setContentsMargins(0, 0, 0, 0)
+            wrap_layout.setSpacing(4)
+            line = QtWidgets.QLineEdit(value)
+            setattr(self, line_attr, line)
+            browse_btn = QtWidgets.QToolButton()
+            browse_btn.setText("…")
+            setattr(self, browse_attr, browse_btn)
+            open_btn = QtWidgets.QToolButton()
+            open_btn.setText("↗")
+            open_btn.setToolTip(tooltip)
+            setattr(self, open_attr, open_btn)
+            wrap_layout.addWidget(line, 1)
+            wrap_layout.addWidget(browse_btn)
+            wrap_layout.addWidget(open_btn)
+            grid_paths.addWidget(label, row, 0)
+            grid_paths.addWidget(wrap, row, 1, 1, 2)
+            row += 1
+            return line
 
-        self.ed_downloads = QtWidgets.QLineEdit(self.cfg.get("downloads_dir", str(DL_DIR)))
-        self.btn_browse_downloads = QtWidgets.QPushButton("…")
-        grid_paths.addWidget(QtWidgets.QLabel("Папка RAW:"), row, 0)
-        grid_paths.addWidget(self.ed_downloads, row, 1)
-        grid_paths.addWidget(self.btn_browse_downloads, row, 2)
-        row += 1
+        self.ed_root = add_path_row(
+            "Папка проекта:",
+            "ed_root",
+            "btn_browse_root",
+            "btn_open_root_path",
+            self.cfg.get("project_root", str(PROJECT_ROOT)),
+            "Открыть корень проекта",
+        )
 
-        self.ed_blurred = QtWidgets.QLineEdit(self.cfg.get("blurred_dir", str(BLUR_DIR)))
-        self.btn_browse_blurred = QtWidgets.QPushButton("…")
-        grid_paths.addWidget(QtWidgets.QLabel("Папка BLURRED:"), row, 0)
-        grid_paths.addWidget(self.ed_blurred, row, 1)
-        grid_paths.addWidget(self.btn_browse_blurred, row, 2)
-        row += 1
+        self.ed_downloads = add_path_row(
+            "Папка RAW:",
+            "ed_downloads",
+            "btn_browse_downloads",
+            "btn_open_downloads_path",
+            self.cfg.get("downloads_dir", str(DL_DIR)),
+        )
 
-        self.ed_merged = QtWidgets.QLineEdit(self.cfg.get("merged_dir", str(MERG_DIR)))
-        self.btn_browse_merged = QtWidgets.QPushButton("…")
-        grid_paths.addWidget(QtWidgets.QLabel("Папка MERGED:"), row, 0)
-        grid_paths.addWidget(self.ed_merged, row, 1)
-        grid_paths.addWidget(self.btn_browse_merged, row, 2)
-        row += 1
+        self.ed_blurred = add_path_row(
+            "Папка BLURRED:",
+            "ed_blurred",
+            "btn_browse_blurred",
+            "btn_open_blurred_path",
+            self.cfg.get("blurred_dir", str(BLUR_DIR)),
+        )
 
-        self.ed_blur_src = QtWidgets.QLineEdit(self.cfg.get("blur_src_dir", self.cfg.get("downloads_dir", str(DL_DIR))))
-        self.btn_browse_blur_src = QtWidgets.QPushButton("…")
-        grid_paths.addWidget(QtWidgets.QLabel("Источник BLUR:"), row, 0)
-        grid_paths.addWidget(self.ed_blur_src, row, 1)
-        grid_paths.addWidget(self.btn_browse_blur_src, row, 2)
-        row += 1
+        self.ed_merged = add_path_row(
+            "Папка MERGED:",
+            "ed_merged",
+            "btn_browse_merged",
+            "btn_open_merged_path",
+            self.cfg.get("merged_dir", str(MERG_DIR)),
+        )
 
-        self.ed_merge_src = QtWidgets.QLineEdit(self.cfg.get("merge_src_dir", self.cfg.get("blurred_dir", str(BLUR_DIR))))
-        self.btn_browse_merge_src = QtWidgets.QPushButton("…")
-        grid_paths.addWidget(QtWidgets.QLabel("Источник MERGE:"), row, 0)
-        grid_paths.addWidget(self.ed_merge_src, row, 1)
-        grid_paths.addWidget(self.btn_browse_merge_src, row, 2)
+        self.ed_blur_src = add_path_row(
+            "Источник BLUR:",
+            "ed_blur_src",
+            "btn_browse_blur_src",
+            "btn_open_blur_src_path",
+            self.cfg.get("blur_src_dir", self.cfg.get("downloads_dir", str(DL_DIR))),
+        )
+
+        self.ed_merge_src = add_path_row(
+            "Источник MERGE:",
+            "ed_merge_src",
+            "btn_browse_merge_src",
+            "btn_open_merge_src_path",
+            self.cfg.get("merge_src_dir", self.cfg.get("blurred_dir", str(BLUR_DIR))),
+        )
+
+        self.ed_images_dir = add_path_row(
+            "Изображения (Google AI):",
+            "ed_images_dir",
+            "btn_browse_images_dir",
+            "btn_open_images_dir",
+            self.cfg.get("google_genai", {}).get("output_dir", str(IMAGES_DIR)),
+        )
+
+        self.ed_history_path = add_path_row(
+            "Файл истории:",
+            "ed_history_path",
+            "btn_browse_history_path",
+            "btn_open_history_path",
+            self.cfg.get("history_file", str(HIST_FILE)),
+            "Открыть файл истории",
+        )
+
+        self.ed_titles_path = add_path_row(
+            "Файл названий:",
+            "ed_titles_path",
+            "btn_browse_titles_path",
+            "btn_open_titles_path",
+            self.cfg.get("titles_file", str(TITLES_FILE)),
+            "Открыть файл titles.txt",
+        )
 
         self._blur_src_autofollow = _same_path(self.cfg.get("blur_src_dir"), self.cfg.get("downloads_dir"))
         self._merge_src_autofollow = _same_path(self.cfg.get("merge_src_dir"), self.cfg.get("blurred_dir"))
@@ -2461,7 +2593,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_reload_readme = QtWidgets.QPushButton("Обновить README")
         docs_btn_row.addWidget(self.btn_reload_readme)
         docs_layout.addLayout(docs_btn_row)
-        self.settings_tabs.addTab(page_docs, "Документация")
+        self.tab_docs = page_docs
+        self.idx_settings_docs = self.settings_tabs.addTab(page_docs, "Документация")
 
         self._refresh_path_fields()
         self.cb_ui_show_activity.toggled.connect(self._on_settings_activity_toggle)
@@ -2473,6 +2606,9 @@ class MainWindow(QtWidgets.QMainWindow):
             (self.ed_merged, self.cfg.get("merged_dir", str(MERG_DIR))),
             (self.ed_blur_src, self.cfg.get("blur_src_dir", self.cfg.get("downloads_dir", str(DL_DIR)))),
             (self.ed_merge_src, self.cfg.get("merge_src_dir", self.cfg.get("blurred_dir", str(BLUR_DIR)))),
+            (getattr(self, "ed_images_dir", None), self.cfg.get("google_genai", {}).get("output_dir", str(IMAGES_DIR))),
+            (getattr(self, "ed_history_path", None), self.cfg.get("history_file", str(HIST_FILE))),
+            (getattr(self, "ed_titles_path", None), self.cfg.get("titles_file", str(TITLES_FILE))),
             (getattr(self, "ed_tiktok_src", None), self.cfg.get("tiktok", {}).get("upload_src_dir", self.cfg.get("merged_dir", str(MERG_DIR))))
         ]
         if hasattr(self, "ed_genai_output_dir"):
@@ -2483,6 +2619,8 @@ class MainWindow(QtWidgets.QMainWindow):
             line.blockSignals(True)
             line.setText(str(value))
             line.blockSignals(False)
+        if hasattr(self, "ed_images_dir") and hasattr(self, "ed_genai_output_dir"):
+            self._sync_image_dirs(from_catalog=True)
 
     def _mark_settings_dirty(self, *args):
         self._settings_dirty = True
@@ -2504,6 +2642,9 @@ class MainWindow(QtWidgets.QMainWindow):
             (self.ed_merged, "textEdited"),
             (self.ed_blur_src, "textEdited"),
             (self.ed_merge_src, "textEdited"),
+            (getattr(self, "ed_images_dir", None), "textEdited"),
+            (getattr(self, "ed_history_path", None), "textEdited"),
+            (getattr(self, "ed_titles_path", None), "textEdited"),
             (self.sb_max_videos, "valueChanged"),
             (self.cb_ui_show_activity, "toggled"),
             (self.cmb_ui_activity_density, "currentIndexChanged"),
@@ -2556,6 +2697,10 @@ class MainWindow(QtWidgets.QMainWindow):
             signal = getattr(widget, signal_name, None)
             if signal:
                 signal.connect(self._mark_settings_dirty)
+
+    def _on_settings_tab_changed(self, index: int):
+        if hasattr(self, "idx_settings_docs") and index == self.idx_settings_docs:
+            self._load_readme_preview()
 
     def _on_downloads_path_edited(self, text: str):
         clean = text.strip()
@@ -2776,8 +2921,10 @@ class MainWindow(QtWidgets.QMainWindow):
         zones[item.row()][key] = value
         self._mark_settings_dirty()
 
-    def _load_readme_preview(self):
+    def _load_readme_preview(self, force: bool = False):
         if not hasattr(self, "txt_readme"):
+            return
+        if self._readme_loaded and not force:
             return
 
         for path in [APP_DIR / "README.md", PROJECT_ROOT / "README.md"]:
@@ -2790,26 +2937,32 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.txt_readme.verticalScrollBar().setValue(0)
                 if hasattr(self, "lst_activity"):
                     self._append_activity(f"README загружен: {path.name}", kind="info")
+                self._readme_loaded = True
                 return
 
         self.txt_readme.setPlainText("README.md не найден в папке приложения")
         if hasattr(self, "lst_activity"):
             self._append_activity("README.md не найден", kind="error")
+        self._readme_loaded = True
 
     def _wire(self):
         # статусы/лог — безопасные слоты GUI-потока
         self.sig_set_status.connect(self._slot_set_status)
         self.sig_log.connect(self._slot_log)
 
+        self.cmb_chrome_profile_top.currentIndexChanged.connect(self._on_top_chrome_profile_changed)
         self.btn_open_chrome.clicked.connect(self._open_chrome)
         self.btn_open_root.clicked.connect(lambda: open_in_finder(self.cfg.get("project_root", PROJECT_ROOT)))
         self.btn_open_raw.clicked.connect(lambda: open_in_finder(self.cfg.get("downloads_dir", DL_DIR)))
         self.btn_open_blur.clicked.connect(lambda: open_in_finder(self.cfg.get("blurred_dir", BLUR_DIR)))
         self.btn_open_merge.clicked.connect(lambda: open_in_finder(self.cfg.get("merged_dir", MERG_DIR)))
+        self.btn_open_images_top.clicked.connect(self._open_genai_output_dir)
         self.btn_stop_all.clicked.connect(self._stop_all)
         self.btn_start_selected.clicked.connect(self._run_scenario)
         self.btn_activity_clear.clicked.connect(self._clear_activity)
         self.chk_activity_visible.toggled.connect(self._on_activity_toggle)
+        self.ed_activity_filter.textChanged.connect(self._on_activity_filter_changed)
+        self.btn_activity_export.clicked.connect(self._export_activity_log)
 
         self.btn_load_prompts.clicked.connect(self._load_prompts)
         self.btn_save_prompts.clicked.connect(self._save_prompts)
@@ -2831,7 +2984,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_reload_history.clicked.connect(self._reload_history)
         self.btn_save_settings.clicked.connect(self._save_settings_clicked)
         self.btn_save_autogen_cfg.clicked.connect(self._save_autogen_cfg)
-        self.btn_reload_readme.clicked.connect(self._load_readme_preview)
+        self.btn_reload_readme.clicked.connect(lambda: self._load_readme_preview(force=True))
+        if hasattr(self, "settings_tabs"):
+            self.settings_tabs.currentChanged.connect(self._on_settings_tab_changed)
         self.btn_env_check.clicked.connect(self._run_env_check)
         self.btn_update_check.clicked.connect(lambda: self._check_for_updates(dry_run=True))
         self.btn_update_pull.clicked.connect(lambda: self._check_for_updates(dry_run=False))
@@ -2911,7 +3066,33 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_browse_merged.clicked.connect(lambda: self._browse_dir(self.ed_merged, "Выбери папку MERGED"))
         self.btn_browse_blur_src.clicked.connect(lambda: self._browse_dir(self.ed_blur_src, "Выбери ИСТОЧНИК для BLUR"))
         self.btn_browse_merge_src.clicked.connect(lambda: self._browse_dir(self.ed_merge_src, "Выбери ИСТОЧНИК для MERGE"))
+        if hasattr(self, "btn_browse_images_dir"):
+            self.btn_browse_images_dir.clicked.connect(lambda: self._browse_dir(self.ed_images_dir, "Выбери папку для изображений"))
+        if hasattr(self, "btn_browse_history_path"):
+            self.btn_browse_history_path.clicked.connect(lambda: self._browse_file(self.ed_history_path, "Выбери файл истории", "JSONL (*.jsonl);;Все файлы (*.*)"))
+        if hasattr(self, "btn_browse_titles_path"):
+            self.btn_browse_titles_path.clicked.connect(lambda: self._browse_file(self.ed_titles_path, "Выбери файл названий", "Текстовые файлы (*.txt);;Все файлы (*.*)"))
         self.btn_genai_output_browse.clicked.connect(lambda: self._browse_dir(self.ed_genai_output_dir, "Выбери папку для изображений"))
+
+        for button_attr, line_attr in [
+            ("btn_open_root_path", "ed_root"),
+            ("btn_open_downloads_path", "ed_downloads"),
+            ("btn_open_blurred_path", "ed_blurred"),
+            ("btn_open_merged_path", "ed_merged"),
+            ("btn_open_blur_src_path", "ed_blur_src"),
+            ("btn_open_merge_src_path", "ed_merge_src"),
+            ("btn_open_images_dir", "ed_images_dir"),
+            ("btn_open_history_path", "ed_history_path"),
+            ("btn_open_titles_path", "ed_titles_path"),
+        ]:
+            button = getattr(self, button_attr, None)
+            line = getattr(self, line_attr, None)
+            if isinstance(button, QtWidgets.QAbstractButton) and isinstance(line, QtWidgets.QLineEdit):
+                button.clicked.connect(lambda _, l=line: self._open_path_from_edit(l))
+
+        if hasattr(self, "ed_images_dir") and hasattr(self, "ed_genai_output_dir"):
+            self.ed_images_dir.textEdited.connect(lambda _: self._sync_image_dirs(from_catalog=True))
+            self.ed_genai_output_dir.textEdited.connect(lambda _: self._sync_image_dirs(from_catalog=False))
 
     def _init_state(self):
         self.runner_autogen = ProcRunner("AUTOGEN")
@@ -3185,7 +3366,9 @@ class MainWindow(QtWidgets.QMainWindow):
             display = card_text if isinstance(card_text, str) and card_text else text
             self._update_current_event(display, kind)
 
-        item = QtWidgets.QListWidgetItem(text)
+        stamp = time.strftime("%H:%M:%S")
+        display_text = f"{stamp} · {text}"
+        item = QtWidgets.QListWidgetItem(display_text)
         palette = {
             "info": ("#93c5fd", "#15223c"),
             "running": ("#facc15", "#352b0b"),
@@ -3199,11 +3382,21 @@ class MainWindow(QtWidgets.QMainWindow):
         item.setForeground(brush_fg)
         item.setBackground(brush_bg)
         item.setTextAlignment(int(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter))
+        icon_map = {
+            "info": QtWidgets.QStyle.StandardPixmap.SP_MessageBoxInformation,
+            "running": QtWidgets.QStyle.StandardPixmap.SP_BrowserReload,
+            "success": QtWidgets.QStyle.StandardPixmap.SP_DialogApplyButton,
+            "error": QtWidgets.QStyle.StandardPixmap.SP_MessageBoxCritical,
+            "warn": QtWidgets.QStyle.StandardPixmap.SP_MessageBoxWarning,
+        }
+        item.setIcon(self.style().standardIcon(icon_map.get(kind, QtWidgets.QStyle.StandardPixmap.SP_MessageBoxInformation)))
+        item.setData(QtCore.Qt.ItemDataRole.UserRole, text.lower())
         self._style_activity_item(item)
         self.lst_activity.addItem(item)
         while self.lst_activity.count() > 200:
             self.lst_activity.takeItem(0)
         self.lst_activity.scrollToBottom()
+        self._apply_activity_filter()
 
     @QtCore.pyqtSlot(str)
     def _slot_log(self, text: str):
@@ -3256,9 +3449,48 @@ class MainWindow(QtWidgets.QMainWindow):
         elif any(token in lowered for token in ["запуск", "старт", "загружа", "обрабаты", "выполня"]):
             kind = "running"
 
-        timestamp = time.strftime("%H:%M:%S")
-        pretty = f"[{timestamp}] {normalized}"
-        self._append_activity(pretty, kind=kind, card_text=False)
+        self._append_activity(normalized, kind=kind, card_text=False)
+
+    def _apply_activity_filter(self):
+        if not hasattr(self, "lst_activity"):
+            return
+        pattern = (self._activity_filter_text or "").strip().lower()
+        for i in range(self.lst_activity.count()):
+            item = self.lst_activity.item(i)
+            if not isinstance(item, QtWidgets.QListWidgetItem):
+                continue
+            if not pattern:
+                item.setHidden(False)
+                continue
+            hay = item.data(QtCore.Qt.ItemDataRole.UserRole)
+            hay_text = hay if isinstance(hay, str) else item.text().lower()
+            item.setHidden(pattern not in hay_text)
+
+    def _on_activity_filter_changed(self, text: str):
+        self._activity_filter_text = text.strip().lower()
+        self._apply_activity_filter()
+
+    def _export_activity_log(self):
+        if not hasattr(self, "lst_activity") or self.lst_activity.count() == 0:
+            self._post_status("Нет событий для экспорта", state="warn")
+            return
+        default_path = _project_path(self.cfg.get("history_file", str(HIST_FILE))).with_name("activity_log.txt")
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Сохранить историю событий",
+            str(default_path),
+            "Текстовые файлы (*.txt);;Все файлы (*.*)",
+        )
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                for i in range(self.lst_activity.count()):
+                    item = self.lst_activity.item(i)
+                    f.write(item.text() + "\n")
+            self._post_status(f"История сохранена: {Path(path).name}", state="ok")
+        except Exception as exc:
+            self._post_status(f"Не удалось сохранить историю: {exc}", state="error")
 
     # helper для статуса
     def _post_status(self, text: str, progress: int = 0, total: int = 0, state: str = "idle"):
@@ -3268,6 +3500,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lst_activity.clear()
         self._post_status("Лента событий очищена", state="idle")
         self._update_current_event("—", "info")
+        self._apply_activity_filter()
 
     def _update_current_event(self, text: str, kind: str = "info", persist: bool = False, preserve_timer: bool = False):
         if not hasattr(self, "current_event_card"):
@@ -4396,6 +4629,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.cfg["blur_src_dir"] = self.ed_blur_src.text().strip() or self.cfg["downloads_dir"]
         self.cfg["merge_src_dir"] = self.ed_merge_src.text().strip() or self.cfg["blurred_dir"]
+        history_line = getattr(self, "ed_history_path", None)
+        titles_line = getattr(self, "ed_titles_path", None)
+        history_value = history_line.text().strip() if isinstance(history_line, QtWidgets.QLineEdit) else ""
+        titles_value = titles_line.text().strip() if isinstance(titles_line, QtWidgets.QLineEdit) else ""
+        self.cfg["history_file"] = history_value or str(HIST_FILE)
+        self.cfg["titles_file"] = titles_value or str(TITLES_FILE)
 
         ff = self.cfg.setdefault("ffmpeg", {})
         ff["binary"] = self.ed_ff_bin.text().strip() or "ffmpeg"
@@ -4466,7 +4705,16 @@ class MainWindow(QtWidgets.QMainWindow):
         genai_cfg["number_of_images"] = int(self.sb_genai_images.value())
         genai_cfg["rate_limit_per_minute"] = int(self.sb_genai_rpm.value())
         genai_cfg["max_retries"] = int(self.sb_genai_retries.value())
-        genai_cfg["output_dir"] = self.ed_genai_output_dir.text().strip() or str(IMAGES_DIR)
+        images_dir_value = self.ed_genai_output_dir.text().strip() or self.ed_images_dir.text().strip() or str(IMAGES_DIR)
+        genai_cfg["output_dir"] = images_dir_value
+        if hasattr(self, "ed_images_dir"):
+            self.ed_images_dir.blockSignals(True)
+            self.ed_images_dir.setText(images_dir_value)
+            self.ed_images_dir.blockSignals(False)
+        if hasattr(self, "ed_genai_output_dir"):
+            self.ed_genai_output_dir.blockSignals(True)
+            self.ed_genai_output_dir.setText(images_dir_value)
+            self.ed_genai_output_dir.blockSignals(False)
         genai_cfg["manifest_file"] = str(Path(genai_cfg["output_dir"]) / "manifest.json")
 
         maint_cfg = self.cfg.setdefault("maintenance", {})
@@ -4760,21 +5008,74 @@ class MainWindow(QtWidgets.QMainWindow):
             self._post_status(f"Не удалось сохранить autogen config: {e}", state="error")
 
     # ----- simple stats -----
+    def _stat_for_path(self, path: Path, suffixes: Tuple[str, ...]) -> Tuple[int, int]:
+        key = (str(path), tuple(sorted(suffixes)))
+        try:
+            mtime = path.stat().st_mtime
+        except Exception:
+            mtime = 0.0
+        cached = self._stat_cache.get(key)
+        if cached and abs(cached[0] - mtime) < 0.1:
+            return cached[1], cached[2]
+
+        count = 0
+        total_size = 0
+        if path.exists():
+            try:
+                for entry in path.iterdir():
+                    if not entry.is_file():
+                        continue
+                    if suffixes and entry.suffix.lower() not in suffixes:
+                        continue
+                    count += 1
+                    try:
+                        total_size += entry.stat().st_size
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
+        self._stat_cache[key] = (mtime, count, total_size)
+        return count, total_size
+
     def _refresh_stats(self):
         try:
-            def _count_vids(p: Path) -> int:
-                if not p.exists():
-                    return 0
-                return sum(len(list(p.glob(x))) for x in ("*.mp4", "*.mov", "*.m4v", "*.webm"))
+            video_suffixes = (".mp4", ".mov", ".m4v", ".webm", ".mkv")
+            image_suffixes = (".jpg", ".jpeg", ".png", ".webp")
 
-            raw  = _count_vids(_project_path(self.cfg.get("downloads_dir", str(DL_DIR))))
-            blur = _count_vids(_project_path(self.cfg.get("blurred_dir", str(BLUR_DIR))))
-            merg = _count_vids(_project_path(self.cfg.get("merged_dir", str(MERG_DIR))))
-            upload_src = _count_vids(_project_path(self.cfg.get("youtube", {}).get("upload_src_dir", self.cfg.get("merged_dir", str(MERG_DIR)))))
-            tiktok_src = _count_vids(_project_path(self.cfg.get("tiktok", {}).get("upload_src_dir", self.cfg.get("merged_dir", str(MERG_DIR)))))
-            self.sig_log.emit(f"[STAT] RAW={raw} BLURRED={blur} MERGED={merg} YT={upload_src} TT={tiktok_src}")
+            raw_path = _project_path(self.cfg.get("downloads_dir", str(DL_DIR)))
+            blur_path = _project_path(self.cfg.get("blurred_dir", str(BLUR_DIR)))
+            merge_path = _project_path(self.cfg.get("merged_dir", str(MERG_DIR)))
+            upload_path = _project_path(self.cfg.get("youtube", {}).get("upload_src_dir", self.cfg.get("merged_dir", str(MERG_DIR))))
+            tiktok_path = _project_path(self.cfg.get("tiktok", {}).get("upload_src_dir", self.cfg.get("merged_dir", str(MERG_DIR))))
+            images_path = _project_path(self.cfg.get("google_genai", {}).get("output_dir", str(IMAGES_DIR)))
 
-            # обновляем визуальные счетчики
+            raw, raw_size = self._stat_for_path(raw_path, video_suffixes)
+            blur, blur_size = self._stat_for_path(blur_path, video_suffixes)
+            merg, merge_size = self._stat_for_path(merge_path, video_suffixes)
+            upload_src, upload_size = self._stat_for_path(upload_path, video_suffixes)
+            tiktok_src, tiktok_size = self._stat_for_path(tiktok_path, video_suffixes)
+            images_count, images_size = self._stat_for_path(images_path, image_suffixes)
+
+            manifest_count = 0
+            manifest_path = _project_path(self.cfg.get("google_genai", {}).get("manifest_file", str(Path(images_path) / "manifest.json")))
+            if manifest_path.exists():
+                try:
+                    data = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    if isinstance(data, list):
+                        manifest_count = len(data)
+                    elif isinstance(data, dict):
+                        if isinstance(data.get("images"), list):
+                            manifest_count = len(data.get("images"))
+                    else:
+                        manifest_count = 0
+                except Exception:
+                    manifest_count = 0
+
+            self.sig_log.emit(
+                f"[STAT] RAW={raw} BLURRED={blur} MERGED={merg} YT={upload_src} TT={tiktok_src} IMG={images_count}"
+            )
+
             fmt = lambda value: format(value, ",").replace(",", " ")
             self.lbl_stat_raw.setText(fmt(raw))
             self.lbl_stat_blur.setText(fmt(blur))
@@ -4782,6 +5083,20 @@ class MainWindow(QtWidgets.QMainWindow):
             self.lbl_stat_upload.setText(fmt(upload_src))
             if hasattr(self, "lbl_stat_tiktok"):
                 self.lbl_stat_tiktok.setText(fmt(tiktok_src))
+            if hasattr(self, "lbl_stat_images"):
+                self.lbl_stat_images.setText(fmt(images_count))
+
+            def _set_desc(key: str, text: str):
+                label = self._stat_desc_labels.get(key)
+                if label:
+                    label.setText(text)
+
+            _set_desc("raw", f"{_human_size(raw_size)} · {raw_path.name or raw_path}")
+            _set_desc("blur", f"{_human_size(blur_size)} · {blur_path.name or blur_path}")
+            _set_desc("merge", f"{_human_size(merge_size)} · {merge_path.name or merge_path}")
+            _set_desc("youtube", f"{_human_size(upload_size)} · {upload_path.name or upload_path}")
+            _set_desc("tiktok", f"{_human_size(tiktok_size)} · {tiktok_path.name or tiktok_path}")
+            _set_desc("images", f"{_human_size(images_size)} · манифест {manifest_count}")
         except Exception as e:
             self.sig_log.emit(f"[STAT] ошибка: {e}")
 
@@ -4875,6 +5190,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lbl_prof_active.setText(active if active else "—")
         self._refresh_prompt_profiles_ui()
 
+        if hasattr(self, "cmb_chrome_profile_top"):
+            self.cmb_chrome_profile_top.blockSignals(True)
+            self.cmb_chrome_profile_top.clear()
+            self.cmb_chrome_profile_top.addItem("— без профиля —", "")
+            for p in profiles:
+                label = p.get("name") or p.get("profile_directory") or ""
+                if not label:
+                    continue
+                value = p.get("name") or label
+                self.cmb_chrome_profile_top.addItem(label, value)
+            idx = self.cmb_chrome_profile_top.findData(active)
+            if idx < 0:
+                idx = 0
+            self.cmb_chrome_profile_top.setCurrentIndex(idx)
+            self.cmb_chrome_profile_top.blockSignals(False)
+
     def _on_profile_selected(self):
         items = self.lst_profiles.selectedItems()
         if not items:
@@ -4929,15 +5260,32 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_profiles_ui()
         self._post_status(f"Профиль «{name}» удалён", state="ok")
 
+    def _set_active_chrome_profile(self, name: str, notify: bool = True):
+        chrome_cfg = self.cfg.setdefault("chrome", {})
+        current = chrome_cfg.get("active_profile", "") or ""
+        if current == (name or ""):
+            self._refresh_profiles_ui()
+            return
+        chrome_cfg["active_profile"] = name or ""
+        save_cfg(self.cfg)
+        self._refresh_profiles_ui()
+        if notify:
+            label = name or "—"
+            self._post_status(f"Активный профиль: {label}", state="ok")
+
     def _on_profile_set_active(self):
         items = self.lst_profiles.selectedItems()
         if not items:
             return
         name = items[0].text()
-        self.cfg.setdefault("chrome", {})["active_profile"] = name
-        save_cfg(self.cfg)
-        self._refresh_profiles_ui()
-        self._post_status(f"Активный профиль: {name}", state="ok")
+        self._set_active_chrome_profile(name, notify=True)
+
+    def _on_top_chrome_profile_changed(self, index: int):
+        if index < 0:
+            return
+        data = self.cmb_chrome_profile_top.itemData(index)
+        name = data if isinstance(data, str) else str(data or "")
+        self._set_active_chrome_profile(name, notify=True)
 
     def _auto_scan_profiles_at_start(self):
         chrome_cfg = self.cfg.get("chrome", {})
@@ -5681,7 +6029,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._post_status("Обновление завершено", state="ok")
             self._refresh_youtube_ui()
             self._refresh_tiktok_ui()
-            self._load_readme_preview()
+            self._load_readme_preview(force=True)
         else:
             err_text = pull.stderr.strip() or pull.stdout.strip() or "Не удалось выполнить git pull"
             self._append_activity(f"git pull: {err_text}", kind="error")
