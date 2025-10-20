@@ -886,17 +886,12 @@ class MainWindow(QtWidgets.QMainWindow):
         buttons = [
             getattr(self, "btn_update_check", None),
             getattr(self, "btn_update_pull", None),
-            getattr(self, "btn_quick_update", None),
         ]
         for btn in buttons:
             if not btn:
                 continue
             btn.setEnabled(available)
-            if available:
-                # вернём короткий тултип, если он был задан ранее
-                if btn is self.btn_quick_update:
-                    btn.setToolTip("Выполнить git pull для текущего репозитория")
-            else:
+            if not available:
                 btn.setToolTip(tooltip_disabled)
 
     def _default_profile_prompts(self, profile_name: Optional[str]) -> Path:
@@ -1127,35 +1122,83 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         v.addWidget(banner)
 
-        tb = QtWidgets.QHBoxLayout()
+        toolbar = QtWidgets.QFrame()
+        toolbar.setObjectName("topToolbar")
+        toolbar.setStyleSheet(
+            "QFrame#topToolbar{background:rgba(15,23,42,0.9);border:1px solid #1e293b;"
+            "border-radius:12px;}"
+            "QComboBox#chromeProfileTop{min-width:160px;}"
+            "QToolButton#topFolderButton{padding:4px 10px;border-radius:8px;"
+            "background:#1e293b;color:#e2e8f0;}"
+            "QToolButton#topFolderButton::hover{background:#27364d;}"
+        )
+        tb = QtWidgets.QHBoxLayout(toolbar)
+        tb.setContentsMargins(14, 8, 14, 8)
+        tb.setSpacing(8)
+
+        chrome_block = QtWidgets.QHBoxLayout()
+        chrome_block.setContentsMargins(0, 0, 0, 0)
+        chrome_block.setSpacing(6)
+        lbl_chrome = QtWidgets.QLabel("Chrome:")
+        lbl_chrome.setStyleSheet("QLabel{color:#94a3b8;font-weight:600;}")
+        chrome_block.addWidget(lbl_chrome)
         self.cmb_chrome_profile_top = QtWidgets.QComboBox()
-        self.cmb_chrome_profile_top.setMinimumWidth(180)
+        self.cmb_chrome_profile_top.setObjectName("chromeProfileTop")
         self.cmb_chrome_profile_top.setPlaceholderText("Профиль Chrome")
         self.cmb_chrome_profile_top.setSizeAdjustPolicy(
             QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToContents
         )
-        tb.addWidget(self.cmb_chrome_profile_top)
-        self.btn_open_chrome = QtWidgets.QPushButton("Открыть Chrome (CDP)")
-        self.btn_open_root = QtWidgets.QPushButton("Открыть папку проекта")
-        self.btn_open_raw = QtWidgets.QPushButton("RAW (downloads)")
-        self.btn_open_blur = QtWidgets.QPushButton("BLURRED")
-        self.btn_open_merge = QtWidgets.QPushButton("MERGED")
-        self.btn_open_images_top = QtWidgets.QPushButton("Images (generated)")
-        self.btn_quick_update = QtWidgets.QPushButton("Обновить из GitHub")
-        self.btn_quick_update.setToolTip("Выполнить git pull для текущего репозитория")
+        chrome_block.addWidget(self.cmb_chrome_profile_top)
+        self.btn_open_chrome = QtWidgets.QPushButton("Запустить Chrome")
+        self.btn_open_chrome.setMinimumWidth(150)
+        chrome_block.addWidget(self.btn_open_chrome)
+        tb.addLayout(chrome_block)
+
+        tb.addSpacing(12)
+
+        icon_dir = self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DirOpenIcon)
+
+        def make_folder_button(text: str) -> QtWidgets.QToolButton:
+            btn = QtWidgets.QToolButton()
+            btn.setObjectName("topFolderButton")
+            btn.setIcon(icon_dir)
+            btn.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+            btn.setText(text)
+            return btn
+
+        folders_block = QtWidgets.QHBoxLayout()
+        folders_block.setContentsMargins(0, 0, 0, 0)
+        folders_block.setSpacing(6)
+        lbl_folders = QtWidgets.QLabel("Каталоги:")
+        lbl_folders.setStyleSheet("QLabel{color:#94a3b8;font-weight:600;}")
+        folders_block.addWidget(lbl_folders)
+        self.btn_open_root = make_folder_button("Проект")
+        self.btn_open_raw = make_folder_button("RAW")
+        self.btn_open_blur = make_folder_button("BLURRED")
+        self.btn_open_merge = make_folder_button("MERGED")
+        self.btn_open_images_top = make_folder_button("Images")
+        for btn in (
+            self.btn_open_root,
+            self.btn_open_raw,
+            self.btn_open_blur,
+            self.btn_open_merge,
+            self.btn_open_images_top,
+        ):
+            folders_block.addWidget(btn)
+        tb.addLayout(folders_block)
+
+        tb.addStretch(1)
+
         self.btn_start_selected = QtWidgets.QPushButton("Старт выбранного")
         self.btn_stop_all = QtWidgets.QPushButton("Стоп все")
-        tb.addWidget(self.btn_open_chrome)
-        tb.addWidget(self.btn_open_root)
-        tb.addWidget(self.btn_open_raw)
-        tb.addWidget(self.btn_open_blur)
-        tb.addWidget(self.btn_open_merge)
-        tb.addWidget(self.btn_open_images_top)
-        tb.addWidget(self.btn_quick_update)
-        tb.addStretch(1)
-        tb.addWidget(self.btn_start_selected)
-        tb.addWidget(self.btn_stop_all)
-        v.addLayout(tb)
+        action_block = QtWidgets.QHBoxLayout()
+        action_block.setContentsMargins(0, 0, 0, 0)
+        action_block.setSpacing(6)
+        action_block.addWidget(self.btn_start_selected)
+        action_block.addWidget(self.btn_stop_all)
+        tb.addLayout(action_block)
+
+        v.addWidget(toolbar)
 
         split = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
         split.setChildrenCollapsible(False)
@@ -1256,7 +1299,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # справа — вкладки
         self.tabs = QtWidgets.QTabWidget()
-        self.tabs.setTabPosition(QtWidgets.QTabWidget.TabPosition.West)
+        self.tabs.setTabPosition(QtWidgets.QTabWidget.TabPosition.North)
         self.tabs.setDocumentMode(True)
         self.tabs.setMovable(False)
         split.addWidget(self.tabs)
@@ -1268,7 +1311,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._apply_activity_visibility(self.chk_activity_visible.isChecked(), persist=False)
 
         # TAB: Задачи
-        def make_scroll_tab(margins=(12, 12, 12, 12), spacing=12):
+        def make_scroll_tab(margins=(12, 12, 12, 12), spacing=10):
             area = QtWidgets.QScrollArea()
             area.setWidgetResizable(True)
             area.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
@@ -1290,19 +1333,30 @@ class MainWindow(QtWidgets.QMainWindow):
         lt.addWidget(tasks_intro)
 
         self.task_tabs = QtWidgets.QTabWidget()
+        self.task_tabs.setTabPosition(QtWidgets.QTabWidget.TabPosition.North)
         lt.addWidget(self.task_tabs, 1)
 
         grp_choose = QtWidgets.QGroupBox("Что выполнить")
         f = QtWidgets.QFormLayout(grp_choose)
         f.setVerticalSpacing(6)
+        self.cb_do_images = QtWidgets.QCheckBox("Генерация картинок (Google)")
         self.cb_do_autogen = QtWidgets.QCheckBox("Вставка промптов в Sora")
         self.cb_do_download = QtWidgets.QCheckBox("Авто-скачка видео")
         self.cb_do_blur = QtWidgets.QCheckBox("Блюр водяного знака (ffmpeg, пресеты 9:16 / 16:9)")
         self.cb_do_merge = QtWidgets.QCheckBox("Склейка группами N")
         self.cb_do_upload = QtWidgets.QCheckBox("Загрузка на YouTube (отложенный постинг)")
         self.cb_do_tiktok = QtWidgets.QCheckBox("Загрузка в TikTok")
-        for box in (self.cb_do_autogen, self.cb_do_download, self.cb_do_blur, self.cb_do_merge, self.cb_do_upload, self.cb_do_tiktok):
+        for box in (
+            self.cb_do_images,
+            self.cb_do_autogen,
+            self.cb_do_download,
+            self.cb_do_blur,
+            self.cb_do_merge,
+            self.cb_do_upload,
+            self.cb_do_tiktok,
+        ):
             box.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        f.addRow(self.cb_do_images)
         f.addRow(self.cb_do_autogen)
         f.addRow(self.cb_do_download)
         f.addRow(self.cb_do_blur)
@@ -1570,7 +1624,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         grp_run = QtWidgets.QGroupBox("Публикация и расписание")
         gr_form = QtWidgets.QGridLayout(grp_run)
-        gr_form.setVerticalSpacing(6)
+        gr_form.setVerticalSpacing(4)
+        gr_form.setHorizontalSpacing(10)
         row = 0
 
         self.cmb_youtube_channel = QtWidgets.QComboBox()
@@ -1609,11 +1664,13 @@ class MainWindow(QtWidgets.QMainWindow):
         gr_form.addWidget(self.sb_youtube_batch_limit, row, 1)
         row += 1
 
-        src_wrap = QtWidgets.QWidget(); src_l = QtWidgets.QHBoxLayout(src_wrap); src_l.setContentsMargins(0,0,0,0)
+        src_wrap = QtWidgets.QWidget(); src_l = QtWidgets.QHBoxLayout(src_wrap); src_l.setContentsMargins(0,0,0,0); src_l.setSpacing(4)
         self.ed_youtube_src = QtWidgets.QLineEdit(yt_cfg.get("upload_src_dir", self.cfg.get("merged_dir", str(MERG_DIR))))
         self.btn_youtube_src_browse = QtWidgets.QPushButton("…")
+        self.btn_youtube_src_open = QtWidgets.QToolButton(); self.btn_youtube_src_open.setText("↗"); self.btn_youtube_src_open.setToolTip("Открыть папку загрузок YouTube")
         src_l.addWidget(self.ed_youtube_src, 1)
         src_l.addWidget(self.btn_youtube_src_browse)
+        src_l.addWidget(self.btn_youtube_src_open)
         gr_form.addWidget(QtWidgets.QLabel("Папка с клипами:"), row, 0)
         gr_form.addWidget(src_wrap, row, 1, 1, 2)
         row += 1
@@ -1740,7 +1797,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         grp_tt_run = QtWidgets.QGroupBox("Очередь и запуск")
         tr_layout = QtWidgets.QGridLayout(grp_tt_run)
-        tr_layout.setVerticalSpacing(6)
+        tr_layout.setVerticalSpacing(4)
+        tr_layout.setHorizontalSpacing(10)
         tr_layout.setColumnStretch(1, 1)
         row = 0
 
@@ -1785,10 +1843,13 @@ class MainWindow(QtWidgets.QMainWindow):
         src_tt_wrap = QtWidgets.QWidget()
         src_tt_layout = QtWidgets.QHBoxLayout(src_tt_wrap)
         src_tt_layout.setContentsMargins(0, 0, 0, 0)
+        src_tt_layout.setSpacing(4)
         self.ed_tiktok_src = QtWidgets.QLineEdit(tk_cfg.get("upload_src_dir", self.cfg.get("merged_dir", str(MERG_DIR))))
         self.btn_tiktok_src_browse = QtWidgets.QPushButton("…")
+        self.btn_tiktok_src_open = QtWidgets.QToolButton(); self.btn_tiktok_src_open.setText("↗"); self.btn_tiktok_src_open.setToolTip("Открыть папку загрузок TikTok")
         src_tt_layout.addWidget(self.ed_tiktok_src, 1)
         src_tt_layout.addWidget(self.btn_tiktok_src_browse)
+        src_tt_layout.addWidget(self.btn_tiktok_src_open)
         tr_layout.addWidget(QtWidgets.QLabel("Папка с клипами:"), row, 0)
         tr_layout.addWidget(src_tt_wrap, row, 1, 1, 2)
         row += 1
@@ -2004,6 +2065,7 @@ class MainWindow(QtWidgets.QMainWindow):
         settings_layout.addWidget(settings_intro)
 
         self.settings_tabs = QtWidgets.QTabWidget()
+        self.settings_tabs.setTabPosition(QtWidgets.QTabWidget.TabPosition.North)
         settings_layout.addWidget(self.settings_tabs, 1)
 
         self._build_settings_pages()
@@ -2043,6 +2105,7 @@ class MainWindow(QtWidgets.QMainWindow):
         overview_layout = QtWidgets.QVBoxLayout(overview_host)
         overview_layout.setContentsMargins(0, 0, 0, 0)
         self.overview_tabs = QtWidgets.QTabWidget()
+        self.overview_tabs.setTabPosition(QtWidgets.QTabWidget.TabPosition.North)
         self.overview_tabs.addTab(self.tab_tasks, "Сценарии")
         self.overview_tabs.addTab(self.tab_history, "История")
         self.overview_tabs.addTab(self.tab_errors, "Ошибки")
@@ -2053,6 +2116,7 @@ class MainWindow(QtWidgets.QMainWindow):
         content_layout = QtWidgets.QVBoxLayout(content_host)
         content_layout.setContentsMargins(0, 0, 0, 0)
         self.content_tabs = QtWidgets.QTabWidget()
+        self.content_tabs.setTabPosition(QtWidgets.QTabWidget.TabPosition.North)
         self.content_tabs.addTab(self.tab_prompts, "Промпты Sora")
         self.content_tabs.addTab(self.tab_image_prompts, "Промпты картинок")
         self.content_tabs.addTab(self.tab_titles, "Названия")
@@ -2063,6 +2127,7 @@ class MainWindow(QtWidgets.QMainWindow):
         autopost_layout = QtWidgets.QVBoxLayout(autopost_host)
         autopost_layout.setContentsMargins(0, 0, 0, 0)
         self.autopost_tabs = QtWidgets.QTabWidget()
+        self.autopost_tabs.setTabPosition(QtWidgets.QTabWidget.TabPosition.North)
         self.autopost_tabs.addTab(self.tab_youtube, "YouTube")
         self.autopost_tabs.addTab(self.tab_tiktok, "TikTok")
         autopost_layout.addWidget(self.autopost_tabs)
@@ -2564,12 +2629,14 @@ class MainWindow(QtWidgets.QMainWindow):
         output_dir = genai_cfg.get("output_dir", str(IMAGES_DIR))
         self.ed_genai_output_dir = QtWidgets.QLineEdit(str(output_dir))
         self.btn_genai_output_browse = QtWidgets.QPushButton("…")
+        self.btn_genai_output_open = QtWidgets.QToolButton(); self.btn_genai_output_open.setText("↗"); self.btn_genai_output_open.setToolTip("Открыть папку вывода")
         row_widget = QtWidgets.QWidget()
         row_layout = QtWidgets.QHBoxLayout(row_widget)
         row_layout.setContentsMargins(0, 0, 0, 0)
         row_layout.setSpacing(6)
         row_layout.addWidget(self.ed_genai_output_dir, 1)
         row_layout.addWidget(self.btn_genai_output_browse, 0)
+        row_layout.addWidget(self.btn_genai_output_open, 0)
         fg.addRow("Папка вывода:", row_widget)
 
         hint = QtWidgets.QLabel("Папка вывода создаётся автоматически. Настройки применяются при запуске автогена.")
@@ -2595,6 +2662,26 @@ class MainWindow(QtWidgets.QMainWindow):
         docs_layout.addLayout(docs_btn_row)
         self.tab_docs = page_docs
         self.idx_settings_docs = self.settings_tabs.addTab(page_docs, "Документация")
+
+        page_sequence = [
+            ("Каталоги", page_paths),
+            ("Генерация картинок", page_genai),
+            ("Автоген", page_auto),
+            ("YouTube", page_yt),
+            ("TikTok", page_tt),
+            ("Telegram", page_tg),
+            ("Chrome", page_chrome),
+            ("FFmpeg", page_ff),
+            ("Интерфейс", page_ui),
+            ("Обслуживание", page_maint),
+            ("Документация", page_docs),
+        ]
+        tab_bar = self.settings_tabs.tabBar()
+        for target, (_, widget) in enumerate(page_sequence):
+            idx_current = self.settings_tabs.indexOf(widget)
+            if idx_current >= 0 and idx_current != target:
+                tab_bar.moveTab(idx_current, target)
+        self.idx_settings_docs = self.settings_tabs.indexOf(page_docs)
 
         self._refresh_path_fields()
         self.cb_ui_show_activity.toggled.connect(self._on_settings_activity_toggle)
@@ -2990,7 +3077,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_env_check.clicked.connect(self._run_env_check)
         self.btn_update_check.clicked.connect(lambda: self._check_for_updates(dry_run=True))
         self.btn_update_pull.clicked.connect(lambda: self._check_for_updates(dry_run=False))
-        self.btn_quick_update.clicked.connect(lambda: self._check_for_updates(dry_run=False))
         self.btn_maintenance_cleanup.clicked.connect(lambda: self._run_maintenance_cleanup(manual=True))
         self.btn_maintenance_sizes.clicked.connect(self._report_dir_sizes)
         self.cmb_ui_activity_density.currentIndexChanged.connect(self._on_activity_density_changed)
@@ -3084,6 +3170,9 @@ class MainWindow(QtWidgets.QMainWindow):
             ("btn_open_images_dir", "ed_images_dir"),
             ("btn_open_history_path", "ed_history_path"),
             ("btn_open_titles_path", "ed_titles_path"),
+            ("btn_youtube_src_open", "ed_youtube_src"),
+            ("btn_tiktok_src_open", "ed_tiktok_src"),
+            ("btn_genai_output_open", "ed_genai_output_dir"),
         ]:
             button = getattr(self, button_attr, None)
             line = getattr(self, line_attr, None)
@@ -3909,6 +3998,7 @@ class MainWindow(QtWidgets.QMainWindow):
     # ----- Scenario -----
     def _run_scenario(self):
         steps = []
+        if self.cb_do_images.isChecked(): steps.append("images")
         if self.cb_do_autogen.isChecked(): steps.append("autogen")
         if self.cb_do_download.isChecked(): steps.append("download")
         if self.cb_do_blur.isChecked(): steps.append("blur")
@@ -3923,6 +4013,7 @@ class MainWindow(QtWidgets.QMainWindow):
         append_history(self.cfg, {"event":"scenario_start","steps":steps})
 
         label_map = {
+            "images": "Images",
             "autogen": "Autogen",
             "download": "Download",
             "blur": "Blur",
@@ -3936,6 +4027,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
         def flow():
             ok_all = True
+            if "images" in steps:
+                ok = self._run_autogen_sync(force_images=True, images_only=True); ok_all = ok_all and ok
+                if not ok:
+                    self._post_status("Генерация картинок завершена с ошибкой", state="error")
+                    return
             if "autogen" in steps:
                 ok = self._run_autogen_sync(); ok_all = ok_all and ok
                 if not ok:
