@@ -39,6 +39,7 @@ WORKERS_DIR = PROJECT_ROOT / "workers"
 DL_DIR = PROJECT_ROOT / "downloads"
 BLUR_DIR = PROJECT_ROOT / "blurred"
 MERG_DIR = PROJECT_ROOT / "merged"
+IMAGES_DIR = PROJECT_ROOT / "generated_images"
 HIST_FILE = PROJECT_ROOT / "history.jsonl"   # JSONL по-умолчанию (с обратн. совместимостью)
 TITLES_FILE = PROJECT_ROOT / "titles.txt"
 
@@ -179,6 +180,7 @@ def load_cfg() -> dict:
     autogen.setdefault("failed_log", str(WORKERS_DIR / "autogen" / "failed.log"))
     autogen.setdefault("instances", [])
     autogen.setdefault("active_prompts_profile", PROMPTS_DEFAULT_KEY)
+    autogen.setdefault("image_prompts_file", str(WORKERS_DIR / "autogen" / "image_prompts.txt"))
 
     genai = data.setdefault("google_genai", {})
     genai.setdefault("enabled", False)
@@ -187,7 +189,7 @@ def load_cfg() -> dict:
     genai.setdefault("aspect_ratio", "1:1")
     genai.setdefault("image_size", "1K")
     genai.setdefault("number_of_images", 1)
-    genai.setdefault("output_dir", str(WORKERS_DIR / "autogen" / "generated"))
+    genai.setdefault("output_dir", str(IMAGES_DIR))
     genai.setdefault("rate_limit_per_minute", 0)
     genai.setdefault("max_retries", 3)
     genai.setdefault("person_generation", "ALLOW_ALL")
@@ -449,10 +451,16 @@ def ensure_dirs(cfg: dict):
     cfg["merge_src_dir"] = str(merge_path)
 
     genai_cfg = cfg.get("google_genai", {}) or {}
-    output_raw = genai_cfg.get("output_dir") or (WORKERS_DIR / "autogen" / "generated")
+    output_raw = genai_cfg.get("output_dir") or IMAGES_DIR
     output_path = _project_path(output_raw)
     output_path.mkdir(parents=True, exist_ok=True)
     genai_cfg["output_dir"] = str(output_path)
+
+    auto_cfg = cfg.get("autogen", {}) or {}
+    img_prompts_raw = auto_cfg.get("image_prompts_file") or (WORKERS_DIR / "autogen" / "image_prompts.txt")
+    img_prompts_path = _project_path(img_prompts_raw)
+    img_prompts_path.parent.mkdir(parents=True, exist_ok=True)
+    auto_cfg["image_prompts_file"] = str(img_prompts_path)
 
     yt = cfg.get("youtube", {}) or {}
     archive = yt.get("archive_dir")
@@ -831,6 +839,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._reload_history()
         self._auto_scan_profiles_at_start()
         self._refresh_prompt_profiles_ui()
+        self._load_image_prompts()
         self._refresh_youtube_ui()
         self._refresh_tiktok_ui()
         self._load_autogen_cfg_ui()
@@ -1253,7 +1262,11 @@ class MainWindow(QtWidgets.QMainWindow):
         grp_run = QtWidgets.QGroupBox("Запуск")
         hb2 = QtWidgets.QHBoxLayout(grp_run)
         self.btn_run_scenario = QtWidgets.QPushButton("Старт сценария (галочки сверху)")
+        self.btn_run_autogen_images = QtWidgets.QPushButton("Генерация картинок (Google)")
+        self.btn_open_genai_output = QtWidgets.QPushButton("Открыть папку картинок")
         hb2.addWidget(self.btn_run_scenario)
+        hb2.addWidget(self.btn_run_autogen_images)
+        hb2.addWidget(self.btn_open_genai_output)
         hb2.addStretch(1)
 
         grp_stat = QtWidgets.QGroupBox("Статистика / статус")
@@ -1813,14 +1826,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_load_prompts = QtWidgets.QPushButton("Обновить файл")
         self.btn_save_prompts = QtWidgets.QPushButton("Сохранить изменения")
         self.btn_save_and_run_autogen = QtWidgets.QPushButton("Сохранить и запустить автоген (видео)")
-        self.btn_save_and_run_autogen_images = QtWidgets.QPushButton(
-            "Сохранить и запустить автоген (картинки)"
-        )
         editor_bar.addWidget(self.btn_load_prompts)
         editor_bar.addWidget(self.btn_save_prompts)
         editor_bar.addStretch(1)
         editor_bar.addWidget(self.btn_save_and_run_autogen)
-        editor_bar.addWidget(self.btn_save_and_run_autogen_images)
         editor_layout.addLayout(editor_bar)
 
         self.lbl_prompts_path = QtWidgets.QLabel("—")
@@ -1870,6 +1879,49 @@ class MainWindow(QtWidgets.QMainWindow):
         prompts_stack.setStretchFactor(1, 2)
         QtCore.QTimer.singleShot(0, lambda: prompts_stack.setSizes([360, 220]))
         self.tabs.addTab(self.tab_prompts, "Промпты")
+
+        # TAB: Промпты картинок
+        self.tab_image_prompts = QtWidgets.QWidget()
+        ip_layout = QtWidgets.QVBoxLayout(self.tab_image_prompts)
+        ip_layout.setContentsMargins(12, 12, 12, 12)
+        ip_layout.setSpacing(12)
+
+        ip_intro = QtWidgets.QLabel(
+            "Задай отдельные промпты для генерации изображений. Строки применяются последовательно к основным промптам."
+        )
+        ip_intro.setWordWrap(True)
+        ip_intro.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
+        ip_layout.addWidget(ip_intro)
+
+        ip_bar = QtWidgets.QHBoxLayout()
+        self.btn_load_image_prompts = QtWidgets.QPushButton("Обновить файл")
+        self.btn_save_image_prompts = QtWidgets.QPushButton("Сохранить изменения")
+        ip_bar.addWidget(self.btn_load_image_prompts)
+        ip_bar.addWidget(self.btn_save_image_prompts)
+        ip_bar.addStretch(1)
+        ip_layout.addLayout(ip_bar)
+
+        self.lbl_image_prompts_path = QtWidgets.QLabel("—")
+        self.lbl_image_prompts_path.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
+        self.lbl_image_prompts_path.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        ip_layout.addWidget(self.lbl_image_prompts_path)
+
+        self.ed_image_prompts = QtWidgets.QPlainTextEdit()
+        self.ed_image_prompts.setPlaceholderText(
+            "Одна строка = один image prompt. Можно использовать JSON, чтобы задать поля `prompt`, `prompts` или `count`."
+        )
+        self.ed_image_prompts.setLineWrapMode(QtWidgets.QPlainTextEdit.LineWrapMode.NoWrap)
+        self.ed_image_prompts.setFont(mono)
+        ip_layout.addWidget(self.ed_image_prompts, 1)
+
+        ip_hint = QtWidgets.QLabel(
+            "Пустые строки и комментарии (#) пропускаются. JSON-строки позволяют указать несколько image-промптов и количество кадров."
+        )
+        ip_hint.setWordWrap(True)
+        ip_hint.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
+        ip_layout.addWidget(ip_hint)
+
+        self.tabs.addTab(self.tab_image_prompts, "Промпты картинок")
 
         # TAB: Названия
         self.tab_titles = QtWidgets.QWidget(); pt = QtWidgets.QVBoxLayout(self.tab_titles)
@@ -2299,10 +2351,20 @@ class MainWindow(QtWidgets.QMainWindow):
         fa.addRow(self.btn_save_autogen_cfg)
         auto_layout.addWidget(grp_auto)
 
+        auto_layout.addStretch(1)
+        self.settings_tabs.addTab(page_auto, "Автоген")
+
+        # --- Google AI Studio ---
+        page_genai = QtWidgets.QWidget()
+        genai_layout = QtWidgets.QVBoxLayout(page_genai)
+        genai_layout.setContentsMargins(12, 12, 12, 12)
+        genai_layout.setSpacing(12)
+
         genai_cfg = self.cfg.get("google_genai", {}) or {}
-        grp_genai = QtWidgets.QGroupBox("Генерация изображений (Google AI Studio)")
+        grp_genai = QtWidgets.QGroupBox("Google AI Studio — генерация изображений")
         fg = QtWidgets.QFormLayout(grp_genai)
-        self.cb_genai_enabled = QtWidgets.QCheckBox("Включить автоматическую генерацию изображений перед отправкой промпта")
+
+        self.cb_genai_enabled = QtWidgets.QCheckBox("Включить генерацию изображений перед отправкой промпта")
         self.cb_genai_enabled.setChecked(bool(genai_cfg.get("enabled", False)))
         fg.addRow(self.cb_genai_enabled)
 
@@ -2350,7 +2412,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sb_genai_retries.setValue(int(genai_cfg.get("max_retries", 3) or 0))
         fg.addRow("Повторов при ошибке:", self.sb_genai_retries)
 
-        output_dir = genai_cfg.get("output_dir", str(WORKERS_DIR / "autogen" / "generated"))
+        output_dir = genai_cfg.get("output_dir", str(IMAGES_DIR))
         self.ed_genai_output_dir = QtWidgets.QLineEdit(str(output_dir))
         self.btn_genai_output_browse = QtWidgets.QPushButton("…")
         row_widget = QtWidgets.QWidget()
@@ -2361,14 +2423,14 @@ class MainWindow(QtWidgets.QMainWindow):
         row_layout.addWidget(self.btn_genai_output_browse, 0)
         fg.addRow("Папка вывода:", row_widget)
 
-        hint = QtWidgets.QLabel("Настройки применяются при запуске автогена. Папка вывода будет создана автоматически.")
+        hint = QtWidgets.QLabel("Папка вывода создаётся автоматически. Настройки применяются при запуске автогена.")
         hint.setWordWrap(True)
         hint.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
         fg.addRow(hint)
 
-        auto_layout.addWidget(grp_genai)
-        auto_layout.addStretch(1)
-        self.settings_tabs.addTab(page_auto, "Автоген")
+        genai_layout.addWidget(grp_genai)
+        genai_layout.addStretch(1)
+        self.settings_tabs.addTab(page_genai, "Генерация картинок")
 
         page_docs = QtWidgets.QWidget()
         docs_layout = QtWidgets.QVBoxLayout(page_docs)
@@ -2397,7 +2459,7 @@ class MainWindow(QtWidgets.QMainWindow):
             (getattr(self, "ed_tiktok_src", None), self.cfg.get("tiktok", {}).get("upload_src_dir", self.cfg.get("merged_dir", str(MERG_DIR))))
         ]
         if hasattr(self, "ed_genai_output_dir"):
-            mapping.append((self.ed_genai_output_dir, self.cfg.get("google_genai", {}).get("output_dir", str(WORKERS_DIR / "autogen" / "generated"))))
+            mapping.append((self.ed_genai_output_dir, self.cfg.get("google_genai", {}).get("output_dir", str(IMAGES_DIR))))
         for line, value in mapping:
             if not isinstance(line, QtWidgets.QLineEdit):
                 continue
@@ -2733,7 +2795,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_load_prompts.clicked.connect(self._load_prompts)
         self.btn_save_prompts.clicked.connect(self._save_prompts)
         self.btn_save_and_run_autogen.clicked.connect(self._save_and_run_autogen)
-        self.btn_save_and_run_autogen_images.clicked.connect(self._save_and_run_autogen_images)
+        self.btn_load_image_prompts.clicked.connect(self._load_image_prompts)
+        self.btn_save_image_prompts.clicked.connect(self._save_image_prompts)
         self.btn_used_refresh.clicked.connect(self._reload_used_prompts)
         self.btn_used_clear.clicked.connect(self._clear_used_prompts)
         self.lst_prompt_profiles.itemSelectionChanged.connect(self._on_prompt_profile_selection)
@@ -2743,6 +2806,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.btn_apply_dl.clicked.connect(self._apply_dl_limit)
         self.btn_run_scenario.clicked.connect(self._run_scenario)
+        self.btn_run_autogen_images.clicked.connect(self._save_and_run_autogen_images)
+        self.btn_open_genai_output.clicked.connect(self._open_genai_output_dir)
 
         self.btn_reload_history.clicked.connect(self._reload_history)
         self.btn_save_settings.clicked.connect(self._save_settings_clicked)
@@ -3432,6 +3497,11 @@ class MainWindow(QtWidgets.QMainWindow):
             return self._default_profile_prompts(None)
         return self._default_profile_prompts(active)
 
+    def _image_prompts_path(self) -> Path:
+        auto_cfg = self.cfg.get("autogen", {}) or {}
+        raw = auto_cfg.get("image_prompts_file") or str(WORKERS_DIR / "autogen" / "image_prompts.txt")
+        return _project_path(raw)
+
     def _load_prompts(self):
         path = self._prompts_path()
         self._ensure_path_exists(str(path))
@@ -3448,6 +3518,32 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self, "lbl_prompts_path"):
             self.lbl_prompts_path.setText(str(path))
         self._post_status("Промпты сохранены", state="ok")
+
+    def _load_image_prompts(self):
+        path = self._image_prompts_path()
+        self._ensure_path_exists(path)
+        txt = path.read_text(encoding="utf-8") if path.exists() else ""
+        if hasattr(self, "ed_image_prompts"):
+            self.ed_image_prompts.setPlainText(txt)
+        if hasattr(self, "lbl_image_prompts_path"):
+            self.lbl_image_prompts_path.setText(str(path))
+        self._post_status(f"Image-промпты загружены ({path})", state="idle")
+
+    def _save_image_prompts(self):
+        path = self._image_prompts_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if hasattr(self, "ed_image_prompts"):
+            path.write_text(self.ed_image_prompts.toPlainText(), encoding="utf-8")
+        if hasattr(self, "lbl_image_prompts_path"):
+            self.lbl_image_prompts_path.setText(str(path))
+        self._post_status("Image-промпты сохранены", state="ok")
+
+    def _open_genai_output_dir(self):
+        genai_cfg = self.cfg.get("google_genai", {}) or {}
+        output_raw = genai_cfg.get("output_dir") or IMAGES_DIR
+        path = self._ensure_path_exists(output_raw)
+        if path:
+            open_in_finder(path)
 
     def _autogen_env(self, force_images: Optional[bool] = None) -> dict:
         env = os.environ.copy()
@@ -3471,9 +3567,10 @@ class MainWindow(QtWidgets.QMainWindow):
         env["GENAI_NUMBER_OF_IMAGES"] = str(int(genai_cfg.get("number_of_images", 1) or 1))
         env["GENAI_RATE_LIMIT"] = str(int(genai_cfg.get("rate_limit_per_minute", 0) or 0))
         env["GENAI_MAX_RETRIES"] = str(int(genai_cfg.get("max_retries", 3) or 0))
-        env["GENAI_OUTPUT_DIR"] = str(_project_path(genai_cfg.get("output_dir", str(WORKERS_DIR / "autogen" / "generated"))))
+        env["GENAI_OUTPUT_DIR"] = str(_project_path(genai_cfg.get("output_dir", str(IMAGES_DIR))))
         env["GENAI_BASE_DIR"] = str(_project_path(self.cfg.get("project_root", PROJECT_ROOT)))
         env["GENAI_PROMPTS_DIR"] = str(self._prompts_path().parent.resolve())
+        env["GENAI_IMAGE_PROMPTS_FILE"] = str(self._image_prompts_path())
         return env
 
     def _save_and_run_autogen(self, force_images: Optional[bool] = None):
@@ -3505,6 +3602,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.runner_autogen.run([sys.executable, entry], cwd=workdir, env=env)
 
     def _save_and_run_autogen_images(self):
+        self._save_image_prompts()
         self._save_and_run_autogen(force_images=True)
 
     def _titles_path(self)->Path:
@@ -4331,7 +4429,7 @@ class MainWindow(QtWidgets.QMainWindow):
         genai_cfg["number_of_images"] = int(self.sb_genai_images.value())
         genai_cfg["rate_limit_per_minute"] = int(self.sb_genai_rpm.value())
         genai_cfg["max_retries"] = int(self.sb_genai_retries.value())
-        genai_cfg["output_dir"] = self.ed_genai_output_dir.text().strip() or str(WORKERS_DIR / "autogen" / "generated")
+        genai_cfg["output_dir"] = self.ed_genai_output_dir.text().strip() or str(IMAGES_DIR)
 
         maint_cfg = self.cfg.setdefault("maintenance", {})
         maint_cfg["auto_cleanup_on_start"] = bool(self.cb_maintenance_auto.isChecked())
@@ -4661,6 +4759,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self, "lbl_prompts_path"):
             path = self._prompts_path()
             self.lbl_prompts_path.setText(str(path))
+        if hasattr(self, "lbl_image_prompts_path"):
+            img_path = self._image_prompts_path()
+            self.lbl_image_prompts_path.setText(str(img_path))
 
     def _set_active_prompt_profile(self, key: str, persist: bool = True, reload: bool = True):
         normalized = key or PROMPTS_DEFAULT_KEY

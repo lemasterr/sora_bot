@@ -36,6 +36,8 @@ INSTANCE_NAME = os.getenv("SORA_INSTANCE_NAME", "default")
 PROMPTS_DIR = PROMPTS_FILE.parent.resolve()
 BASE_MEDIA_DIR = Path(os.getenv("GENAI_BASE_DIR", str(PROJECT_DIR.parent))).expanduser()
 PROMPTS_BASE_DIR = Path(os.getenv("GENAI_PROMPTS_DIR", str(PROMPTS_DIR))).expanduser()
+_IMAGE_PROMPTS_ENV = os.getenv("GENAI_IMAGE_PROMPTS_FILE", "").strip()
+IMAGE_PROMPTS_FILE = Path(_IMAGE_PROMPTS_ENV).expanduser() if _IMAGE_PROMPTS_ENV else Path()
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -79,6 +81,12 @@ class PromptEntry:
 
 
 @dataclass
+class ImagePromptSpec:
+    prompts: List[str]
+    count: Optional[int] = None
+
+
+@dataclass
 class GenAiConfig:
     enabled: bool
     api_key: str
@@ -104,7 +112,7 @@ class GenAiConfig:
         number = _to_int(os.getenv("GENAI_NUMBER_OF_IMAGES"), 1)
         rate = max(_to_int(os.getenv("GENAI_RATE_LIMIT"), 0), 0)
         retries = max(_to_int(os.getenv("GENAI_MAX_RETRIES"), 3), 0)
-        output_raw = os.getenv("GENAI_OUTPUT_DIR", str(PROJECT_DIR / "generated"))
+        output_raw = os.getenv("GENAI_OUTPUT_DIR", str(PROJECT_DIR.parent / "generated_images"))
         output_dir = Path(output_raw).expanduser()
         if not output_dir.is_absolute():
             output_dir = (BASE_MEDIA_DIR / output_dir).resolve()
@@ -298,6 +306,87 @@ def load_prompts() -> List[PromptEntry]:
             entries.append(entry)
     return entries
 
+
+def _parse_image_prompt_spec(raw: str) -> ImagePromptSpec:
+    if raw is None:
+        return ImagePromptSpec(prompts=[])
+    text = raw.strip()
+    if not raw:
+        return ImagePromptSpec(prompts=[])
+    if not text or text.startswith("#"):
+        return ImagePromptSpec(prompts=[])
+    if text.startswith("{"):
+        try:
+            data = json.loads(text)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[WARN] Не удалось разобрать JSON image prompt: {exc}")
+            return ImagePromptSpec(prompts=[])
+        prompts: List[str] = []
+        for key in ("prompts", "prompt", "image_prompts", "image_prompt"):
+            value = data.get(key)
+            if isinstance(value, str) and value.strip():
+                prompts = [value.strip()]
+                break
+            if isinstance(value, list):
+                prompts = [str(item).strip() for item in value if str(item).strip()]
+                if prompts:
+                    break
+        count: Optional[int] = None
+        for key in ("count", "images", "number_of_images"):
+            value = data.get(key)
+            try:
+                ivalue = int(value)
+            except (TypeError, ValueError):
+                continue
+            if ivalue > 0:
+                count = ivalue
+                break
+        return ImagePromptSpec(prompts=prompts, count=count)
+
+    prompts = [part.strip() for part in raw.split("||") if part.strip()]
+    return ImagePromptSpec(prompts=prompts)
+
+
+def load_image_prompt_specs() -> List[ImagePromptSpec]:
+    if not _IMAGE_PROMPTS_ENV:
+        return []
+    if not IMAGE_PROMPTS_FILE.exists():
+        return []
+    try:
+        lines = IMAGE_PROMPTS_FILE.read_text(encoding="utf-8").splitlines()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[WARN] Не удалось прочитать {IMAGE_PROMPTS_FILE}: {exc}")
+        return []
+    specs = [_parse_image_prompt_spec(line) for line in lines]
+    print(f"[INFO] Загружено {len(specs)} image-промптов из {IMAGE_PROMPTS_FILE}")
+    return specs
+
+
+def apply_image_prompt_specs(entries: List[PromptEntry], specs: List[ImagePromptSpec]) -> None:
+    if not entries or not specs:
+        return
+    applied = 0
+    idx = 0
+    total_specs = len(specs)
+    for entry in entries:
+        if idx >= total_specs:
+            break
+        spec = specs[idx]
+        idx += 1
+        if entry.image_prompts:
+            continue
+        if not spec.prompts:
+            continue
+        entry.image_prompts = list(spec.prompts)
+        if spec.count and not entry.images_per_prompt:
+            entry.images_per_prompt = spec.count
+        applied += 1
+    if applied:
+        print(f"[INFO] Image-промпты сопоставлены: {applied} из {total_specs}")
+    elif total_specs:
+        print("[INFO] Файл image-промптов найден, но строки пустые — ничего не применяем")
+    if idx < total_specs:
+        print(f"[INFO] Осталось неиспользованных image-промптов: {total_specs - idx}")
 
 def load_submitted() -> Set[str]:
     if not SUBMITTED_LOG.exists():
@@ -940,6 +1029,9 @@ def main():
     cfg = load_yaml(CONFIG_FILE)
     sels = load_yaml(SELECTORS_FILE)
     prompts = load_prompts()
+    specs = load_image_prompt_specs()
+    if specs:
+        apply_image_prompt_specs(prompts, specs)
     submitted = load_submitted()
     if not prompts:
         print("[x] Нет промптов — выходим")
