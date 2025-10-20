@@ -44,6 +44,76 @@ TITLES_FILE = PROJECT_ROOT / "titles.txt"
 
 
 # ---------- утилиты ----------
+
+
+def _coerce_int(value) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        clean = value.strip()
+        if not clean:
+            return None
+        value = clean
+    try:
+        return int(round(float(value)))
+    except (TypeError, ValueError):  # noqa: PERF203
+        return None
+
+
+def _pick_first(zone: Dict, keys: Tuple[str, ...]) -> Optional[int]:
+    for key in keys:
+        if key in zone:
+            val = _coerce_int(zone.get(key))
+            if val is not None:
+                return val
+    return None
+
+
+def normalize_zone(zone: object) -> Optional[Dict[str, int]]:
+    if not isinstance(zone, dict):
+        return None
+
+    enabled = zone.get("enabled")
+    if isinstance(enabled, str):
+        if enabled.lower() in {"false", "0", "off", "no"}:
+            return None
+    elif enabled is False:
+        return None
+
+    x = _pick_first(zone, ("x", "left", "start_x", "sx"))
+    y = _pick_first(zone, ("y", "top", "start_y", "sy"))
+    w = _pick_first(zone, ("w", "width"))
+    h = _pick_first(zone, ("h", "height"))
+    right = _pick_first(zone, ("right", "x2", "end_x"))
+    bottom = _pick_first(zone, ("bottom", "y2", "end_y"))
+
+    if w is None and right is not None and x is not None:
+        w = right - x
+    if h is None and bottom is not None and y is not None:
+        h = bottom - y
+
+    x = max(0, x or 0)
+    y = max(0, y or 0)
+    w = w if w is not None else 0
+    h = h if h is not None else 0
+
+    if w <= 0 or h <= 0:
+        return None
+
+    return {"x": int(x), "y": int(y), "w": int(w), "h": int(h)}
+
+
+def normalize_zone_list(zones: Optional[List[Dict]]) -> List[Dict[str, int]]:
+    normalized: List[Dict[str, int]] = []
+    if not zones:
+        return normalized
+    for zone in zones:
+        norm = normalize_zone(zone)
+        if norm:
+            normalized.append(norm)
+    return normalized
+
+
 def load_cfg() -> dict:
     if not CFG_PATH.exists():
         raise FileNotFoundError(f"Создай конфиг {CFG_PATH}")
@@ -102,6 +172,13 @@ def load_cfg() -> dict:
             {"x": 40,  "y": 580, "w": 175, "h": 65},
         ]
     })
+    sanitized_presets: Dict[str, Dict[str, List[Dict[str, int]]]] = {}
+    for name, body in list(presets.items()):
+        raw = body.get("zones") if isinstance(body, dict) else None
+        norm = normalize_zone_list(raw if isinstance(raw, list) else None)
+        display = norm or [{"x": 0, "y": 0, "w": 0, "h": 0}]
+        sanitized_presets[name] = {"zones": [dict(zone) for zone in display]}
+    ff["presets"] = sanitized_presets
     ff.setdefault("active_preset", "portrait_9x16")
 
     # --- merge ---
@@ -2310,20 +2387,22 @@ class MainWindow(QtWidgets.QMainWindow):
                 }
             }
 
+        canonical: Dict[str, List[Dict[str, int]]] = {}
+        changed = False
         for name, body in presets.items():
-            zones = [
-                {
-                    "x": int(zone.get("x", 0)),
-                    "y": int(zone.get("y", 0)),
-                    "w": int(zone.get("w", 0)),
-                    "h": int(zone.get("h", 0)),
-                }
-                for zone in (body.get("zones") or [])
-            ]
-            if not zones:
-                zones = [{"x": 0, "y": 0, "w": 0, "h": 0}]
-            self._preset_cache[name] = zones
+            raw_list = body.get("zones") if isinstance(body, dict) else None
+            normalized = normalize_zone_list(raw_list if isinstance(raw_list, list) else None)
+            if not normalized:
+                normalized = [{"x": 0, "y": 0, "w": 0, "h": 0}]
+            canonical[name] = [dict(zone) for zone in normalized]
+            if raw_list != canonical[name]:
+                changed = True
+            self._preset_cache[name] = [dict(zone) for zone in normalized]
             self._create_preset_tab(name)
+
+        if changed:
+            ff["presets"] = {name: {"zones": zones} for name, zones in canonical.items()}
+            save_cfg(self.cfg)
 
         self.cmb_active_preset.blockSignals(True)
         self.cmb_active_preset.clear()
@@ -2826,6 +2905,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "running": ("#facc15", "#352b0b"),
             "success": ("#34d399", "#0f2f24"),
             "error": ("#f87171", "#3a0d15"),
+            "warn": ("#facc15", "#352b0b"),
         }
         fg, bg = palette.get(kind, palette["info"])
         brush_fg = QtGui.QBrush(QtGui.QColor(fg))
@@ -3413,26 +3493,18 @@ class MainWindow(QtWidgets.QMainWindow):
 
         preset_lookup: Dict[str, List[Dict[str, int]]] = {}
         if getattr(self, "_preset_cache", None):
-            preset_lookup = {name: [dict(zone) for zone in zones] for name, zones in self._preset_cache.items()}
+            for name, zones in self._preset_cache.items():
+                normalized = normalize_zone_list(zones if isinstance(zones, list) else None)
+                preset_lookup[name] = normalized
         else:
             stored = ff_cfg.get("presets") or {}
             for name, body in stored.items():
-                entries = [
-                    {
-                        "x": int(zone.get("x", 0)),
-                        "y": int(zone.get("y", 0)),
-                        "w": int(zone.get("w", 0)),
-                        "h": int(zone.get("h", 0)),
-                    }
-                    for zone in (body.get("zones") or [])
-                ]
-                if not entries:
-                    entries = [{"x": 0, "y": 0, "w": 0, "h": 0}]
-                preset_lookup[name] = entries
+                raw_list = body.get("zones") if isinstance(body, dict) else None
+                preset_lookup[name] = normalize_zone_list(raw_list if isinstance(raw_list, list) else None)
 
         if not preset_lookup:
             preset_lookup = {
-                "default": [{"x": 0, "y": 0, "w": 0, "h": 0}],
+                "default": [{"x": 40, "y": 60, "w": 160, "h": 90}],
             }
 
         active_ui = ""
