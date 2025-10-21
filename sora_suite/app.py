@@ -4527,6 +4527,37 @@ class MainWindow(QtWidgets.QMainWindow):
         lock = Lock()
         failures: List[str] = []
 
+        def _clip_zones_to_frame(
+            zone_list: List[Dict[str, int]],
+            frame_size: Optional[Tuple[int, int]],
+        ) -> List[Dict[str, int]]:
+            if not frame_size:
+                return [dict(z) for z in zone_list]
+
+            try:
+                frame_w = max(1, int(frame_size[0]))
+                frame_h = max(1, int(frame_size[1]))
+            except Exception:
+                return [dict(z) for z in zone_list]
+
+            clipped: List[Dict[str, int]] = []
+            for zone in zone_list:
+                try:
+                    x = int(zone.get("x", 0))
+                    y = int(zone.get("y", 0))
+                    w = int(zone.get("w", 0))
+                    h = int(zone.get("h", 0))
+                except Exception:
+                    continue
+
+                x = max(0, min(x, frame_w - 1))
+                y = max(0, min(y, frame_h - 1))
+                w = max(1, min(max(1, w), frame_w - x))
+                h = max(1, min(max(1, h), frame_h - y))
+                clipped.append({"x": x, "y": y, "w": w, "h": h})
+
+            return clipped
+
         def _project_detection_onto_zones(
             base: List[Dict[str, int]],
             detected: Tuple[int, int, int, int],
@@ -4571,16 +4602,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 new_x = int(round(det_x + offset_x * scale_x))
                 new_y = int(round(det_y + offset_y * scale_y))
 
-                if frame_w is not None and frame_h is not None:
-                    new_x = max(0, min(new_x, frame_w - 1))
-                    new_y = max(0, min(new_y, frame_h - 1))
-                    new_w = max(1, min(new_w, frame_w - new_x))
-                    new_h = max(1, min(new_h, frame_h - new_y))
-                else:
-                    new_x = max(0, new_x)
-                    new_y = max(0, new_y)
-
                 projected.append({"x": new_x, "y": new_y, "w": new_w, "h": new_h})
+
+            if frame_w is not None and frame_h is not None:
+                return _clip_zones_to_frame(projected, (frame_w, frame_h))
 
             return projected
 
@@ -4593,6 +4618,7 @@ class MainWindow(QtWidgets.QMainWindow):
             fallback_note: Optional[str] = None
             frame_size: Optional[Tuple[int, int]] = None
             detection_info_msg: Optional[str] = None
+            clip_info_msg: Optional[str] = None
 
             if auto_runtime.get("enabled"):
                 detect_kwargs = {
@@ -4634,6 +4660,9 @@ class MainWindow(QtWidgets.QMainWindow):
                                 frame_size = (int(fs[0]), int(fs[1]))
                             except Exception:
                                 frame_size = None
+                        best_bbox = result.get("best_bbox")
+                        if not bbox and best_bbox:
+                            bbox = best_bbox
                     if bbox:
                         x, y, w, h = bbox
                         if w > 0 and h > 0:
@@ -4658,10 +4687,19 @@ class MainWindow(QtWidgets.QMainWindow):
                         else:
                             detection_error_text = "некорректная зона от детектора"
                             fallback_note = "детектор вернул пустую зону"
-                    else:
+                    if not bbox and detection_score is not None:
                         fallback_note = f"совпадение ниже порога ({auto_runtime['threshold']:.2f})"
-                        if detection_score is not None:
-                            fallback_note += f", score={detection_score:.2f}"
+                        fallback_note += f", score={detection_score:.2f}"
+                    elif not bbox:
+                        fallback_note = f"совпадение ниже порога ({auto_runtime['threshold']:.2f})"
+
+            if frame_size and active_zones:
+                clipped = _clip_zones_to_frame(active_zones, frame_size)
+                if clipped and clipped != active_zones:
+                    active_zones = clipped
+                    clip_info_msg = (
+                        f"[BLUR] {v.name}: зоны скорректированы под кадр {frame_size[0]}x{frame_size[1]}"
+                    )
 
             filter_parts = [
                 f"delogo=x={z['x']}:y={z['y']}:w={z['w']}:h={z['h']}:show=0" for z in active_zones
@@ -4752,6 +4790,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.sig_log.emit(f"[BLUR] {v.name}: аудио сконвертировано в AAC для совместимости")
                 if detection_info_msg:
                     self.sig_log.emit(detection_info_msg)
+                if clip_info_msg:
+                    self.sig_log.emit(clip_info_msg)
                 if auto_runtime.get("enabled"):
                     if detection_error_text:
                         auto_stats["errors"].append({"name": v.name, "error": detection_error_text})

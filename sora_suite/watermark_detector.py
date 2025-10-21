@@ -138,7 +138,8 @@ def detect_watermark(
     finally:
         cap.release()
 
-    if best_loc is not None and best_frame_size and best_score >= threshold:
+    best_bbox: Optional[Tuple[int, int, int, int]] = None
+    if best_loc is not None and best_frame_size:
         frame_w, frame_h = best_frame_size
         tmpl_h, tmpl_w = best_template_shape
         if best_scale != 1.0:
@@ -157,20 +158,24 @@ def detect_watermark(
         y = max(0, min(y, frame_h - 1))
         w = max(1, min(w, frame_w - x))
         h = max(1, min(h, frame_h - y))
-        bbox = (x, y, w, h)
+        best_bbox = (x, y, w, h)
+
+    if best_bbox and best_score >= threshold:
         if return_details:
             return {
-                "bbox": bbox,
+                "bbox": best_bbox,
+                "best_bbox": best_bbox,
                 "score": best_score,
                 "frame_size": best_frame_size,
             }
         if return_score:
-            return (bbox, best_score)
-        return bbox
+            return (best_bbox, best_score)
+        return best_bbox
 
     if return_details:
         return {
             "bbox": None,
+            "best_bbox": best_bbox,
             "score": best_score if best_score >= 0 else None,
             "frame_size": best_frame_size,
         }
