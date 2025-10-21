@@ -4619,8 +4619,10 @@ class MainWindow(QtWidgets.QMainWindow):
             frame_size: Optional[Tuple[int, int]] = None
             detection_info_msg: Optional[str] = None
             clip_info_msg: Optional[str] = None
+            detection_applied = False
 
             if auto_runtime.get("enabled"):
+                threshold_value = float(auto_runtime.get("threshold", 0.75) or 0.75)
                 detect_kwargs = {
                     "threshold": auto_runtime.get("threshold", 0.75),
                     "frames": auto_runtime.get("frames", 5),
@@ -4663,7 +4665,10 @@ class MainWindow(QtWidgets.QMainWindow):
                         best_bbox = result.get("best_bbox")
                         if not bbox and best_bbox:
                             bbox = best_bbox
-                    if bbox:
+                    score_allows_detection = True
+                    if detection_score is not None and detection_score < threshold_value:
+                        score_allows_detection = False
+                    if bbox and score_allows_detection:
                         x, y, w, h = bbox
                         if w > 0 and h > 0:
                             try:
@@ -4678,6 +4683,7 @@ class MainWindow(QtWidgets.QMainWindow):
                             else:
                                 if projected:
                                     active_zones = projected
+                                    detection_applied = True
                                     detection_info_msg = f"[BLUR] {v.name}: автодетект → {len(projected)} зон"
                                     if detection_score is not None:
                                         detection_info_msg += f" (score={detection_score:.2f})"
@@ -4687,13 +4693,18 @@ class MainWindow(QtWidgets.QMainWindow):
                         else:
                             detection_error_text = "некорректная зона от детектора"
                             fallback_note = "детектор вернул пустую зону"
-                    if not bbox and detection_score is not None:
+                    if not score_allows_detection and detection_score is not None:
+                        fallback_note = (
+                            f"совпадение ниже порога ({threshold_value:.2f}),"
+                            f" score={detection_score:.2f}"
+                        )
+                    elif not bbox and detection_score is not None:
                         fallback_note = f"совпадение ниже порога ({auto_runtime['threshold']:.2f})"
                         fallback_note += f", score={detection_score:.2f}"
                     elif not bbox:
                         fallback_note = f"совпадение ниже порога ({auto_runtime['threshold']:.2f})"
 
-            if frame_size and active_zones:
+            if detection_applied and frame_size and active_zones:
                 clipped = _clip_zones_to_frame(active_zones, frame_size)
                 if clipped and clipped != active_zones:
                     active_zones = clipped
