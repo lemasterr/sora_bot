@@ -4423,7 +4423,10 @@ class MainWindow(QtWidgets.QMainWindow):
         auto_stats: Dict[str, List[dict]] = {"fallbacks": [], "errors": []}
         if bool(auto_cfg.get("enabled")):
             try:
-                from watermark_detector import detect_watermark  # type: ignore[import]
+                from watermark_detector import (  # type: ignore[import]
+                    detect_watermark,
+                    prepare_template,
+                )
             except Exception as exc:  # noqa: BLE001
                 auto_runtime["reason"] = f"не удалось импортировать детектор: {exc}"
             else:
@@ -4440,9 +4443,31 @@ class MainWindow(QtWidgets.QMainWindow):
                     except Exception as exc:  # noqa: BLE001
                         auto_runtime["reason"] = f"opencv недоступен: {exc}"
                     else:
-                        template_image = cv2.imread(str(template_path), cv2.IMREAD_GRAYSCALE)
+                        template_image = cv2.imread(str(template_path), cv2.IMREAD_UNCHANGED)
                         if template_image is None or getattr(template_image, "size", 0) == 0:
                             auto_runtime["reason"] = f"не удалось загрузить шаблон: {template_path}"
+                        else:
+                            mask_threshold_raw = auto_cfg.get("mask_threshold")
+                            try:
+                                mask_threshold = (
+                                    int(mask_threshold_raw)
+                                    if mask_threshold_raw is not None
+                                    else 8
+                                )
+                            except (TypeError, ValueError):
+                                mask_threshold = 8
+                            try:
+                                template_package = prepare_template(
+                                    template_image,
+                                    template_path,
+                                    mask_threshold=mask_threshold,
+                                )
+                            except Exception as exc:  # noqa: BLE001
+                                auto_runtime["reason"] = f"не удалось подготовить шаблон: {exc}"
+                                template_package = None
+                            else:
+                                auto_runtime["template_package"] = template_package
+                                auto_runtime["mask_threshold"] = mask_threshold
                 if not auto_runtime.get("reason"):
                     try:
                         threshold = float(auto_cfg.get("threshold", 0.75) or 0.75)
@@ -4466,9 +4491,11 @@ class MainWindow(QtWidgets.QMainWindow):
                             "func": detect_watermark,
                             "template_path": str(template_path),
                             "template_image": template_image,
+                            "template_package": auto_runtime.get("template_package"),
                             "threshold": threshold,
                             "frames": frames_to_scan,
                             "downscale": downscale_value,
+                            "mask_threshold": auto_runtime.get("mask_threshold", 8),
                         }
                     )
 
@@ -4723,6 +4750,8 @@ class MainWindow(QtWidgets.QMainWindow):
             detection_applied = False
             timeline_zones: List[Dict[str, Any]] = []
             timeline_segment_count = 0
+            per_video_zones_result: List[Dict[str, int]] = []
+            timeline_switch_note: Optional[str] = None
 
             if auto_runtime.get("enabled"):
                 threshold_value = float(auto_runtime.get("threshold", 0.75) or 0.75)
@@ -4731,10 +4760,30 @@ class MainWindow(QtWidgets.QMainWindow):
                     "frames": auto_runtime.get("frames", 5),
                     "downscale": auto_runtime.get("downscale"),
                     "template_image": auto_runtime.get("template_image"),
+                    "template_package": auto_runtime.get("template_package"),
+                    "mask_threshold": auto_runtime.get("mask_threshold", auto_cfg.get("mask_threshold")),
                     "return_score": True,
                     "return_details": True,
                     "return_series": True,
                 }
+                extra_keys = (
+                    "blur_kernel",
+                    "scales",
+                    "scale_min",
+                    "scale_max",
+                    "scale_steps",
+                    "edge_weight",
+                    "canny_low",
+                    "canny_high",
+                    "score_bias",
+                    "score_floor",
+                    "score_z_weight",
+                )
+                for key in extra_keys:
+                    if key in auto_cfg:
+                        value = auto_cfg.get(key)
+                        if value is not None and (not isinstance(value, str) or value.strip()):
+                            detect_kwargs[key] = value
                 try:
                     result = auto_runtime["func"](  # type: ignore[index]
                         str(v),
@@ -4832,6 +4881,7 @@ class MainWindow(QtWidgets.QMainWindow):
                                 fallback_note = "проекция зон не удалась"
                             else:
                                 per_video_zones = list(projected)
+                                per_video_zones_result = list(projected)
                                 if segments:
                                     try:
                                         timeline_segment_count = len(segments)
@@ -4913,6 +4963,9 @@ class MainWindow(QtWidgets.QMainWindow):
                     elif not bbox:
                         fallback_note = f"совпадение ниже порога ({auto_runtime['threshold']:.2f})"
 
+            if detection_applied and per_video_zones_result:
+                active_zones = [dict(z) for z in per_video_zones_result]
+
             if detection_applied and not timeline_zones and frame_size and active_zones:
                 clipped = _clip_zones_to_frame(active_zones, frame_size)
                 if clipped and clipped != active_zones:
@@ -4921,9 +4974,9 @@ class MainWindow(QtWidgets.QMainWindow):
                         f"[BLUR] {v.name}: зоны скорректированы под кадр {frame_size[0]}x{frame_size[1]}"
                     )
 
-            if timeline_zones:
-                filter_parts = []
-                for zone in timeline_zones:
+            def _build_filter_parts(zone_list: List[Dict[str, Any]], *, timeline: bool) -> List[str]:
+                parts: List[str] = []
+                for zone in zone_list:
                     try:
                         x = int(zone.get("x", 0))
                         y = int(zone.get("y", 0))
@@ -4931,53 +4984,64 @@ class MainWindow(QtWidgets.QMainWindow):
                         h = int(zone.get("h", 1))
                     except Exception:
                         continue
-                    start = zone.get("start")
-                    end = zone.get("end")
+                    if w <= 0 or h <= 0:
+                        continue
                     enable_expr = ""
-                    start_val: Optional[float] = None
-                    end_val: Optional[float] = None
-                    try:
-                        start_val = float(start) if start is not None else None
-                    except Exception:
-                        start_val = None
-                    try:
-                        end_val = float(end) if end is not None else None
-                    except Exception:
-                        end_val = None
-                    if start_val is not None or end_val is not None:
-                        start_safe = max(0.0, start_val if start_val is not None else 0.0)
-                        end_safe = end_val if end_val is not None else (start_safe + 0.1)
+                    if timeline:
+                        start_val = zone.get("start")
+                        end_val = zone.get("end")
+                        try:
+                            start_f = float(start_val) if start_val is not None else None
+                        except Exception:
+                            start_f = None
+                        try:
+                            end_f = float(end_val) if end_val is not None else None
+                        except Exception:
+                            end_f = None
+                        if start_f is None and end_f is None:
+                            continue
+                        start_safe = max(0.0, start_f if start_f is not None else 0.0)
+                        end_safe = end_f if end_f is not None else (start_safe + 0.1)
                         if end_safe <= start_safe:
                             end_safe = start_safe + 0.1
                         enable_expr = f":enable='between(t,{start_safe:.3f},{end_safe:.3f})'"
-                    filter_parts.append(
-                        f"delogo=x={x}:y={y}:w={w}:h={h}:show=0{enable_expr}"
-                    )
-            else:
-                filter_parts = [
-                    f"delogo=x={z['x']}:y={z['y']}:w={z['w']}:h={z['h']}:show=0" for z in active_zones
-                ]
-                if not filter_parts:
-                    filter_parts = [
-                        f"delogo=x={z['x']}:y={z['y']}:w={z['w']}:h={z['h']}:show=0" for z in zones
-                    ]
-            if not filter_parts:
+                    parts.append(f"delogo=x={x}:y={y}:w={w}:h={h}:show=0{enable_expr}")
+                return parts
+
+            timeline_parts = _build_filter_parts(timeline_zones, timeline=True) if timeline_zones else []
+            if timeline_zones and not timeline_parts:
+                timeline_zones = []
+            static_source = active_zones if active_zones else zones
+            static_parts = _build_filter_parts(static_source, timeline=False)
+
+            def _compose_vf(parts: List[str]) -> str:
+                if not parts:
+                    return ""
+                chain = list(parts)
+                if post:
+                    chain.append(post)
+                chain.append("format=yuv420p")
+                return ",".join(chain)
+
+            vf_timeline = _compose_vf(timeline_parts)
+            vf_static = _compose_vf(static_parts)
+
+            if not vf_timeline and not vf_static:
                 with lock:
                     counter["done"] += 1
                     self._post_status("Блюр…", progress=counter["done"], total=total, state="running")
                     self.sig_log.emit(f"[BLUR] Ошибка {v.name}: не найдены зоны delogo")
                     failures.append(f"{v.name}: не найдены зоны delogo")
                 return False
-            if post:
-                filter_parts.append(post)
-            filter_parts.append("format=yuv420p")
-            vf = ",".join(filter_parts)
 
-            def _build_cmd(use_hw: bool, audio_copy: bool) -> List[str]:
+            vf_current = vf_timeline or vf_static
+            using_timeline = bool(vf_timeline)
+
+            def _build_cmd(vf_expr: str, use_hw: bool, audio_copy: bool) -> List[str]:
                 cmd = [ffbin, "-hide_banner", "-loglevel", "info", "-y"]
                 if use_hw and sys.platform == "darwin":
                     cmd += ["-hwaccel", "videotoolbox"]
-                cmd += ["-i", str(v), "-vf", vf, "-map", "0:v", "-map", "0:a?"]
+                cmd += ["-i", str(v), "-vf", vf_expr, "-map", "0:v", "-map", "0:a?"]
                 if use_hw and sys.platform == "darwin":
                     cmd += ["-c:v", "h264_videotoolbox", "-b:v", "0", "-crf", crf]
                 else:
@@ -5016,13 +5080,40 @@ class MainWindow(QtWidgets.QMainWindow):
             tail: List[str] = []
             final_audio_copy = copy_audio
             error_note: Optional[str] = None
+            fallback_attempted = False
             try:
                 for label, use_hw, audio_copy_flag in attempts:
-                    tried_labels.append(label)
-                    rc, tail = _run_ffmpeg(_build_cmd(use_hw, audio_copy_flag), log_prefix=f"BLUR:{v.name}")
+                    label_repr = label + ("[timeline]" if using_timeline else "")
+                    tried_labels.append(label_repr)
+                    rc, tail = _run_ffmpeg(
+                        _build_cmd(vf_current, use_hw, audio_copy_flag),
+                        log_prefix=f"BLUR:{v.name}",
+                    )
                     if rc == 0:
                         final_audio_copy = audio_copy_flag
                         break
+                    tail_text = "\n".join(tail[-6:]) if tail else ""
+                    if (
+                        using_timeline
+                        and vf_static
+                        and not fallback_attempted
+                        and tail_text
+                        and "Error reinitializing filters" in tail_text
+                    ):
+                        fallback_attempted = True
+                        using_timeline = False
+                        vf_current = vf_static
+                        timeline_switch_note = "FFmpeg не смог перезапустить фильтр delogo (Error reinitializing filters)"
+                        if detection_info_msg:
+                            detection_info_msg += " (timeline→static)"
+                        tried_labels[-1] = label + "[timeline→static]"
+                        rc, tail = _run_ffmpeg(
+                            _build_cmd(vf_current, use_hw, audio_copy_flag),
+                            log_prefix=f"BLUR:{v.name}",
+                        )
+                        if rc == 0:
+                            final_audio_copy = audio_copy_flag
+                            break
                 ok = (rc == 0)
             except Exception as exc:  # noqa: BLE001
                 ok = False
@@ -5045,6 +5136,13 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.sig_log.emit(detection_info_msg)
                 if clip_info_msg:
                     self.sig_log.emit(clip_info_msg)
+                if timeline_switch_note:
+                    msg_switch = (
+                        f"Автодетект водяного знака: таймлайн → статично → {v.name}: {timeline_switch_note}"
+                    )
+                    self.sig_log.emit(f"[BLUR] {msg_switch}")
+                    self._append_activity(msg_switch, kind="warn")
+                    self._send_tg(f"⚠️ {msg_switch}")
                 if auto_runtime.get("enabled"):
                     if detection_error_text:
                         auto_stats["errors"].append({"name": v.name, "error": detection_error_text})
