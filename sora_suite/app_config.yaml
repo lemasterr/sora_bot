@@ -70,7 +70,7 @@ ffmpeg:
     enabled: false
     template: ''
     threshold: 0.75
-    frames: 5
+    frames: 8
     downscale: 0
   presets:
     portrait_9x16:

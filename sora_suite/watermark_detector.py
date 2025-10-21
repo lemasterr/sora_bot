@@ -299,6 +299,7 @@ def detect_watermark(
             edges_frame: Optional[np.ndarray]
             if use_edges:
                 edges_frame = cv2.Canny(gray_scaled, canny_low, canny_high)
+                edges_frame = np.ascontiguousarray(edges_frame)
             else:
                 edges_frame = None
 
@@ -320,7 +321,10 @@ def detect_watermark(
                         tmpl_mask = np.ascontiguousarray(tmpl_mask.astype(np.uint8))
                     tmpl_edges: Optional[np.ndarray] = None
                     if use_edges:
-                        tmpl_edges = cv2.Canny(tmpl_gray, canny_low, canny_high, mask=tmpl_mask)
+                        tmpl_edges = cv2.Canny(tmpl_gray, canny_low, canny_high)
+                        if tmpl_mask is not None:
+                            tmpl_edges = cv2.bitwise_and(tmpl_edges, tmpl_mask)
+                        tmpl_edges = np.ascontiguousarray(tmpl_edges)
                     cached = {"gray": tmpl_gray, "mask": tmpl_mask, "edges": tmpl_edges}
                     template_cache[key] = cached
                 tmpl = cached["gray"]
@@ -356,7 +360,12 @@ def detect_watermark(
                 combined = float(max_val)
                 if edge_val is not None:
                     combined = (1.0 - edge_weight) * combined + edge_weight * max(edge_val, 0.0)
-                combined = (1.0 - z_weight) * combined + z_weight * z_component
+                    combined = max(combined, float(max_val))
+                if z_weight > 0.0:
+                    before_z = combined
+                    combined = (1.0 - z_weight) * combined + z_weight * z_component
+                    combined = max(combined, before_z)
+                combined = max(combined, float(max_val))
                 combined += score_bias
                 combined = max(score_floor, combined)
                 combined = float(max(0.0, min(1.0, combined)))
