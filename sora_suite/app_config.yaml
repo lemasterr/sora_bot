@@ -26,6 +26,17 @@ google_genai:
   person_generation: ""
   output_mime_type: image/jpeg
   attach_to_sora: true
+  seeds: ""
+  consistent_character_design: false
+  lens_type: ""
+  color_palette: ""
+  style: ""
+  reference_prompt: ""
+  notifications_enabled: true
+  daily_quota: 0
+  quota_warning_prompts: 5
+  quota_enforce: false
+  usage_file: ./generated_images/usage.json
 downloader:
   workdir: ./workers/downloader
   entry: download_all.py

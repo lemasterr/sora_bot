@@ -197,6 +197,17 @@ def load_cfg() -> dict:
     genai.setdefault("person_generation", "")
     genai.setdefault("output_mime_type", "image/jpeg")
     genai.setdefault("attach_to_sora", True)
+    genai.setdefault("seeds", "")
+    genai.setdefault("consistent_character_design", False)
+    genai.setdefault("lens_type", "")
+    genai.setdefault("color_palette", "")
+    genai.setdefault("style", "")
+    genai.setdefault("reference_prompt", "")
+    genai.setdefault("notifications_enabled", True)
+    genai.setdefault("daily_quota", 0)
+    genai.setdefault("quota_warning_prompts", 5)
+    genai.setdefault("quota_enforce", False)
+    genai.setdefault("usage_file", str(Path("generated_images") / "usage.json"))
 
     downloader = data.setdefault("downloader", {})
     downloader.setdefault("workdir", str(WORKERS_DIR / "downloader"))
@@ -1037,21 +1048,6 @@ class MainWindow(QtWidgets.QMainWindow):
         if not target:
             return
         open_in_finder(target)
-
-    def _sync_image_dirs(self, from_catalog: bool):
-        if not hasattr(self, "ed_images_dir") or not hasattr(self, "ed_genai_output_dir"):
-            return
-        catalog = self.ed_images_dir.text().strip()
-        genai = self.ed_genai_output_dir.text().strip()
-        if from_catalog:
-            target = catalog
-            dest = self.ed_genai_output_dir
-        else:
-            target = genai
-            dest = self.ed_images_dir
-        dest.blockSignals(True)
-        dest.setText(target)
-        dest.blockSignals(False)
 
     def _toggle_youtube_schedule(self):
         enable = self.cb_youtube_schedule.isChecked() and not self.cb_youtube_draft_only.isChecked()
@@ -2306,14 +2302,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.cfg.get("merge_src_dir", self.cfg.get("blurred_dir", str(BLUR_DIR))),
         )
 
-        self.ed_images_dir = add_path_row(
-            "Изображения (Google AI):",
-            "ed_images_dir",
-            "btn_browse_images_dir",
-            "btn_open_images_dir",
-            self.cfg.get("google_genai", {}).get("output_dir", str(IMAGES_DIR)),
-        )
-
         self.ed_history_path = add_path_row(
             "Файл истории:",
             "ed_history_path",
@@ -2746,24 +2734,43 @@ class MainWindow(QtWidgets.QMainWindow):
         genai_layout.setSpacing(12)
 
         genai_cfg = self.cfg.get("google_genai", {}) or {}
-        grp_genai = QtWidgets.QGroupBox("Google AI Studio — генерация изображений")
-        fg = QtWidgets.QFormLayout(grp_genai)
+
+        self.tabs_genai = QtWidgets.QTabWidget()
+        genai_layout.addWidget(self.tabs_genai)
+
+        tab_genai_main = QtWidgets.QWidget()
+        fg_main = QtWidgets.QFormLayout(tab_genai_main)
+        fg_main.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
 
         self.cb_genai_enabled = QtWidgets.QCheckBox("Включить генерацию изображений перед отправкой промпта")
         self.cb_genai_enabled.setChecked(bool(genai_cfg.get("enabled", False)))
-        fg.addRow(self.cb_genai_enabled)
+        fg_main.addRow(self.cb_genai_enabled)
 
         self.cb_genai_attach = QtWidgets.QCheckBox("Прикреплять сгенерированные изображения к заявке в Sora")
         self.cb_genai_attach.setChecked(bool(genai_cfg.get("attach_to_sora", True)))
-        fg.addRow(self.cb_genai_attach)
+        fg_main.addRow(self.cb_genai_attach)
 
         self.ed_genai_api_key = QtWidgets.QLineEdit(genai_cfg.get("api_key", ""))
         self.ed_genai_api_key.setPlaceholderText("AIza...")
         self.ed_genai_api_key.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
-        fg.addRow("API ключ:", self.ed_genai_api_key)
+        fg_main.addRow("API ключ:", self.ed_genai_api_key)
 
-        self.ed_genai_model = QtWidgets.QLineEdit(genai_cfg.get("model", "models/imagen-4.0-generate-001"))
-        fg.addRow("Модель:", self.ed_genai_model)
+        self.cmb_genai_model = QtWidgets.QComboBox()
+        self.cmb_genai_model.setEditable(True)
+        self.cmb_genai_model.setInsertPolicy(QtWidgets.QComboBox.InsertPolicy.NoInsert)
+        known_models = [
+            "models/imagen-4.0-generate-001",
+            "models/imagen-3.0-generate-001",
+            "models/imagen-3.0-generate-002",
+            "models/imagegeneration@006",
+        ]
+        for model_name in known_models:
+            self.cmb_genai_model.addItem(model_name)
+        current_model = genai_cfg.get("model", known_models[0] if known_models else "models/imagen-4.0-generate-001")
+        if current_model and self.cmb_genai_model.findText(current_model) < 0:
+            self.cmb_genai_model.addItem(current_model)
+        self.cmb_genai_model.setCurrentText(current_model)
+        fg_main.addRow("Модель:", self.cmb_genai_model)
 
         self.cmb_genai_person = QtWidgets.QComboBox()
         self.cmb_genai_person.setEditable(True)
@@ -2782,37 +2789,39 @@ class MainWindow(QtWidgets.QMainWindow):
                 idx_person = 0
         self.cmb_genai_person.setCurrentIndex(idx_person)
         self.cmb_genai_person.lineEdit().setPlaceholderText("оставь пустым, чтобы следовать политике модели")
-        fg.addRow("Генерация людей:", self.cmb_genai_person)
+        fg_main.addRow("Генерация людей:", self.cmb_genai_person)
 
         self.ed_genai_aspect = QtWidgets.QLineEdit(str(genai_cfg.get("aspect_ratio", "1:1")))
-        fg.addRow("Соотношение сторон:", self.ed_genai_aspect)
+        fg_main.addRow("Соотношение сторон:", self.ed_genai_aspect)
 
         self.ed_genai_size = QtWidgets.QLineEdit(str(genai_cfg.get("image_size", "1K")))
-        fg.addRow("Размер:", self.ed_genai_size)
+        fg_main.addRow("Размер:", self.ed_genai_size)
 
         self.ed_genai_mime = QtWidgets.QLineEdit(str(genai_cfg.get("output_mime_type", "image/jpeg")))
-        fg.addRow("MIME-тип:", self.ed_genai_mime)
+        fg_main.addRow("MIME-тип:", self.ed_genai_mime)
 
         self.sb_genai_images = QtWidgets.QSpinBox()
         self.sb_genai_images.setRange(1, 8)
         self.sb_genai_images.setValue(int(genai_cfg.get("number_of_images", 1) or 1))
-        fg.addRow("Картинок на промпт:", self.sb_genai_images)
+        fg_main.addRow("Картинок на промпт:", self.sb_genai_images)
 
         self.sb_genai_rpm = QtWidgets.QSpinBox()
         self.sb_genai_rpm.setRange(0, 120)
         self.sb_genai_rpm.setSpecialValueText("без ограничений")
         self.sb_genai_rpm.setValue(int(genai_cfg.get("rate_limit_per_minute", 0) or 0))
-        fg.addRow("Лимит запросов в минуту:", self.sb_genai_rpm)
+        fg_main.addRow("Лимит запросов в минуту:", self.sb_genai_rpm)
 
         self.sb_genai_retries = QtWidgets.QSpinBox()
         self.sb_genai_retries.setRange(0, 10)
         self.sb_genai_retries.setValue(int(genai_cfg.get("max_retries", 3) or 0))
-        fg.addRow("Повторов при ошибке:", self.sb_genai_retries)
+        fg_main.addRow("Повторов при ошибке:", self.sb_genai_retries)
 
         output_dir = genai_cfg.get("output_dir", str(IMAGES_DIR))
         self.ed_genai_output_dir = QtWidgets.QLineEdit(str(output_dir))
         self.btn_genai_output_browse = QtWidgets.QPushButton("…")
-        self.btn_genai_output_open = QtWidgets.QToolButton(); self.btn_genai_output_open.setText("↗"); self.btn_genai_output_open.setToolTip("Открыть папку вывода")
+        self.btn_genai_output_open = QtWidgets.QToolButton()
+        self.btn_genai_output_open.setText("↗")
+        self.btn_genai_output_open.setToolTip("Открыть папку вывода")
         row_widget = QtWidgets.QWidget()
         row_layout = QtWidgets.QHBoxLayout(row_widget)
         row_layout.setContentsMargins(0, 0, 0, 0)
@@ -2820,14 +2829,105 @@ class MainWindow(QtWidgets.QMainWindow):
         row_layout.addWidget(self.ed_genai_output_dir, 1)
         row_layout.addWidget(self.btn_genai_output_browse, 0)
         row_layout.addWidget(self.btn_genai_output_open, 0)
-        fg.addRow("Папка вывода:", row_widget)
+        fg_main.addRow("Папка изображений:", row_widget)
 
-        hint = QtWidgets.QLabel("Папка вывода создаётся автоматически. Настройки применяются при запуске автогена.")
-        hint.setWordWrap(True)
-        hint.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
-        fg.addRow(hint)
+        manifest_hint = QtWidgets.QLabel(
+            "Manifest используется для повторного сопоставления промптов и файлов."
+            " При необходимости его путь можно изменить вручную в конфиге."
+        )
+        manifest_hint.setWordWrap(True)
+        manifest_hint.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
+        fg_main.addRow(manifest_hint)
 
-        genai_layout.addWidget(grp_genai)
+        self.tabs_genai.addTab(tab_genai_main, "Основные")
+
+        tab_genai_style = QtWidgets.QWidget()
+        fg_style = QtWidgets.QFormLayout(tab_genai_style)
+        fg_style.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+
+        self.ed_genai_seeds = QtWidgets.QLineEdit(str(genai_cfg.get("seeds", "")))
+        self.ed_genai_seeds.setPlaceholderText("Например: 12345, 67890")
+        fg_style.addRow("Сиды (через запятую):", self.ed_genai_seeds)
+
+        self.cb_genai_consistent = QtWidgets.QCheckBox("consistent character design")
+        self.cb_genai_consistent.setChecked(bool(genai_cfg.get("consistent_character_design", False)))
+        fg_style.addRow(self.cb_genai_consistent)
+
+        self.ed_genai_lens = QtWidgets.QLineEdit(str(genai_cfg.get("lens_type", "")))
+        self.ed_genai_lens.setPlaceholderText("например, 35mm cinematic")
+        fg_style.addRow("Тип объектива:", self.ed_genai_lens)
+
+        self.ed_genai_palette = QtWidgets.QLineEdit(str(genai_cfg.get("color_palette", "")))
+        self.ed_genai_palette.setPlaceholderText("например, cool blue and golden tones")
+        fg_style.addRow("Цветовая палитра:", self.ed_genai_palette)
+
+        self.ed_genai_style = QtWidgets.QLineEdit(str(genai_cfg.get("style", "")))
+        self.ed_genai_style.setPlaceholderText("например, ultra-realistic fantasy film")
+        fg_style.addRow("Стиль:", self.ed_genai_style)
+
+        self.te_genai_reference = QtWidgets.QPlainTextEdit()
+        self.te_genai_reference.setPlaceholderText("Дополнительные подсказки и референсы для промпта")
+        self.te_genai_reference.setPlainText(str(genai_cfg.get("reference_prompt", "")))
+        self.te_genai_reference.setTabChangesFocus(True)
+        self.te_genai_reference.setMaximumHeight(120)
+        fg_style.addRow("Доп. подсказка:", self.te_genai_reference)
+
+        style_hint = QtWidgets.QLabel(
+            "Эти поля автоматически добавляются к текстовому промпту, сохраняя единый стиль изображений."
+        )
+        style_hint.setWordWrap(True)
+        style_hint.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
+        fg_style.addRow(style_hint)
+
+        self.tabs_genai.addTab(tab_genai_style, "Стиль")
+
+        tab_genai_notify = QtWidgets.QWidget()
+        fg_notify = QtWidgets.QFormLayout(tab_genai_notify)
+        fg_notify.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+
+        self.cb_genai_notifications = QtWidgets.QCheckBox("Включить уведомления о суточной квоте")
+        self.cb_genai_notifications.setChecked(bool(genai_cfg.get("notifications_enabled", True)))
+        fg_notify.addRow(self.cb_genai_notifications)
+
+        self.sb_genai_daily_quota = QtWidgets.QSpinBox()
+        self.sb_genai_daily_quota.setRange(0, 10000)
+        self.sb_genai_daily_quota.setSpecialValueText("без лимита")
+        self.sb_genai_daily_quota.setValue(int(genai_cfg.get("daily_quota", 0) or 0))
+        fg_notify.addRow("Квота промптов в сутки:", self.sb_genai_daily_quota)
+
+        self.sb_genai_quota_warning = QtWidgets.QSpinBox()
+        self.sb_genai_quota_warning.setRange(0, 1000)
+        self.sb_genai_quota_warning.setValue(int(genai_cfg.get("quota_warning_prompts", 5) or 0))
+        fg_notify.addRow("Предупреждать за N промптов:", self.sb_genai_quota_warning)
+
+        self.cb_genai_quota_enforce = QtWidgets.QCheckBox("Останавливать генерацию при исчерпании квоты")
+        self.cb_genai_quota_enforce.setChecked(bool(genai_cfg.get("quota_enforce", False)))
+        fg_notify.addRow(self.cb_genai_quota_enforce)
+
+        usage_default = genai_cfg.get("usage_file") or str(Path(output_dir) / "usage.json")
+        self.ed_genai_usage_file = QtWidgets.QLineEdit(str(usage_default))
+        self.btn_genai_usage_browse = QtWidgets.QPushButton("…")
+        self.btn_genai_usage_open = QtWidgets.QToolButton()
+        self.btn_genai_usage_open.setText("↗")
+        self.btn_genai_usage_open.setToolTip("Открыть файл статистики квот")
+        usage_row = QtWidgets.QWidget()
+        usage_layout = QtWidgets.QHBoxLayout(usage_row)
+        usage_layout.setContentsMargins(0, 0, 0, 0)
+        usage_layout.setSpacing(6)
+        usage_layout.addWidget(self.ed_genai_usage_file, 1)
+        usage_layout.addWidget(self.btn_genai_usage_browse, 0)
+        usage_layout.addWidget(self.btn_genai_usage_open, 0)
+        fg_notify.addRow("Файл учёта квоты:", usage_row)
+
+        quota_hint = QtWidgets.QLabel(
+            "Уведомления появляются в консоли workers/autogen. Порог предупреждения задаётся отдельно для каждой модели."
+        )
+        quota_hint.setWordWrap(True)
+        quota_hint.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
+        fg_notify.addRow(quota_hint)
+
+        self.tabs_genai.addTab(tab_genai_notify, "Уведомления")
+
         genai_layout.addStretch(1)
         self.settings_tabs.addTab(page_genai, "Генерация картинок")
 
@@ -2881,7 +2981,6 @@ class MainWindow(QtWidgets.QMainWindow):
             (self.ed_merged, self.cfg.get("merged_dir", str(MERG_DIR))),
             (self.ed_blur_src, self.cfg.get("blur_src_dir", self.cfg.get("downloads_dir", str(DL_DIR)))),
             (self.ed_merge_src, self.cfg.get("merge_src_dir", self.cfg.get("blurred_dir", str(BLUR_DIR)))),
-            (getattr(self, "ed_images_dir", None), self.cfg.get("google_genai", {}).get("output_dir", str(IMAGES_DIR))),
             (getattr(self, "ed_history_path", None), self.cfg.get("history_file", str(HIST_FILE))),
             (getattr(self, "ed_titles_path", None), self.cfg.get("titles_file", str(TITLES_FILE))),
             (getattr(self, "ed_tiktok_src", None), self.cfg.get("tiktok", {}).get("upload_src_dir", self.cfg.get("merged_dir", str(MERG_DIR))))
@@ -2894,8 +2993,6 @@ class MainWindow(QtWidgets.QMainWindow):
             line.blockSignals(True)
             line.setText(str(value))
             line.blockSignals(False)
-        if hasattr(self, "ed_images_dir") and hasattr(self, "ed_genai_output_dir"):
-            self._sync_image_dirs(from_catalog=True)
 
     def _mark_settings_dirty(self, *args):
         self._settings_dirty = True
@@ -2917,7 +3014,6 @@ class MainWindow(QtWidgets.QMainWindow):
             (self.ed_merged, "textEdited"),
             (self.ed_blur_src, "textEdited"),
             (self.ed_merge_src, "textEdited"),
-            (getattr(self, "ed_images_dir", None), "textEdited"),
             (getattr(self, "ed_history_path", None), "textEdited"),
             (getattr(self, "ed_titles_path", None), "textEdited"),
             (self.sb_max_videos, "valueChanged"),
@@ -2965,7 +3061,8 @@ class MainWindow(QtWidgets.QMainWindow):
             (self.cb_genai_enabled, "toggled"),
             (self.cb_genai_attach, "toggled"),
             (self.ed_genai_api_key, "textEdited"),
-            (self.ed_genai_model, "textEdited"),
+            (self.cmb_genai_model, "currentIndexChanged"),
+            (self.cmb_genai_model.lineEdit(), "textEdited"),
             (self.cmb_genai_person, "currentIndexChanged"),
             (self.cmb_genai_person.lineEdit(), "textEdited"),
             (self.ed_genai_aspect, "textEdited"),
@@ -2975,6 +3072,17 @@ class MainWindow(QtWidgets.QMainWindow):
             (self.sb_genai_rpm, "valueChanged"),
             (self.sb_genai_retries, "valueChanged"),
             (self.ed_genai_output_dir, "textEdited"),
+            (self.ed_genai_seeds, "textEdited"),
+            (self.cb_genai_consistent, "toggled"),
+            (self.ed_genai_lens, "textEdited"),
+            (self.ed_genai_palette, "textEdited"),
+            (self.ed_genai_style, "textEdited"),
+            (self.te_genai_reference, "textChanged"),
+            (self.cb_genai_notifications, "toggled"),
+            (self.sb_genai_daily_quota, "valueChanged"),
+            (self.sb_genai_quota_warning, "valueChanged"),
+            (self.cb_genai_quota_enforce, "toggled"),
+            (self.ed_genai_usage_file, "textEdited"),
         ]
         for widget, signal_name in watchers:
             signal = getattr(widget, signal_name, None)
@@ -3352,13 +3460,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_browse_merged.clicked.connect(lambda: self._browse_dir(self.ed_merged, "Выбери папку MERGED"))
         self.btn_browse_blur_src.clicked.connect(lambda: self._browse_dir(self.ed_blur_src, "Выбери ИСТОЧНИК для BLUR"))
         self.btn_browse_merge_src.clicked.connect(lambda: self._browse_dir(self.ed_merge_src, "Выбери ИСТОЧНИК для MERGE"))
-        if hasattr(self, "btn_browse_images_dir"):
-            self.btn_browse_images_dir.clicked.connect(lambda: self._browse_dir(self.ed_images_dir, "Выбери папку для изображений"))
         if hasattr(self, "btn_browse_history_path"):
             self.btn_browse_history_path.clicked.connect(lambda: self._browse_file(self.ed_history_path, "Выбери файл истории", "JSONL (*.jsonl);;Все файлы (*.*)"))
         if hasattr(self, "btn_browse_titles_path"):
             self.btn_browse_titles_path.clicked.connect(lambda: self._browse_file(self.ed_titles_path, "Выбери файл названий", "Текстовые файлы (*.txt);;Все файлы (*.*)"))
         self.btn_genai_output_browse.clicked.connect(lambda: self._browse_dir(self.ed_genai_output_dir, "Выбери папку для изображений"))
+        self.btn_genai_usage_browse.clicked.connect(
+            lambda: self._browse_file(
+                self.ed_genai_usage_file,
+                "Выбери файл статистики",
+                "JSON (*.json);;Все файлы (*.*)",
+            )
+        )
 
         for button_attr, line_attr in [
             ("btn_open_root_path", "ed_root"),
@@ -3367,7 +3480,6 @@ class MainWindow(QtWidgets.QMainWindow):
             ("btn_open_merged_path", "ed_merged"),
             ("btn_open_blur_src_path", "ed_blur_src"),
             ("btn_open_merge_src_path", "ed_merge_src"),
-            ("btn_open_images_dir", "ed_images_dir"),
             ("btn_open_history_path", "ed_history_path"),
             ("btn_open_titles_path", "ed_titles_path"),
             ("btn_youtube_src_open", "ed_youtube_src"),
@@ -3375,15 +3487,12 @@ class MainWindow(QtWidgets.QMainWindow):
             ("btn_tiktok_src_open", "ed_tiktok_src"),
             ("btn_tiktok_archive_open", "ed_tiktok_archive"),
             ("btn_genai_output_open", "ed_genai_output_dir"),
+            ("btn_genai_usage_open", "ed_genai_usage_file"),
         ]:
             button = getattr(self, button_attr, None)
             line = getattr(self, line_attr, None)
             if isinstance(button, QtWidgets.QAbstractButton) and isinstance(line, QtWidgets.QLineEdit):
                 button.clicked.connect(lambda _, l=line: self._open_path_from_edit(l))
-
-        if hasattr(self, "ed_images_dir") and hasattr(self, "ed_genai_output_dir"):
-            self.ed_images_dir.textEdited.connect(lambda _: self._sync_image_dirs(from_catalog=True))
-            self.ed_genai_output_dir.textEdited.connect(lambda _: self._sync_image_dirs(from_catalog=False))
 
     def _init_state(self):
         self.runner_autogen = ProcRunner("AUTOGEN")
@@ -4117,6 +4226,23 @@ class MainWindow(QtWidgets.QMainWindow):
         env["GENAI_ATTACH_TO_SORA"] = "1" if bool(genai_cfg.get("attach_to_sora", True)) else "0"
         manifest_raw = genai_cfg.get("manifest_file") or (Path(genai_cfg.get("output_dir", str(IMAGES_DIR))) / "manifest.json")
         env["GENAI_MANIFEST_FILE"] = str(_project_path(manifest_raw))
+        seeds_value = genai_cfg.get("seeds", "")
+        if isinstance(seeds_value, (list, tuple)):
+            seeds_text = ",".join(str(item).strip() for item in seeds_value if str(item).strip())
+        else:
+            seeds_text = str(seeds_value or "").strip()
+        env["GENAI_SEEDS"] = seeds_text
+        env["GENAI_CONSISTENT_CHARACTER"] = "1" if bool(genai_cfg.get("consistent_character_design")) else "0"
+        env["GENAI_LENS_TYPE"] = str(genai_cfg.get("lens_type", "")).strip()
+        env["GENAI_COLOR_PALETTE"] = str(genai_cfg.get("color_palette", "")).strip()
+        env["GENAI_STYLE_PRESET"] = str(genai_cfg.get("style", "")).strip()
+        env["GENAI_REFERENCE_HINT"] = str(genai_cfg.get("reference_prompt", "")).strip()
+        env["GENAI_QUOTA_ENABLED"] = "1" if bool(genai_cfg.get("notifications_enabled", True)) else "0"
+        env["GENAI_DAILY_QUOTA"] = str(int(genai_cfg.get("daily_quota", 0) or 0))
+        env["GENAI_QUOTA_WARNING_LEFT"] = str(int(genai_cfg.get("quota_warning_prompts", 0) or 0))
+        env["GENAI_QUOTA_ENFORCE"] = "1" if bool(genai_cfg.get("quota_enforce", False)) else "0"
+        usage_raw = genai_cfg.get("usage_file") or str(Path(genai_cfg.get("output_dir", str(IMAGES_DIR))) / "usage.json")
+        env["GENAI_USAGE_FILE"] = str(_project_path(usage_raw))
         env["GENAI_IMAGES_ONLY"] = "1" if images_only else "0"
         return env
 
@@ -5862,7 +5988,7 @@ class MainWindow(QtWidgets.QMainWindow):
         genai_cfg["enabled"] = bool(self.cb_genai_enabled.isChecked())
         genai_cfg["attach_to_sora"] = bool(self.cb_genai_attach.isChecked())
         genai_cfg["api_key"] = self.ed_genai_api_key.text().strip()
-        genai_cfg["model"] = self.ed_genai_model.text().strip() or "models/imagen-4.0-generate-001"
+        genai_cfg["model"] = self.cmb_genai_model.currentText().strip() or "models/imagen-4.0-generate-001"
         current_person = self.cmb_genai_person.currentData()
         if isinstance(current_person, str) and current_person:
             value = current_person
@@ -5875,17 +6001,30 @@ class MainWindow(QtWidgets.QMainWindow):
         genai_cfg["number_of_images"] = int(self.sb_genai_images.value())
         genai_cfg["rate_limit_per_minute"] = int(self.sb_genai_rpm.value())
         genai_cfg["max_retries"] = int(self.sb_genai_retries.value())
-        images_dir_value = self.ed_genai_output_dir.text().strip() or self.ed_images_dir.text().strip() or str(IMAGES_DIR)
+        images_dir_value = self.ed_genai_output_dir.text().strip() or str(IMAGES_DIR)
         genai_cfg["output_dir"] = images_dir_value
-        if hasattr(self, "ed_images_dir"):
-            self.ed_images_dir.blockSignals(True)
-            self.ed_images_dir.setText(images_dir_value)
-            self.ed_images_dir.blockSignals(False)
         if hasattr(self, "ed_genai_output_dir"):
             self.ed_genai_output_dir.blockSignals(True)
             self.ed_genai_output_dir.setText(images_dir_value)
             self.ed_genai_output_dir.blockSignals(False)
         genai_cfg["manifest_file"] = str(Path(genai_cfg["output_dir"]) / "manifest.json")
+        genai_cfg["seeds"] = self.ed_genai_seeds.text().strip()
+        genai_cfg["consistent_character_design"] = bool(self.cb_genai_consistent.isChecked())
+        genai_cfg["lens_type"] = self.ed_genai_lens.text().strip()
+        genai_cfg["color_palette"] = self.ed_genai_palette.text().strip()
+        genai_cfg["style"] = self.ed_genai_style.text().strip()
+        genai_cfg["reference_prompt"] = self.te_genai_reference.toPlainText().strip()
+        genai_cfg["notifications_enabled"] = bool(self.cb_genai_notifications.isChecked())
+        genai_cfg["daily_quota"] = int(self.sb_genai_daily_quota.value())
+        genai_cfg["quota_warning_prompts"] = int(self.sb_genai_quota_warning.value())
+        genai_cfg["quota_enforce"] = bool(self.cb_genai_quota_enforce.isChecked())
+        usage_value = self.ed_genai_usage_file.text().strip()
+        if not usage_value:
+            usage_value = str(Path(images_dir_value) / "usage.json")
+        genai_cfg["usage_file"] = usage_value
+        self.ed_genai_usage_file.blockSignals(True)
+        self.ed_genai_usage_file.setText(usage_value)
+        self.ed_genai_usage_file.blockSignals(False)
 
         maint_cfg = self.cfg.setdefault("maintenance", {})
         maint_cfg["auto_cleanup_on_start"] = bool(self.cb_maintenance_auto.isChecked())
