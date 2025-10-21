@@ -39,6 +39,7 @@ WORKERS_DIR = PROJECT_ROOT / "workers"
 DL_DIR = PROJECT_ROOT / "downloads"
 BLUR_DIR = PROJECT_ROOT / "blurred"
 MERG_DIR = PROJECT_ROOT / "merged"
+IMAGES_DIR = PROJECT_ROOT / "generated_images"
 HIST_FILE = PROJECT_ROOT / "history.jsonl"   # JSONL по-умолчанию (с обратн. совместимостью)
 TITLES_FILE = PROJECT_ROOT / "titles.txt"
 
@@ -179,6 +180,22 @@ def load_cfg() -> dict:
     autogen.setdefault("failed_log", str(WORKERS_DIR / "autogen" / "failed.log"))
     autogen.setdefault("instances", [])
     autogen.setdefault("active_prompts_profile", PROMPTS_DEFAULT_KEY)
+    autogen.setdefault("image_prompts_file", str(WORKERS_DIR / "autogen" / "image_prompts.txt"))
+
+    genai = data.setdefault("google_genai", {})
+    genai.setdefault("enabled", False)
+    genai.setdefault("api_key", "")
+    genai.setdefault("model", "models/imagen-4.0-generate-001")
+    genai.setdefault("aspect_ratio", "1:1")
+    genai.setdefault("image_size", "1K")
+    genai.setdefault("number_of_images", 1)
+    genai.setdefault("output_dir", str(IMAGES_DIR))
+    genai.setdefault("manifest_file", str(Path("generated_images") / "manifest.json"))
+    genai.setdefault("rate_limit_per_minute", 0)
+    genai.setdefault("max_retries", 3)
+    genai.setdefault("person_generation", "")
+    genai.setdefault("output_mime_type", "image/jpeg")
+    genai.setdefault("attach_to_sora", True)
 
     downloader = data.setdefault("downloader", {})
     downloader.setdefault("workdir", str(WORKERS_DIR / "downloader"))
@@ -434,6 +451,21 @@ def ensure_dirs(cfg: dict):
         merge_path = blurred_path
     merge_path.mkdir(parents=True, exist_ok=True)
     cfg["merge_src_dir"] = str(merge_path)
+
+    genai_cfg = cfg.get("google_genai", {}) or {}
+    output_raw = genai_cfg.get("output_dir") or IMAGES_DIR
+    output_path = _project_path(output_raw)
+    output_path.mkdir(parents=True, exist_ok=True)
+    genai_cfg["output_dir"] = str(output_path)
+    manifest_raw = genai_cfg.get("manifest_file") or (Path(output_path) / "manifest.json")
+    manifest_path = _project_path(manifest_raw)
+    genai_cfg["manifest_file"] = str(manifest_path)
+
+    auto_cfg = cfg.get("autogen", {}) or {}
+    img_prompts_raw = auto_cfg.get("image_prompts_file") or (WORKERS_DIR / "autogen" / "image_prompts.txt")
+    img_prompts_path = _project_path(img_prompts_raw)
+    img_prompts_path.parent.mkdir(parents=True, exist_ok=True)
+    auto_cfg["image_prompts_file"] = str(img_prompts_path)
 
     yt = cfg.get("youtube", {}) or {}
     archive = yt.get("archive_dir")
@@ -753,6 +785,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._scenario_waiters: Dict[str, threading.Event] = {}
         self._scenario_results: Dict[str, int] = {}
         self._scenario_wait_lock = Lock()
+        self._stat_cache: Dict[Tuple[str, Tuple[str, ...]], Tuple[float, int, int]] = {}
+        self._activity_filter_text: str = ""
+        self._readme_loaded = False
 
         # кеши пресетов блюра должны существовать до построения UI,
         # иначе _load_zones_into_ui() перезапишет их, а позже мы бы обнулили значения
@@ -812,10 +847,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._reload_history()
         self._auto_scan_profiles_at_start()
         self._refresh_prompt_profiles_ui()
+        self._load_image_prompts()
         self._refresh_youtube_ui()
         self._refresh_tiktok_ui()
         self._load_autogen_cfg_ui()
-        self._load_readme_preview()
         self._reload_used_prompts()
         maint_cfg = self.cfg.get("maintenance", {}) or {}
         if maint_cfg.get("auto_cleanup_on_start"):
@@ -851,17 +886,12 @@ class MainWindow(QtWidgets.QMainWindow):
         buttons = [
             getattr(self, "btn_update_check", None),
             getattr(self, "btn_update_pull", None),
-            getattr(self, "btn_quick_update", None),
         ]
         for btn in buttons:
             if not btn:
                 continue
             btn.setEnabled(available)
-            if available:
-                # вернём короткий тултип, если он был задан ранее
-                if btn is self.btn_quick_update:
-                    btn.setToolTip("Выполнить git pull для текущего репозитория")
-            else:
+            if not available:
                 btn.setToolTip(tooltip_disabled)
 
     def _default_profile_prompts(self, profile_name: Optional[str]) -> Path:
@@ -990,6 +1020,29 @@ class MainWindow(QtWidgets.QMainWindow):
             if sel:
                 line.setText(sel[0])
 
+    def _open_path_from_edit(self, line: QtWidgets.QLineEdit):
+        if not isinstance(line, QtWidgets.QLineEdit):
+            return
+        target = line.text().strip()
+        if not target:
+            return
+        open_in_finder(target)
+
+    def _sync_image_dirs(self, from_catalog: bool):
+        if not hasattr(self, "ed_images_dir") or not hasattr(self, "ed_genai_output_dir"):
+            return
+        catalog = self.ed_images_dir.text().strip()
+        genai = self.ed_genai_output_dir.text().strip()
+        if from_catalog:
+            target = catalog
+            dest = self.ed_genai_output_dir
+        else:
+            target = genai
+            dest = self.ed_images_dir
+        dest.blockSignals(True)
+        dest.setText(target)
+        dest.blockSignals(False)
+
     def _toggle_youtube_schedule(self):
         enable = self.cb_youtube_schedule.isChecked() and not self.cb_youtube_draft_only.isChecked()
         self.dt_youtube_publish.setEnabled(enable)
@@ -1069,26 +1122,107 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         v.addWidget(banner)
 
-        tb = QtWidgets.QHBoxLayout()
-        self.btn_open_chrome = QtWidgets.QPushButton("Открыть Chrome (CDP)")
-        self.btn_open_root = QtWidgets.QPushButton("Открыть папку проекта")
-        self.btn_open_raw = QtWidgets.QPushButton("RAW (downloads)")
-        self.btn_open_blur = QtWidgets.QPushButton("BLURRED")
-        self.btn_open_merge = QtWidgets.QPushButton("MERGED")
-        self.btn_quick_update = QtWidgets.QPushButton("Обновить из GitHub")
-        self.btn_quick_update.setToolTip("Выполнить git pull для текущего репозитория")
+        toolbar = QtWidgets.QFrame()
+        toolbar.setObjectName("topToolbar")
+        toolbar.setStyleSheet(
+            "QFrame#topToolbar{background:rgba(15,23,42,0.92);border:1px solid #1e293b;"
+            "border-radius:12px;}"
+            "QComboBox#chromeProfileTop{min-width:150px;}"
+            "QToolButton#topFolderButton{padding:2px 8px;border-radius:8px;"
+            "background:#1e293b;color:#e2e8f0;font-size:11px;}"
+            "QToolButton#topFolderButton::hover{background:#27364d;}"
+        )
+        tb = QtWidgets.QHBoxLayout(toolbar)
+        tb.setContentsMargins(12, 6, 12, 6)
+        tb.setSpacing(6)
+
+        chrome_frame = QtWidgets.QFrame()
+        chrome_frame.setObjectName("chromeTopFrame")
+        chrome_frame.setStyleSheet(
+            "QFrame#chromeTopFrame{background:rgba(30,41,59,0.85);border-radius:10px;padding:4px 8px;}"
+            "QPushButton#chromeLaunchBtn{padding:4px 10px;}"
+            "QToolButton#chromeScanBtn{padding:4px;border-radius:8px;}"
+            "QToolButton#chromeScanBtn::hover{background:#27364d;}"
+        )
+        chrome_block = QtWidgets.QHBoxLayout(chrome_frame)
+        chrome_block.setContentsMargins(4, 0, 4, 0)
+        chrome_block.setSpacing(6)
+        lbl_chrome = QtWidgets.QLabel("Chrome")
+        lbl_chrome.setStyleSheet("QLabel{color:#cbd5f5;font-weight:600;}")
+        chrome_block.addWidget(lbl_chrome)
+        self.cmb_chrome_profile_top = QtWidgets.QComboBox()
+        self.cmb_chrome_profile_top.setObjectName("chromeProfileTop")
+        self.cmb_chrome_profile_top.setPlaceholderText("Профиль…")
+        self.cmb_chrome_profile_top.setSizeAdjustPolicy(
+            QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToContents
+        )
+        self.cmb_chrome_profile_top.setMaximumWidth(220)
+        chrome_block.addWidget(self.cmb_chrome_profile_top)
+        self.btn_scan_profiles_top = QtWidgets.QToolButton()
+        self.btn_scan_profiles_top.setObjectName("chromeScanBtn")
+        self.btn_scan_profiles_top.setIcon(
+            self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_BrowserReload)
+        )
+        self.btn_scan_profiles_top.setToolTip("Автообнаружение профилей Chrome в системе")
+        chrome_block.addWidget(self.btn_scan_profiles_top)
+        self.btn_open_chrome = QtWidgets.QPushButton("Запустить Chrome")
+        self.btn_open_chrome.setObjectName("chromeLaunchBtn")
+        chrome_block.addWidget(self.btn_open_chrome)
+        tb.addWidget(chrome_frame)
+
+        tb.addSpacing(12)
+
+        icon_dir = self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DirOpenIcon)
+
+        def make_folder_button(text: str) -> QtWidgets.QToolButton:
+            btn = QtWidgets.QToolButton()
+            btn.setObjectName("topFolderButton")
+            btn.setIcon(icon_dir)
+            btn.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+            btn.setText(text)
+            return btn
+
+        folders_frame = QtWidgets.QFrame()
+        folders_frame.setObjectName("foldersTopFrame")
+        folders_frame.setStyleSheet(
+            "QFrame#foldersTopFrame{background:rgba(15,23,42,0.85);border-radius:10px;padding:2px 8px;}"
+            "QLabel#foldersTopLabel{color:#cbd5f5;font-weight:600;}"
+        )
+        folders_block = QtWidgets.QHBoxLayout(folders_frame)
+        folders_block.setContentsMargins(4, 0, 4, 0)
+        folders_block.setSpacing(6)
+        lbl_folders = QtWidgets.QLabel("Каталоги")
+        lbl_folders.setObjectName("foldersTopLabel")
+        folders_block.addWidget(lbl_folders)
+        folders_block.addSpacing(4)
+        self.btn_open_root = make_folder_button("Проект")
+        self.btn_open_raw = make_folder_button("RAW")
+        self.btn_open_blur = make_folder_button("BLURRED")
+        self.btn_open_merge = make_folder_button("MERGED")
+        self.btn_open_images_top = make_folder_button("Images")
+        for btn in (
+            self.btn_open_root,
+            self.btn_open_raw,
+            self.btn_open_blur,
+            self.btn_open_merge,
+            self.btn_open_images_top,
+        ):
+            btn.setMaximumWidth(110)
+            folders_block.addWidget(btn)
+        tb.addWidget(folders_frame)
+
+        tb.addStretch(1)
+
         self.btn_start_selected = QtWidgets.QPushButton("Старт выбранного")
         self.btn_stop_all = QtWidgets.QPushButton("Стоп все")
-        tb.addWidget(self.btn_open_chrome)
-        tb.addWidget(self.btn_open_root)
-        tb.addWidget(self.btn_open_raw)
-        tb.addWidget(self.btn_open_blur)
-        tb.addWidget(self.btn_open_merge)
-        tb.addWidget(self.btn_quick_update)
-        tb.addStretch(1)
-        tb.addWidget(self.btn_start_selected)
-        tb.addWidget(self.btn_stop_all)
-        v.addLayout(tb)
+        action_block = QtWidgets.QHBoxLayout()
+        action_block.setContentsMargins(0, 0, 0, 0)
+        action_block.setSpacing(6)
+        action_block.addWidget(self.btn_start_selected)
+        action_block.addWidget(self.btn_stop_all)
+        tb.addLayout(action_block)
+
+        v.addWidget(toolbar)
 
         split = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
         split.setChildrenCollapsible(False)
@@ -1120,21 +1254,29 @@ class MainWindow(QtWidgets.QMainWindow):
         self.current_event_card = QtWidgets.QFrame()
         self.current_event_card.setObjectName("currentEventCard")
         self.current_event_card.setStyleSheet(
-            "QFrame#currentEventCard{background:#162132;border:1px solid #27364d;border-radius:14px;padding:0;}"
+            "QFrame#currentEventCard{background:transparent;border:1px solid #27364d;border-radius:14px;padding:0;}"
             "QLabel#currentEventTitle{color:#9fb7ff;font-size:11px;letter-spacing:1px;text-transform:uppercase;}"
-            "QLabel#currentEventBody{color:#f8fafc;font-size:15px;font-weight:600;}")
+            "QFrame#currentEventBodyFrame{background:rgba(76,110,245,0.2);border:1px solid #3b4cc0;border-radius:10px;}"
+            "QLabel#currentEventBody{color:#f8fafc;font-size:15px;font-weight:600;background:transparent;}"
+        )
         card_layout = QtWidgets.QVBoxLayout(self.current_event_card)
         card_layout.setContentsMargins(14, 12, 14, 12)
         self.lbl_current_event_title = QtWidgets.QLabel("Сейчас")
         self.lbl_current_event_title.setObjectName("currentEventTitle")
+        body_wrap = QtWidgets.QFrame()
+        body_wrap.setObjectName("currentEventBodyFrame")
+        body_layout = QtWidgets.QVBoxLayout(body_wrap)
+        body_layout.setContentsMargins(12, 8, 12, 8)
+        body_layout.setSpacing(0)
         self.lbl_current_event_body = QtWidgets.QLabel("—")
         self.lbl_current_event_body.setObjectName("currentEventBody")
         self.lbl_current_event_body.setWordWrap(True)
+        body_layout.addWidget(self.lbl_current_event_body)
         self.lbl_current_event_timer = QtWidgets.QLabel("—")
         self.lbl_current_event_timer.setObjectName("currentEventTimer")
         self.lbl_current_event_timer.setStyleSheet("color:#94a3b8;font-size:11px;")
         card_layout.addWidget(self.lbl_current_event_title)
-        card_layout.addWidget(self.lbl_current_event_body)
+        card_layout.addWidget(body_wrap)
         card_layout.addWidget(self.lbl_current_event_timer)
         current_layout.addWidget(self.current_event_card)
         self.activity_splitter.addWidget(current_wrap)
@@ -1158,6 +1300,15 @@ class MainWindow(QtWidgets.QMainWindow):
         act_header.addWidget(self.btn_activity_clear)
         history_layout.addLayout(act_header)
 
+        filter_row = QtWidgets.QHBoxLayout()
+        self.ed_activity_filter = QtWidgets.QLineEdit()
+        self.ed_activity_filter.setPlaceholderText("Фильтр по тексту или тегу…")
+        self.ed_activity_filter.setClearButtonEnabled(True)
+        self.btn_activity_export = QtWidgets.QPushButton("Экспорт")
+        filter_row.addWidget(self.ed_activity_filter, 1)
+        filter_row.addWidget(self.btn_activity_export)
+        history_layout.addLayout(filter_row)
+
         self.lst_activity = QtWidgets.QListWidget()
         self.lst_activity.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
         self.lst_activity.setUniformItemSizes(False)
@@ -1180,6 +1331,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # справа — вкладки
         self.tabs = QtWidgets.QTabWidget()
+        self.tabs.setTabPosition(QtWidgets.QTabWidget.TabPosition.North)
+        self.tabs.setDocumentMode(True)
+        self.tabs.setMovable(False)
         split.addWidget(self.tabs)
         split.setStretchFactor(0, 1)
         split.setStretchFactor(1, 3)
@@ -1189,7 +1343,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._apply_activity_visibility(self.chk_activity_visible.isChecked(), persist=False)
 
         # TAB: Задачи
-        def make_scroll_tab(margins=(12, 12, 12, 12), spacing=12):
+        def make_scroll_tab(margins=(12, 12, 12, 12), spacing=10):
             area = QtWidgets.QScrollArea()
             area.setWidgetResizable(True)
             area.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
@@ -1211,19 +1365,30 @@ class MainWindow(QtWidgets.QMainWindow):
         lt.addWidget(tasks_intro)
 
         self.task_tabs = QtWidgets.QTabWidget()
+        self.task_tabs.setTabPosition(QtWidgets.QTabWidget.TabPosition.North)
         lt.addWidget(self.task_tabs, 1)
 
         grp_choose = QtWidgets.QGroupBox("Что выполнить")
         f = QtWidgets.QFormLayout(grp_choose)
         f.setVerticalSpacing(6)
+        self.cb_do_images = QtWidgets.QCheckBox("Генерация картинок (Google)")
         self.cb_do_autogen = QtWidgets.QCheckBox("Вставка промптов в Sora")
         self.cb_do_download = QtWidgets.QCheckBox("Авто-скачка видео")
         self.cb_do_blur = QtWidgets.QCheckBox("Блюр водяного знака (ffmpeg, пресеты 9:16 / 16:9)")
         self.cb_do_merge = QtWidgets.QCheckBox("Склейка группами N")
         self.cb_do_upload = QtWidgets.QCheckBox("Загрузка на YouTube (отложенный постинг)")
         self.cb_do_tiktok = QtWidgets.QCheckBox("Загрузка в TikTok")
-        for box in (self.cb_do_autogen, self.cb_do_download, self.cb_do_blur, self.cb_do_merge, self.cb_do_upload, self.cb_do_tiktok):
+        for box in (
+            self.cb_do_images,
+            self.cb_do_autogen,
+            self.cb_do_download,
+            self.cb_do_blur,
+            self.cb_do_merge,
+            self.cb_do_upload,
+            self.cb_do_tiktok,
+        ):
             box.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        f.addRow(self.cb_do_images)
         f.addRow(self.cb_do_autogen)
         f.addRow(self.cb_do_download)
         f.addRow(self.cb_do_blur)
@@ -1234,7 +1399,11 @@ class MainWindow(QtWidgets.QMainWindow):
         grp_run = QtWidgets.QGroupBox("Запуск")
         hb2 = QtWidgets.QHBoxLayout(grp_run)
         self.btn_run_scenario = QtWidgets.QPushButton("Старт сценария (галочки сверху)")
+        self.btn_run_autogen_images = QtWidgets.QPushButton("Генерация картинок (Google)")
+        self.btn_open_genai_output = QtWidgets.QPushButton("Открыть папку картинок")
         hb2.addWidget(self.btn_run_scenario)
+        hb2.addWidget(self.btn_run_autogen_images)
+        hb2.addWidget(self.btn_open_genai_output)
         hb2.addStretch(1)
 
         grp_stat = QtWidgets.QGroupBox("Статистика / статус")
@@ -1265,6 +1434,8 @@ class MainWindow(QtWidgets.QMainWindow):
         strip = QtWidgets.QHBoxLayout(stats_strip)
         strip.setContentsMargins(18, 14, 18, 14)
         strip.setSpacing(16)
+
+        self._stat_desc_labels = {}
 
         def make_stat_card(key: str, title: str, desc: str, tooltip: str, accent: str) -> QtWidgets.QLabel:
             card = QtWidgets.QFrame()
@@ -1303,6 +1474,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
             card.setToolTip(tooltip)
             strip.addWidget(card, 1)
+            self._stat_desc_labels[key] = desc_lbl
             return value_lbl
 
         self.lbl_stat_raw = make_stat_card(
@@ -1339,6 +1511,14 @@ class MainWindow(QtWidgets.QMainWindow):
             "Очередь TikTok",
             "Сколько файлов ожидают выгрузку в TikTok",
             "#f472b6",
+        )
+
+        self.lbl_stat_images = make_stat_card(
+            "images",
+            "IMAGES",
+            "Сгенерированные картинки",
+            "Количество файлов в каталоге generated_images",
+            "#60a5fa",
         )
 
         strip.addStretch(1)
@@ -1425,21 +1605,32 @@ class MainWindow(QtWidgets.QMainWindow):
         merge_layout.addStretch(1)
         self.task_tabs.addTab(merge_tab, "Склейка")
 
-        self.tabs.addTab(self.tab_tasks, "Задачи")
-
         # TAB: YouTube uploader
         yt_cfg = self.cfg.get("youtube", {}) or {}
         self.tab_youtube, ty = make_scroll_tab()
+        yt_intro = QtWidgets.QLabel(
+            "Здесь настраивается отложенный постинг YouTube. Для авторизации скачай"
+            " <a href=\"https://console.cloud.google.com/apis/credentials\">client_secret.json</a>"
+            " в Google Cloud Console (OAuth 2.0) и разреши приложению доступ к каналу."
+            " После первого запуска рядом появится credentials.json."
+        )
+        yt_intro.setWordWrap(True)
+        yt_intro.setOpenExternalLinks(True)
+        yt_intro.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
+        ty.addWidget(yt_intro)
 
         grp_channels = QtWidgets.QGroupBox("Каналы и доступы")
         gc_layout = QtWidgets.QHBoxLayout(grp_channels)
-        gc_layout.setSpacing(12)
+        gc_layout.setSpacing(8)
+        gc_layout.setContentsMargins(12, 12, 12, 12)
 
         self.lst_youtube_channels = QtWidgets.QListWidget()
         self.lst_youtube_channels.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
         gc_layout.addWidget(self.lst_youtube_channels, 1)
 
         ch_form = QtWidgets.QFormLayout()
+        ch_form.setVerticalSpacing(6)
+        ch_form.setHorizontalSpacing(8)
         self.ed_yt_name = QtWidgets.QLineEdit()
 
         client_wrap = QtWidgets.QWidget(); client_l = QtWidgets.QHBoxLayout(client_wrap); client_l.setContentsMargins(0,0,0,0)
@@ -1478,6 +1669,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         grp_run = QtWidgets.QGroupBox("Публикация и расписание")
         gr_form = QtWidgets.QGridLayout(grp_run)
+        gr_form.setContentsMargins(12, 12, 12, 12)
+        gr_form.setVerticalSpacing(6)
+        gr_form.setHorizontalSpacing(8)
         row = 0
 
         self.cmb_youtube_channel = QtWidgets.QComboBox()
@@ -1516,11 +1710,13 @@ class MainWindow(QtWidgets.QMainWindow):
         gr_form.addWidget(self.sb_youtube_batch_limit, row, 1)
         row += 1
 
-        src_wrap = QtWidgets.QWidget(); src_l = QtWidgets.QHBoxLayout(src_wrap); src_l.setContentsMargins(0,0,0,0)
+        src_wrap = QtWidgets.QWidget(); src_l = QtWidgets.QHBoxLayout(src_wrap); src_l.setContentsMargins(0,0,0,0); src_l.setSpacing(4)
         self.ed_youtube_src = QtWidgets.QLineEdit(yt_cfg.get("upload_src_dir", self.cfg.get("merged_dir", str(MERG_DIR))))
         self.btn_youtube_src_browse = QtWidgets.QPushButton("…")
+        self.btn_youtube_src_open = QtWidgets.QToolButton(); self.btn_youtube_src_open.setText("↗"); self.btn_youtube_src_open.setToolTip("Открыть папку загрузок YouTube")
         src_l.addWidget(self.ed_youtube_src, 1)
         src_l.addWidget(self.btn_youtube_src_browse)
+        src_l.addWidget(self.btn_youtube_src_open)
         gr_form.addWidget(QtWidgets.QLabel("Папка с клипами:"), row, 0)
         gr_form.addWidget(src_wrap, row, 1, 1, 2)
         row += 1
@@ -1540,15 +1736,22 @@ class MainWindow(QtWidgets.QMainWindow):
 
         ty.addWidget(grp_run)
         ty.addStretch(1)
-        self.tabs.addTab(self.tab_youtube, "YouTube")
-
         tk_cfg = self.cfg.get("tiktok", {}) or {}
         self.tab_tiktok, tt = make_scroll_tab()
+        tt_intro = QtWidgets.QLabel(
+            "TikTok требует токен, который выдаёт <a href=\"https://developers.tiktok.com/\">TikTok for Developers</a>."
+            " Загрузите JSON/YAML с client_key, client_secret, open_id и refresh_token и укажите путь ниже."
+            " Расписание можно запускать локально или через GitHub Actions."
+        )
+        tt_intro.setWordWrap(True)
+        tt_intro.setOpenExternalLinks(True)
+        tt_intro.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
+        tt.addWidget(tt_intro)
 
         grp_tt_profiles = QtWidgets.QGroupBox("Профили и авторизация")
         tp_layout = QtWidgets.QHBoxLayout(grp_tt_profiles)
-        tp_layout.setSpacing(16)
-        tp_layout.setContentsMargins(16, 16, 16, 16)
+        tp_layout.setSpacing(10)
+        tp_layout.setContentsMargins(12, 12, 12, 12)
 
         self.lst_tiktok_profiles = QtWidgets.QListWidget()
         self.lst_tiktok_profiles.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
@@ -1559,7 +1762,7 @@ class MainWindow(QtWidgets.QMainWindow):
         profile_panel = QtWidgets.QWidget()
         profile_layout = QtWidgets.QVBoxLayout(profile_panel)
         profile_layout.setContentsMargins(0, 0, 0, 0)
-        profile_layout.setSpacing(10)
+        profile_layout.setSpacing(8)
 
         tt_hint = QtWidgets.QLabel("Укажи client_key, client_secret, open_id и refresh_token TikTok. Можно загрузить их из JSON/" "YAML файла и хранить вне конфига.")
         tt_hint.setWordWrap(True)
@@ -1567,7 +1770,8 @@ class MainWindow(QtWidgets.QMainWindow):
         profile_layout.addWidget(tt_hint)
 
         tt_form = QtWidgets.QFormLayout()
-        tt_form.setSpacing(10)
+        tt_form.setVerticalSpacing(6)
+        tt_form.setHorizontalSpacing(8)
         tt_form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         tt_form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
 
@@ -1629,7 +1833,7 @@ class MainWindow(QtWidgets.QMainWindow):
         tt_form.addRow("Шаблон подписи:", self.txt_tt_caption)
 
         btn_tt_row = QtWidgets.QHBoxLayout()
-        btn_tt_row.setSpacing(8)
+        btn_tt_row.setSpacing(6)
         self.btn_tt_add = QtWidgets.QPushButton("Сохранить")
         self.btn_tt_delete = QtWidgets.QPushButton("Удалить")
         self.btn_tt_set_active = QtWidgets.QPushButton("Сделать активным")
@@ -1649,6 +1853,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         grp_tt_run = QtWidgets.QGroupBox("Очередь и запуск")
         tr_layout = QtWidgets.QGridLayout(grp_tt_run)
+        tr_layout.setContentsMargins(12, 12, 12, 12)
+        tr_layout.setVerticalSpacing(6)
+        tr_layout.setHorizontalSpacing(8)
         tr_layout.setColumnStretch(1, 1)
         row = 0
 
@@ -1693,10 +1900,13 @@ class MainWindow(QtWidgets.QMainWindow):
         src_tt_wrap = QtWidgets.QWidget()
         src_tt_layout = QtWidgets.QHBoxLayout(src_tt_wrap)
         src_tt_layout.setContentsMargins(0, 0, 0, 0)
+        src_tt_layout.setSpacing(4)
         self.ed_tiktok_src = QtWidgets.QLineEdit(tk_cfg.get("upload_src_dir", self.cfg.get("merged_dir", str(MERG_DIR))))
         self.btn_tiktok_src_browse = QtWidgets.QPushButton("…")
+        self.btn_tiktok_src_open = QtWidgets.QToolButton(); self.btn_tiktok_src_open.setText("↗"); self.btn_tiktok_src_open.setToolTip("Открыть папку загрузок TikTok")
         src_tt_layout.addWidget(self.ed_tiktok_src, 1)
         src_tt_layout.addWidget(self.btn_tiktok_src_browse)
+        src_tt_layout.addWidget(self.btn_tiktok_src_open)
         tr_layout.addWidget(QtWidgets.QLabel("Папка с клипами:"), row, 0)
         tr_layout.addWidget(src_tt_wrap, row, 1, 1, 2)
         row += 1
@@ -1730,8 +1940,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
         tt.addWidget(grp_tt_run)
         tt.addSpacing(6)
-        self.tabs.addTab(self.tab_tiktok, "TikTok")
-
         self._toggle_tiktok_schedule()
 
         # TAB: Промпты
@@ -1793,7 +2001,7 @@ class MainWindow(QtWidgets.QMainWindow):
         editor_bar = QtWidgets.QHBoxLayout()
         self.btn_load_prompts = QtWidgets.QPushButton("Обновить файл")
         self.btn_save_prompts = QtWidgets.QPushButton("Сохранить изменения")
-        self.btn_save_and_run_autogen = QtWidgets.QPushButton("Сохранить и запустить автоген")
+        self.btn_save_and_run_autogen = QtWidgets.QPushButton("Сохранить и запустить автоген (видео)")
         editor_bar.addWidget(self.btn_load_prompts)
         editor_bar.addWidget(self.btn_save_prompts)
         editor_bar.addStretch(1)
@@ -1846,7 +2054,46 @@ class MainWindow(QtWidgets.QMainWindow):
         prompts_stack.setStretchFactor(0, 3)
         prompts_stack.setStretchFactor(1, 2)
         QtCore.QTimer.singleShot(0, lambda: prompts_stack.setSizes([360, 220]))
-        self.tabs.addTab(self.tab_prompts, "Промпты")
+        # TAB: Промпты картинок
+        self.tab_image_prompts = QtWidgets.QWidget()
+        ip_layout = QtWidgets.QVBoxLayout(self.tab_image_prompts)
+        ip_layout.setContentsMargins(12, 12, 12, 12)
+        ip_layout.setSpacing(12)
+
+        ip_intro = QtWidgets.QLabel(
+            "Задай отдельные промпты для генерации изображений. Строки применяются последовательно к основным промптам."
+        )
+        ip_intro.setWordWrap(True)
+        ip_intro.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
+        ip_layout.addWidget(ip_intro)
+
+        ip_bar = QtWidgets.QHBoxLayout()
+        self.btn_load_image_prompts = QtWidgets.QPushButton("Обновить файл")
+        self.btn_save_image_prompts = QtWidgets.QPushButton("Сохранить изменения")
+        ip_bar.addWidget(self.btn_load_image_prompts)
+        ip_bar.addWidget(self.btn_save_image_prompts)
+        ip_bar.addStretch(1)
+        ip_layout.addLayout(ip_bar)
+
+        self.lbl_image_prompts_path = QtWidgets.QLabel("—")
+        self.lbl_image_prompts_path.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
+        self.lbl_image_prompts_path.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        ip_layout.addWidget(self.lbl_image_prompts_path)
+
+        self.ed_image_prompts = QtWidgets.QPlainTextEdit()
+        self.ed_image_prompts.setPlaceholderText(
+            "Одна строка = один image prompt. Можно использовать JSON, чтобы задать поля `prompt`, `prompts` или `count`."
+        )
+        self.ed_image_prompts.setLineWrapMode(QtWidgets.QPlainTextEdit.LineWrapMode.NoWrap)
+        self.ed_image_prompts.setFont(mono)
+        ip_layout.addWidget(self.ed_image_prompts, 1)
+
+        ip_hint = QtWidgets.QLabel(
+            "Пустые строки и комментарии (#) пропускаются. JSON-строки позволяют указать несколько image-промптов и количество кадров."
+        )
+        ip_hint.setWordWrap(True)
+        ip_hint.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
+        ip_layout.addWidget(ip_hint)
 
         # TAB: Названия
         self.tab_titles = QtWidgets.QWidget(); pt = QtWidgets.QVBoxLayout(self.tab_titles)
@@ -1863,8 +2110,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ed_titles = QtWidgets.QPlainTextEdit()
         self.ed_titles.setPlaceholderText("Желаемые имена (по строке)…")
         pt.addWidget(self.ed_titles, 1)
-        self.tabs.addTab(self.tab_titles, "Названия")
-
         # TAB: Настройки
         self.tab_settings = QtWidgets.QScrollArea()
         self.tab_settings.setWidgetResizable(True)
@@ -1877,23 +2122,14 @@ class MainWindow(QtWidgets.QMainWindow):
         settings_layout.addWidget(settings_intro)
 
         self.settings_tabs = QtWidgets.QTabWidget()
+        self.settings_tabs.setTabPosition(QtWidgets.QTabWidget.TabPosition.North)
         settings_layout.addWidget(self.settings_tabs, 1)
 
-        self._build_settings_pages()
-
-        controls_row = QtWidgets.QHBoxLayout()
-        self.lbl_settings_status = QtWidgets.QLabel("Изменения сохраняются автоматически")
-        self.lbl_settings_status.setStyleSheet("color:#2c3e50;")
-        self.btn_save_settings = QtWidgets.QPushButton("Применить настройки")
-        controls_row.addWidget(self.lbl_settings_status)
-        controls_row.addStretch(1)
-        controls_row.addWidget(self.btn_save_settings)
-        settings_layout.addLayout(controls_row)
-
-        self.tab_settings.setWidget(settings_body)
-        self.tabs.addTab(self.tab_settings, "Настройки")
-        # TAB: Ошибки
-        self.tab_errors = QtWidgets.QWidget(); err_layout = QtWidgets.QVBoxLayout(self.tab_errors)
+        # Справочники (перенесены в настройки)
+        self.tab_errors = QtWidgets.QWidget()
+        err_layout = QtWidgets.QVBoxLayout(self.tab_errors)
+        err_layout.setContentsMargins(12, 12, 12, 12)
+        err_layout.setSpacing(8)
         self.tbl_errors = QtWidgets.QTableWidget(len(ERROR_GUIDE), 3)
         self.tbl_errors.setHorizontalHeaderLabels(["Код", "Что означает", "Что сделать"])
         self.tbl_errors.verticalHeader().setVisible(False)
@@ -1907,14 +2143,55 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tbl_errors.setItem(row, 1, QtWidgets.QTableWidgetItem(meaning))
             self.tbl_errors.setItem(row, 2, QtWidgets.QTableWidgetItem(action))
         err_layout.addWidget(self.tbl_errors)
-        self.tabs.addTab(self.tab_errors, "Ошибки")
-        # TAB: История
-        self.tab_history = QtWidgets.QWidget(); h = QtWidgets.QVBoxLayout(self.tab_history)
-        self.btn_reload_history = QtWidgets.QPushButton("Обновить")
-        self.txt_history = QtWidgets.QPlainTextEdit(); self.txt_history.setReadOnly(True)
-        h.addWidget(self.btn_reload_history, 0, QtCore.Qt.AlignmentFlag.AlignLeft)
+        self.tab_history = QtWidgets.QWidget()
+        h = QtWidgets.QVBoxLayout(self.tab_history)
+        h.setContentsMargins(12, 12, 12, 12)
+        h.setSpacing(8)
+        self.txt_history = QtWidgets.QPlainTextEdit()
+        self.txt_history.setReadOnly(True)
         h.addWidget(self.txt_history, 1)
-        self.tabs.addTab(self.tab_history, "История")
+
+        self._build_settings_pages()
+
+        controls_row = QtWidgets.QHBoxLayout()
+        self.lbl_settings_status = QtWidgets.QLabel("Изменения сохраняются автоматически")
+        self.lbl_settings_status.setStyleSheet("color:#2c3e50;")
+        self.btn_save_settings = QtWidgets.QPushButton("Применить настройки")
+        controls_row.addWidget(self.lbl_settings_status)
+        controls_row.addStretch(1)
+        controls_row.addWidget(self.btn_save_settings)
+        settings_layout.addLayout(controls_row)
+
+        self.tab_settings.setWidget(settings_body)
+
+        overview_host = QtWidgets.QWidget()
+        overview_layout = QtWidgets.QVBoxLayout(overview_host)
+        overview_layout.setContentsMargins(0, 0, 0, 0)
+        overview_layout.addWidget(self.tab_tasks, 1)
+        self.tabs.addTab(overview_host, "Обзор")
+
+        content_host = QtWidgets.QWidget()
+        content_layout = QtWidgets.QVBoxLayout(content_host)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        self.content_tabs = QtWidgets.QTabWidget()
+        self.content_tabs.setTabPosition(QtWidgets.QTabWidget.TabPosition.North)
+        self.content_tabs.addTab(self.tab_prompts, "Промпты Sora")
+        self.content_tabs.addTab(self.tab_image_prompts, "Промпты картинок")
+        self.content_tabs.addTab(self.tab_titles, "Названия")
+        content_layout.addWidget(self.content_tabs)
+        self.tabs.addTab(content_host, "Контент")
+
+        autopost_host = QtWidgets.QWidget()
+        autopost_layout = QtWidgets.QVBoxLayout(autopost_host)
+        autopost_layout.setContentsMargins(0, 0, 0, 0)
+        self.autopost_tabs = QtWidgets.QTabWidget()
+        self.autopost_tabs.setTabPosition(QtWidgets.QTabWidget.TabPosition.North)
+        self.autopost_tabs.addTab(self.tab_youtube, "YouTube")
+        self.autopost_tabs.addTab(self.tab_tiktok, "TikTok")
+        autopost_layout.addWidget(self.autopost_tabs)
+        self.tabs.addTab(autopost_host, "Автопостинг")
+
+        self.tabs.addTab(self.tab_settings, "Настройки")
 
         self._load_zones_into_ui()
         self._toggle_youtube_schedule()
@@ -1925,52 +2202,128 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # --- Пути проекта ---
         page_paths = QtWidgets.QWidget()
-        grid_paths = QtWidgets.QGridLayout(page_paths)
+        paths_layout = QtWidgets.QVBoxLayout(page_paths)
+        paths_layout.setContentsMargins(12, 12, 12, 12)
+        paths_layout.setSpacing(8)
+
+        paths_hint = QtWidgets.QLabel(
+            "Рабочие папки используются сценариями автогена, блюра и загрузчиков."
+            " Убедись, что каталоги существуют или выбери другие через кнопку «…»."
+            " Подробности смотри на вкладке «Документация → Каталоги» внутри приложения."
+        )
+        paths_hint.setWordWrap(True)
+        paths_hint.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
+        paths_layout.addWidget(paths_hint)
+
+        grid_holder = QtWidgets.QWidget()
+        grid_paths = QtWidgets.QGridLayout(grid_holder)
+        grid_paths.setContentsMargins(0, 0, 0, 0)
         grid_paths.setColumnStretch(1, 1)
-        grid_paths.setVerticalSpacing(8)
+        grid_paths.setVerticalSpacing(4)
         grid_paths.setHorizontalSpacing(10)
         row = 0
 
-        self.ed_root = QtWidgets.QLineEdit(self.cfg.get("project_root", str(PROJECT_ROOT)))
-        self.btn_browse_root = QtWidgets.QPushButton("…")
-        grid_paths.addWidget(QtWidgets.QLabel("Папка проекта:"), row, 0)
-        grid_paths.addWidget(self.ed_root, row, 1)
-        grid_paths.addWidget(self.btn_browse_root, row, 2)
-        row += 1
+        def add_path_row(label_text: str, line_attr: str, browse_attr: str, open_attr: str, value: str, tooltip: str = "Открыть папку"):
+            nonlocal row
+            label = QtWidgets.QLabel(label_text)
+            wrap = QtWidgets.QWidget()
+            wrap_layout = QtWidgets.QHBoxLayout(wrap)
+            wrap_layout.setContentsMargins(0, 0, 0, 0)
+            wrap_layout.setSpacing(4)
+            line = QtWidgets.QLineEdit(value)
+            setattr(self, line_attr, line)
+            browse_btn = QtWidgets.QToolButton()
+            browse_btn.setText("…")
+            setattr(self, browse_attr, browse_btn)
+            open_btn = QtWidgets.QToolButton()
+            open_btn.setText("↗")
+            open_btn.setToolTip(tooltip)
+            setattr(self, open_attr, open_btn)
+            wrap_layout.addWidget(line, 1)
+            wrap_layout.addWidget(browse_btn)
+            wrap_layout.addWidget(open_btn)
+            grid_paths.addWidget(label, row, 0)
+            grid_paths.addWidget(wrap, row, 1, 1, 2)
+            row += 1
+            return line
 
-        self.ed_downloads = QtWidgets.QLineEdit(self.cfg.get("downloads_dir", str(DL_DIR)))
-        self.btn_browse_downloads = QtWidgets.QPushButton("…")
-        grid_paths.addWidget(QtWidgets.QLabel("Папка RAW:"), row, 0)
-        grid_paths.addWidget(self.ed_downloads, row, 1)
-        grid_paths.addWidget(self.btn_browse_downloads, row, 2)
-        row += 1
+        self.ed_root = add_path_row(
+            "Папка проекта:",
+            "ed_root",
+            "btn_browse_root",
+            "btn_open_root_path",
+            self.cfg.get("project_root", str(PROJECT_ROOT)),
+            "Открыть корень проекта",
+        )
 
-        self.ed_blurred = QtWidgets.QLineEdit(self.cfg.get("blurred_dir", str(BLUR_DIR)))
-        self.btn_browse_blurred = QtWidgets.QPushButton("…")
-        grid_paths.addWidget(QtWidgets.QLabel("Папка BLURRED:"), row, 0)
-        grid_paths.addWidget(self.ed_blurred, row, 1)
-        grid_paths.addWidget(self.btn_browse_blurred, row, 2)
-        row += 1
+        self.ed_downloads = add_path_row(
+            "Папка RAW:",
+            "ed_downloads",
+            "btn_browse_downloads",
+            "btn_open_downloads_path",
+            self.cfg.get("downloads_dir", str(DL_DIR)),
+        )
 
-        self.ed_merged = QtWidgets.QLineEdit(self.cfg.get("merged_dir", str(MERG_DIR)))
-        self.btn_browse_merged = QtWidgets.QPushButton("…")
-        grid_paths.addWidget(QtWidgets.QLabel("Папка MERGED:"), row, 0)
-        grid_paths.addWidget(self.ed_merged, row, 1)
-        grid_paths.addWidget(self.btn_browse_merged, row, 2)
-        row += 1
+        self.ed_blurred = add_path_row(
+            "Папка BLURRED:",
+            "ed_blurred",
+            "btn_browse_blurred",
+            "btn_open_blurred_path",
+            self.cfg.get("blurred_dir", str(BLUR_DIR)),
+        )
 
-        self.ed_blur_src = QtWidgets.QLineEdit(self.cfg.get("blur_src_dir", self.cfg.get("downloads_dir", str(DL_DIR))))
-        self.btn_browse_blur_src = QtWidgets.QPushButton("…")
-        grid_paths.addWidget(QtWidgets.QLabel("Источник BLUR:"), row, 0)
-        grid_paths.addWidget(self.ed_blur_src, row, 1)
-        grid_paths.addWidget(self.btn_browse_blur_src, row, 2)
-        row += 1
+        self.ed_merged = add_path_row(
+            "Папка MERGED:",
+            "ed_merged",
+            "btn_browse_merged",
+            "btn_open_merged_path",
+            self.cfg.get("merged_dir", str(MERG_DIR)),
+        )
 
-        self.ed_merge_src = QtWidgets.QLineEdit(self.cfg.get("merge_src_dir", self.cfg.get("blurred_dir", str(BLUR_DIR))))
-        self.btn_browse_merge_src = QtWidgets.QPushButton("…")
-        grid_paths.addWidget(QtWidgets.QLabel("Источник MERGE:"), row, 0)
-        grid_paths.addWidget(self.ed_merge_src, row, 1)
-        grid_paths.addWidget(self.btn_browse_merge_src, row, 2)
+        self.ed_blur_src = add_path_row(
+            "Источник BLUR:",
+            "ed_blur_src",
+            "btn_browse_blur_src",
+            "btn_open_blur_src_path",
+            self.cfg.get("blur_src_dir", self.cfg.get("downloads_dir", str(DL_DIR))),
+        )
+
+        self.ed_merge_src = add_path_row(
+            "Источник MERGE:",
+            "ed_merge_src",
+            "btn_browse_merge_src",
+            "btn_open_merge_src_path",
+            self.cfg.get("merge_src_dir", self.cfg.get("blurred_dir", str(BLUR_DIR))),
+        )
+
+        self.ed_images_dir = add_path_row(
+            "Изображения (Google AI):",
+            "ed_images_dir",
+            "btn_browse_images_dir",
+            "btn_open_images_dir",
+            self.cfg.get("google_genai", {}).get("output_dir", str(IMAGES_DIR)),
+        )
+
+        self.ed_history_path = add_path_row(
+            "Файл истории:",
+            "ed_history_path",
+            "btn_browse_history_path",
+            "btn_open_history_path",
+            self.cfg.get("history_file", str(HIST_FILE)),
+            "Открыть файл истории",
+        )
+
+        self.ed_titles_path = add_path_row(
+            "Файл названий:",
+            "ed_titles_path",
+            "btn_browse_titles_path",
+            "btn_open_titles_path",
+            self.cfg.get("titles_file", str(TITLES_FILE)),
+            "Открыть файл titles.txt",
+        )
+
+        paths_layout.addWidget(grid_holder)
+        paths_layout.addStretch(1)
 
         self._blur_src_autofollow = _same_path(self.cfg.get("blur_src_dir"), self.cfg.get("downloads_dir"))
         self._merge_src_autofollow = _same_path(self.cfg.get("merge_src_dir"), self.cfg.get("blurred_dir"))
@@ -2107,39 +2460,84 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # --- YouTube дефолты ---
         page_yt = QtWidgets.QWidget()
-        grid_yt = QtWidgets.QGridLayout(page_yt)
+        yt_layout = QtWidgets.QVBoxLayout(page_yt)
+        yt_layout.setContentsMargins(12, 12, 12, 12)
+        yt_layout.setSpacing(8)
+
+        yt_intro = QtWidgets.QLabel(
+            "Укажи значения по умолчанию для очередей YouTube. Подробные шаги есть во вкладке «Документация → Автопостинг YouTube»."
+        )
+        yt_intro.setWordWrap(True)
+        yt_intro.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
+        yt_layout.addWidget(yt_intro)
+
+        grp_yt = QtWidgets.QGroupBox("Параметры очереди по умолчанию")
+        grid_yt = QtWidgets.QGridLayout(grp_yt)
         grid_yt.setColumnStretch(1, 1)
-        self.sb_youtube_default_delay = QtWidgets.QSpinBox(); self.sb_youtube_default_delay.setRange(0, 7 * 24 * 60)
+        grid_yt.setHorizontalSpacing(8)
+        grid_yt.setVerticalSpacing(6)
+
+        self.sb_youtube_default_delay = QtWidgets.QSpinBox()
+        self.sb_youtube_default_delay.setRange(0, 7 * 24 * 60)
         self.sb_youtube_default_delay.setValue(int(yt_cfg.get("schedule_minutes_from_now", 60)))
         grid_yt.addWidget(QtWidgets.QLabel("Отложить по умолчанию (мин):"), 0, 0)
         grid_yt.addWidget(self.sb_youtube_default_delay, 0, 1)
+
         self.cb_youtube_default_draft = QtWidgets.QCheckBox("По умолчанию только приватный черновик")
         self.cb_youtube_default_draft.setChecked(bool(yt_cfg.get("draft_only", False)))
         grid_yt.addWidget(self.cb_youtube_default_draft, 1, 0, 1, 2)
 
-        archive_wrap = QtWidgets.QWidget(); archive_l = QtWidgets.QHBoxLayout(archive_wrap); archive_l.setContentsMargins(0, 0, 0, 0)
+        archive_wrap = QtWidgets.QWidget()
+        archive_l = QtWidgets.QHBoxLayout(archive_wrap)
+        archive_l.setContentsMargins(0, 0, 0, 0)
+        archive_l.setSpacing(4)
         self.ed_youtube_archive = QtWidgets.QLineEdit(yt_cfg.get("archive_dir", str(PROJECT_ROOT / "uploaded")))
         self.btn_youtube_archive_browse = QtWidgets.QPushButton("…")
+        self.btn_youtube_archive_open = QtWidgets.QToolButton()
+        self.btn_youtube_archive_open.setText("↗")
+        self.btn_youtube_archive_open.setToolTip("Открыть папку архива YouTube")
         archive_l.addWidget(self.ed_youtube_archive, 1)
         archive_l.addWidget(self.btn_youtube_archive_browse)
+        archive_l.addWidget(self.btn_youtube_archive_open)
         grid_yt.addWidget(QtWidgets.QLabel("Архив загруженных:"), 2, 0)
         grid_yt.addWidget(archive_wrap, 2, 1)
 
         grid_yt.addWidget(QtWidgets.QLabel("Интервал для пакетов (мин):"), 3, 0)
-        self.sb_youtube_interval_default = QtWidgets.QSpinBox(); self.sb_youtube_interval_default.setRange(0, 7 * 24 * 60)
+        self.sb_youtube_interval_default = QtWidgets.QSpinBox()
+        self.sb_youtube_interval_default.setRange(0, 7 * 24 * 60)
         self.sb_youtube_interval_default.setValue(int(yt_cfg.get("batch_step_minutes", 60)))
         grid_yt.addWidget(self.sb_youtube_interval_default, 3, 1)
+
         grid_yt.addWidget(QtWidgets.QLabel("Ограничение пакета (0 = все):"), 4, 0)
-        self.sb_youtube_limit_default = QtWidgets.QSpinBox(); self.sb_youtube_limit_default.setRange(0, 999)
+        self.sb_youtube_limit_default = QtWidgets.QSpinBox()
+        self.sb_youtube_limit_default.setRange(0, 999)
         self.sb_youtube_limit_default.setValue(int(yt_cfg.get("batch_limit", 0)))
         grid_yt.addWidget(self.sb_youtube_limit_default, 4, 1)
+
+        yt_layout.addWidget(grp_yt)
+        yt_layout.addStretch(1)
 
         self.settings_tabs.addTab(page_yt, "YouTube")
 
         page_tt = QtWidgets.QWidget()
-        grid_tt = QtWidgets.QGridLayout(page_tt)
-        grid_tt.setColumnStretch(1, 1)
+        tt_layout = QtWidgets.QVBoxLayout(page_tt)
+        tt_layout.setContentsMargins(12, 12, 12, 12)
+        tt_layout.setSpacing(8)
         tk_defaults = self.cfg.get("tiktok", {}) or {}
+
+        tt_intro = QtWidgets.QLabel(
+            "Эти параметры используются при автопостинге TikTok. Дополнительные пояснения смотри во вкладке "
+            "«Документация → Автопостинг TikTok»."
+        )
+        tt_intro.setWordWrap(True)
+        tt_intro.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
+        tt_layout.addWidget(tt_intro)
+
+        grp_tt = QtWidgets.QGroupBox("Параметры очереди по умолчанию")
+        grid_tt = QtWidgets.QGridLayout(grp_tt)
+        grid_tt.setColumnStretch(1, 1)
+        grid_tt.setHorizontalSpacing(8)
+        grid_tt.setVerticalSpacing(6)
 
         self.sb_tiktok_default_delay = QtWidgets.QSpinBox()
         self.sb_tiktok_default_delay.setRange(0, 7 * 24 * 60)
@@ -2154,10 +2552,15 @@ class MainWindow(QtWidgets.QMainWindow):
         archive_tt_wrap = QtWidgets.QWidget()
         archive_tt_layout = QtWidgets.QHBoxLayout(archive_tt_wrap)
         archive_tt_layout.setContentsMargins(0, 0, 0, 0)
+        archive_tt_layout.setSpacing(4)
         self.ed_tiktok_archive = QtWidgets.QLineEdit(tk_defaults.get("archive_dir", str(PROJECT_ROOT / "uploaded_tiktok")))
         self.btn_tiktok_archive_browse = QtWidgets.QPushButton("…")
+        self.btn_tiktok_archive_open = QtWidgets.QToolButton()
+        self.btn_tiktok_archive_open.setText("↗")
+        self.btn_tiktok_archive_open.setToolTip("Открыть архив TikTok")
         archive_tt_layout.addWidget(self.ed_tiktok_archive, 1)
         archive_tt_layout.addWidget(self.btn_tiktok_archive_browse)
+        archive_tt_layout.addWidget(self.btn_tiktok_archive_open)
         grid_tt.addWidget(QtWidgets.QLabel("Архив загруженных:"), 2, 0)
         grid_tt.addWidget(archive_tt_wrap, 2, 1)
 
@@ -2176,12 +2579,16 @@ class MainWindow(QtWidgets.QMainWindow):
         workflow_tt_wrap = QtWidgets.QWidget()
         workflow_tt_layout = QtWidgets.QHBoxLayout(workflow_tt_wrap)
         workflow_tt_layout.setContentsMargins(0, 0, 0, 0)
+        workflow_tt_layout.setSpacing(4)
         self.ed_tiktok_workflow_settings = QtWidgets.QLineEdit(tk_defaults.get("github_workflow", ".github/workflows/tiktok-upload.yml"))
         self.ed_tiktok_ref_settings = QtWidgets.QLineEdit(tk_defaults.get("github_ref", "main"))
         workflow_tt_layout.addWidget(self.ed_tiktok_workflow_settings, 1)
         workflow_tt_layout.addWidget(self.ed_tiktok_ref_settings, 1)
         grid_tt.addWidget(QtWidgets.QLabel("Workflow / Branch:"), 5, 0)
         grid_tt.addWidget(workflow_tt_wrap, 5, 1)
+
+        tt_layout.addWidget(grp_tt)
+        tt_layout.addStretch(1)
 
         self.settings_tabs.addTab(page_tt, "TikTok")
 
@@ -2275,8 +2682,104 @@ class MainWindow(QtWidgets.QMainWindow):
         fa.addRow("Длительность паузы, сек:", self.sb_auto_success_pause)
         fa.addRow(self.btn_save_autogen_cfg)
         auto_layout.addWidget(grp_auto)
+
         auto_layout.addStretch(1)
         self.settings_tabs.addTab(page_auto, "Автоген")
+
+        # --- Google AI Studio ---
+        page_genai = QtWidgets.QWidget()
+        genai_layout = QtWidgets.QVBoxLayout(page_genai)
+        genai_layout.setContentsMargins(12, 12, 12, 12)
+        genai_layout.setSpacing(12)
+
+        genai_cfg = self.cfg.get("google_genai", {}) or {}
+        grp_genai = QtWidgets.QGroupBox("Google AI Studio — генерация изображений")
+        fg = QtWidgets.QFormLayout(grp_genai)
+
+        self.cb_genai_enabled = QtWidgets.QCheckBox("Включить генерацию изображений перед отправкой промпта")
+        self.cb_genai_enabled.setChecked(bool(genai_cfg.get("enabled", False)))
+        fg.addRow(self.cb_genai_enabled)
+
+        self.cb_genai_attach = QtWidgets.QCheckBox("Прикреплять сгенерированные изображения к заявке в Sora")
+        self.cb_genai_attach.setChecked(bool(genai_cfg.get("attach_to_sora", True)))
+        fg.addRow(self.cb_genai_attach)
+
+        self.ed_genai_api_key = QtWidgets.QLineEdit(genai_cfg.get("api_key", ""))
+        self.ed_genai_api_key.setPlaceholderText("AIza...")
+        self.ed_genai_api_key.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
+        fg.addRow("API ключ:", self.ed_genai_api_key)
+
+        self.ed_genai_model = QtWidgets.QLineEdit(genai_cfg.get("model", "models/imagen-4.0-generate-001"))
+        fg.addRow("Модель:", self.ed_genai_model)
+
+        self.cmb_genai_person = QtWidgets.QComboBox()
+        self.cmb_genai_person.setEditable(True)
+        self.cmb_genai_person.setInsertPolicy(QtWidgets.QComboBox.InsertPolicy.NoInsert)
+        self.cmb_genai_person.addItem("По умолчанию (без явного запрета)", "")
+        self.cmb_genai_person.addItem("ALLOW_ALL (устар.)", "ALLOW_ALL")
+        self.cmb_genai_person.addItem("BLOCK_ALL (устар.)", "BLOCK_ALL")
+        person_val = str(genai_cfg.get("person_generation", "") or "")
+        idx_person = self.cmb_genai_person.findData(person_val)
+        if idx_person < 0:
+            label = person_val or ""
+            if label:
+                self.cmb_genai_person.addItem(label, person_val)
+                idx_person = self.cmb_genai_person.count() - 1
+            else:
+                idx_person = 0
+        self.cmb_genai_person.setCurrentIndex(idx_person)
+        self.cmb_genai_person.lineEdit().setPlaceholderText("оставь пустым, чтобы следовать политике модели")
+        fg.addRow("Генерация людей:", self.cmb_genai_person)
+
+        self.ed_genai_aspect = QtWidgets.QLineEdit(str(genai_cfg.get("aspect_ratio", "1:1")))
+        fg.addRow("Соотношение сторон:", self.ed_genai_aspect)
+
+        self.ed_genai_size = QtWidgets.QLineEdit(str(genai_cfg.get("image_size", "1K")))
+        fg.addRow("Размер:", self.ed_genai_size)
+
+        self.ed_genai_mime = QtWidgets.QLineEdit(str(genai_cfg.get("output_mime_type", "image/jpeg")))
+        fg.addRow("MIME-тип:", self.ed_genai_mime)
+
+        self.sb_genai_images = QtWidgets.QSpinBox()
+        self.sb_genai_images.setRange(1, 8)
+        self.sb_genai_images.setValue(int(genai_cfg.get("number_of_images", 1) or 1))
+        fg.addRow("Картинок на промпт:", self.sb_genai_images)
+
+        self.sb_genai_rpm = QtWidgets.QSpinBox()
+        self.sb_genai_rpm.setRange(0, 120)
+        self.sb_genai_rpm.setSpecialValueText("без ограничений")
+        self.sb_genai_rpm.setValue(int(genai_cfg.get("rate_limit_per_minute", 0) or 0))
+        fg.addRow("Лимит запросов в минуту:", self.sb_genai_rpm)
+
+        self.sb_genai_retries = QtWidgets.QSpinBox()
+        self.sb_genai_retries.setRange(0, 10)
+        self.sb_genai_retries.setValue(int(genai_cfg.get("max_retries", 3) or 0))
+        fg.addRow("Повторов при ошибке:", self.sb_genai_retries)
+
+        output_dir = genai_cfg.get("output_dir", str(IMAGES_DIR))
+        self.ed_genai_output_dir = QtWidgets.QLineEdit(str(output_dir))
+        self.btn_genai_output_browse = QtWidgets.QPushButton("…")
+        self.btn_genai_output_open = QtWidgets.QToolButton(); self.btn_genai_output_open.setText("↗"); self.btn_genai_output_open.setToolTip("Открыть папку вывода")
+        row_widget = QtWidgets.QWidget()
+        row_layout = QtWidgets.QHBoxLayout(row_widget)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(6)
+        row_layout.addWidget(self.ed_genai_output_dir, 1)
+        row_layout.addWidget(self.btn_genai_output_browse, 0)
+        row_layout.addWidget(self.btn_genai_output_open, 0)
+        fg.addRow("Папка вывода:", row_widget)
+
+        hint = QtWidgets.QLabel("Папка вывода создаётся автоматически. Настройки применяются при запуске автогена.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
+        fg.addRow(hint)
+
+        genai_layout.addWidget(grp_genai)
+        genai_layout.addStretch(1)
+        self.settings_tabs.addTab(page_genai, "Генерация картинок")
+
+        self.settings_tabs.addTab(self.tab_history, "История")
+        self.settings_tabs.addTab(self.tab_errors, "Ошибки")
 
         page_docs = QtWidgets.QWidget()
         docs_layout = QtWidgets.QVBoxLayout(page_docs)
@@ -2290,7 +2793,30 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_reload_readme = QtWidgets.QPushButton("Обновить README")
         docs_btn_row.addWidget(self.btn_reload_readme)
         docs_layout.addLayout(docs_btn_row)
-        self.settings_tabs.addTab(page_docs, "Документация")
+        self.tab_docs = page_docs
+        self.idx_settings_docs = self.settings_tabs.addTab(page_docs, "Документация")
+
+        page_sequence = [
+            ("Каталоги", page_paths),
+            ("Генерация картинок", page_genai),
+            ("Автоген", page_auto),
+            ("FFmpeg", page_ff),
+            ("Chrome", page_chrome),
+            ("YouTube", page_yt),
+            ("TikTok", page_tt),
+            ("Telegram", page_tg),
+            ("Интерфейс", page_ui),
+            ("Обслуживание", page_maint),
+            ("Ошибки", self.tab_errors),
+            ("Документация", page_docs),
+            ("История", self.tab_history),
+        ]
+        tab_bar = self.settings_tabs.tabBar()
+        for target, (_, widget) in enumerate(page_sequence):
+            idx_current = self.settings_tabs.indexOf(widget)
+            if idx_current >= 0 and idx_current != target:
+                tab_bar.moveTab(idx_current, target)
+        self.idx_settings_docs = self.settings_tabs.indexOf(page_docs)
 
         self._refresh_path_fields()
         self.cb_ui_show_activity.toggled.connect(self._on_settings_activity_toggle)
@@ -2302,14 +2828,21 @@ class MainWindow(QtWidgets.QMainWindow):
             (self.ed_merged, self.cfg.get("merged_dir", str(MERG_DIR))),
             (self.ed_blur_src, self.cfg.get("blur_src_dir", self.cfg.get("downloads_dir", str(DL_DIR)))),
             (self.ed_merge_src, self.cfg.get("merge_src_dir", self.cfg.get("blurred_dir", str(BLUR_DIR)))),
+            (getattr(self, "ed_images_dir", None), self.cfg.get("google_genai", {}).get("output_dir", str(IMAGES_DIR))),
+            (getattr(self, "ed_history_path", None), self.cfg.get("history_file", str(HIST_FILE))),
+            (getattr(self, "ed_titles_path", None), self.cfg.get("titles_file", str(TITLES_FILE))),
             (getattr(self, "ed_tiktok_src", None), self.cfg.get("tiktok", {}).get("upload_src_dir", self.cfg.get("merged_dir", str(MERG_DIR))))
         ]
+        if hasattr(self, "ed_genai_output_dir"):
+            mapping.append((self.ed_genai_output_dir, self.cfg.get("google_genai", {}).get("output_dir", str(IMAGES_DIR))))
         for line, value in mapping:
             if not isinstance(line, QtWidgets.QLineEdit):
                 continue
             line.blockSignals(True)
             line.setText(str(value))
             line.blockSignals(False)
+        if hasattr(self, "ed_images_dir") and hasattr(self, "ed_genai_output_dir"):
+            self._sync_image_dirs(from_catalog=True)
 
     def _mark_settings_dirty(self, *args):
         self._settings_dirty = True
@@ -2331,6 +2864,9 @@ class MainWindow(QtWidgets.QMainWindow):
             (self.ed_merged, "textEdited"),
             (self.ed_blur_src, "textEdited"),
             (self.ed_merge_src, "textEdited"),
+            (getattr(self, "ed_images_dir", None), "textEdited"),
+            (getattr(self, "ed_history_path", None), "textEdited"),
+            (getattr(self, "ed_titles_path", None), "textEdited"),
             (self.sb_max_videos, "valueChanged"),
             (self.cb_ui_show_activity, "toggled"),
             (self.cmb_ui_activity_density, "currentIndexChanged"),
@@ -2365,11 +2901,31 @@ class MainWindow(QtWidgets.QMainWindow):
             (self.sb_youtube_interval, "valueChanged"),
             (self.sb_youtube_batch_limit, "valueChanged"),
             (self.ed_youtube_src, "textEdited"),
+            (self.cb_genai_enabled, "toggled"),
+            (self.cb_genai_attach, "toggled"),
+            (self.ed_genai_api_key, "textEdited"),
+            (self.ed_genai_model, "textEdited"),
+            (self.cmb_genai_person, "currentIndexChanged"),
+            (self.cmb_genai_person.lineEdit(), "textEdited"),
+            (self.ed_genai_aspect, "textEdited"),
+            (self.ed_genai_size, "textEdited"),
+            (self.ed_genai_mime, "textEdited"),
+            (self.sb_genai_images, "valueChanged"),
+            (self.sb_genai_rpm, "valueChanged"),
+            (self.sb_genai_retries, "valueChanged"),
+            (self.ed_genai_output_dir, "textEdited"),
         ]
         for widget, signal_name in watchers:
             signal = getattr(widget, signal_name, None)
             if signal:
                 signal.connect(self._mark_settings_dirty)
+
+    def _on_settings_tab_changed(self, index: int):
+        widget = self.settings_tabs.widget(index) if hasattr(self, "settings_tabs") else None
+        if widget is self.tab_history:
+            self._reload_history()
+        if hasattr(self, "idx_settings_docs") and index == self.idx_settings_docs:
+            self._load_readme_preview()
 
     def _on_downloads_path_edited(self, text: str):
         clean = text.strip()
@@ -2590,8 +3146,10 @@ class MainWindow(QtWidgets.QMainWindow):
         zones[item.row()][key] = value
         self._mark_settings_dirty()
 
-    def _load_readme_preview(self):
+    def _load_readme_preview(self, force: bool = False):
         if not hasattr(self, "txt_readme"):
+            return
+        if self._readme_loaded and not force:
             return
 
         for path in [APP_DIR / "README.md", PROJECT_ROOT / "README.md"]:
@@ -2604,30 +3162,39 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.txt_readme.verticalScrollBar().setValue(0)
                 if hasattr(self, "lst_activity"):
                     self._append_activity(f"README загружен: {path.name}", kind="info")
+                self._readme_loaded = True
                 return
 
         self.txt_readme.setPlainText("README.md не найден в папке приложения")
         if hasattr(self, "lst_activity"):
             self._append_activity("README.md не найден", kind="error")
+        self._readme_loaded = True
 
     def _wire(self):
         # статусы/лог — безопасные слоты GUI-потока
         self.sig_set_status.connect(self._slot_set_status)
         self.sig_log.connect(self._slot_log)
 
+        self.cmb_chrome_profile_top.currentIndexChanged.connect(self._on_top_chrome_profile_changed)
+        self.btn_scan_profiles_top.clicked.connect(self._on_toolbar_scan_profiles)
         self.btn_open_chrome.clicked.connect(self._open_chrome)
         self.btn_open_root.clicked.connect(lambda: open_in_finder(self.cfg.get("project_root", PROJECT_ROOT)))
         self.btn_open_raw.clicked.connect(lambda: open_in_finder(self.cfg.get("downloads_dir", DL_DIR)))
         self.btn_open_blur.clicked.connect(lambda: open_in_finder(self.cfg.get("blurred_dir", BLUR_DIR)))
         self.btn_open_merge.clicked.connect(lambda: open_in_finder(self.cfg.get("merged_dir", MERG_DIR)))
+        self.btn_open_images_top.clicked.connect(self._open_genai_output_dir)
         self.btn_stop_all.clicked.connect(self._stop_all)
         self.btn_start_selected.clicked.connect(self._run_scenario)
         self.btn_activity_clear.clicked.connect(self._clear_activity)
         self.chk_activity_visible.toggled.connect(self._on_activity_toggle)
+        self.ed_activity_filter.textChanged.connect(self._on_activity_filter_changed)
+        self.btn_activity_export.clicked.connect(self._export_activity_log)
 
         self.btn_load_prompts.clicked.connect(self._load_prompts)
         self.btn_save_prompts.clicked.connect(self._save_prompts)
         self.btn_save_and_run_autogen.clicked.connect(self._save_and_run_autogen)
+        self.btn_load_image_prompts.clicked.connect(self._load_image_prompts)
+        self.btn_save_image_prompts.clicked.connect(self._save_image_prompts)
         self.btn_used_refresh.clicked.connect(self._reload_used_prompts)
         self.btn_used_clear.clicked.connect(self._clear_used_prompts)
         self.lst_prompt_profiles.itemSelectionChanged.connect(self._on_prompt_profile_selection)
@@ -2637,15 +3204,17 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.btn_apply_dl.clicked.connect(self._apply_dl_limit)
         self.btn_run_scenario.clicked.connect(self._run_scenario)
+        self.btn_run_autogen_images.clicked.connect(self._save_and_run_autogen_images)
+        self.btn_open_genai_output.clicked.connect(self._open_genai_output_dir)
 
-        self.btn_reload_history.clicked.connect(self._reload_history)
         self.btn_save_settings.clicked.connect(self._save_settings_clicked)
         self.btn_save_autogen_cfg.clicked.connect(self._save_autogen_cfg)
-        self.btn_reload_readme.clicked.connect(self._load_readme_preview)
+        self.btn_reload_readme.clicked.connect(lambda: self._load_readme_preview(force=True))
+        if hasattr(self, "settings_tabs"):
+            self.settings_tabs.currentChanged.connect(self._on_settings_tab_changed)
         self.btn_env_check.clicked.connect(self._run_env_check)
         self.btn_update_check.clicked.connect(lambda: self._check_for_updates(dry_run=True))
         self.btn_update_pull.clicked.connect(lambda: self._check_for_updates(dry_run=False))
-        self.btn_quick_update.clicked.connect(lambda: self._check_for_updates(dry_run=False))
         self.btn_maintenance_cleanup.clicked.connect(lambda: self._run_maintenance_cleanup(manual=True))
         self.btn_maintenance_sizes.clicked.connect(self._report_dir_sizes)
         self.cmb_ui_activity_density.currentIndexChanged.connect(self._on_activity_density_changed)
@@ -2721,6 +3290,38 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_browse_merged.clicked.connect(lambda: self._browse_dir(self.ed_merged, "Выбери папку MERGED"))
         self.btn_browse_blur_src.clicked.connect(lambda: self._browse_dir(self.ed_blur_src, "Выбери ИСТОЧНИК для BLUR"))
         self.btn_browse_merge_src.clicked.connect(lambda: self._browse_dir(self.ed_merge_src, "Выбери ИСТОЧНИК для MERGE"))
+        if hasattr(self, "btn_browse_images_dir"):
+            self.btn_browse_images_dir.clicked.connect(lambda: self._browse_dir(self.ed_images_dir, "Выбери папку для изображений"))
+        if hasattr(self, "btn_browse_history_path"):
+            self.btn_browse_history_path.clicked.connect(lambda: self._browse_file(self.ed_history_path, "Выбери файл истории", "JSONL (*.jsonl);;Все файлы (*.*)"))
+        if hasattr(self, "btn_browse_titles_path"):
+            self.btn_browse_titles_path.clicked.connect(lambda: self._browse_file(self.ed_titles_path, "Выбери файл названий", "Текстовые файлы (*.txt);;Все файлы (*.*)"))
+        self.btn_genai_output_browse.clicked.connect(lambda: self._browse_dir(self.ed_genai_output_dir, "Выбери папку для изображений"))
+
+        for button_attr, line_attr in [
+            ("btn_open_root_path", "ed_root"),
+            ("btn_open_downloads_path", "ed_downloads"),
+            ("btn_open_blurred_path", "ed_blurred"),
+            ("btn_open_merged_path", "ed_merged"),
+            ("btn_open_blur_src_path", "ed_blur_src"),
+            ("btn_open_merge_src_path", "ed_merge_src"),
+            ("btn_open_images_dir", "ed_images_dir"),
+            ("btn_open_history_path", "ed_history_path"),
+            ("btn_open_titles_path", "ed_titles_path"),
+            ("btn_youtube_src_open", "ed_youtube_src"),
+            ("btn_youtube_archive_open", "ed_youtube_archive"),
+            ("btn_tiktok_src_open", "ed_tiktok_src"),
+            ("btn_tiktok_archive_open", "ed_tiktok_archive"),
+            ("btn_genai_output_open", "ed_genai_output_dir"),
+        ]:
+            button = getattr(self, button_attr, None)
+            line = getattr(self, line_attr, None)
+            if isinstance(button, QtWidgets.QAbstractButton) and isinstance(line, QtWidgets.QLineEdit):
+                button.clicked.connect(lambda _, l=line: self._open_path_from_edit(l))
+
+        if hasattr(self, "ed_images_dir") and hasattr(self, "ed_genai_output_dir"):
+            self.ed_images_dir.textEdited.connect(lambda _: self._sync_image_dirs(from_catalog=True))
+            self.ed_genai_output_dir.textEdited.connect(lambda _: self._sync_image_dirs(from_catalog=False))
 
     def _init_state(self):
         self.runner_autogen = ProcRunner("AUTOGEN")
@@ -2994,7 +3595,9 @@ class MainWindow(QtWidgets.QMainWindow):
             display = card_text if isinstance(card_text, str) and card_text else text
             self._update_current_event(display, kind)
 
-        item = QtWidgets.QListWidgetItem(text)
+        stamp = time.strftime("%H:%M:%S")
+        display_text = f"{stamp} · {text}"
+        item = QtWidgets.QListWidgetItem(display_text)
         palette = {
             "info": ("#93c5fd", "#15223c"),
             "running": ("#facc15", "#352b0b"),
@@ -3008,11 +3611,21 @@ class MainWindow(QtWidgets.QMainWindow):
         item.setForeground(brush_fg)
         item.setBackground(brush_bg)
         item.setTextAlignment(int(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter))
+        icon_map = {
+            "info": QtWidgets.QStyle.StandardPixmap.SP_MessageBoxInformation,
+            "running": QtWidgets.QStyle.StandardPixmap.SP_BrowserReload,
+            "success": QtWidgets.QStyle.StandardPixmap.SP_DialogApplyButton,
+            "error": QtWidgets.QStyle.StandardPixmap.SP_MessageBoxCritical,
+            "warn": QtWidgets.QStyle.StandardPixmap.SP_MessageBoxWarning,
+        }
+        item.setIcon(self.style().standardIcon(icon_map.get(kind, QtWidgets.QStyle.StandardPixmap.SP_MessageBoxInformation)))
+        item.setData(QtCore.Qt.ItemDataRole.UserRole, text.lower())
         self._style_activity_item(item)
         self.lst_activity.addItem(item)
         while self.lst_activity.count() > 200:
             self.lst_activity.takeItem(0)
         self.lst_activity.scrollToBottom()
+        self._apply_activity_filter()
 
     @QtCore.pyqtSlot(str)
     def _slot_log(self, text: str):
@@ -3065,9 +3678,48 @@ class MainWindow(QtWidgets.QMainWindow):
         elif any(token in lowered for token in ["запуск", "старт", "загружа", "обрабаты", "выполня"]):
             kind = "running"
 
-        timestamp = time.strftime("%H:%M:%S")
-        pretty = f"[{timestamp}] {normalized}"
-        self._append_activity(pretty, kind=kind, card_text=False)
+        self._append_activity(normalized, kind=kind, card_text=False)
+
+    def _apply_activity_filter(self):
+        if not hasattr(self, "lst_activity"):
+            return
+        pattern = (self._activity_filter_text or "").strip().lower()
+        for i in range(self.lst_activity.count()):
+            item = self.lst_activity.item(i)
+            if not isinstance(item, QtWidgets.QListWidgetItem):
+                continue
+            if not pattern:
+                item.setHidden(False)
+                continue
+            hay = item.data(QtCore.Qt.ItemDataRole.UserRole)
+            hay_text = hay if isinstance(hay, str) else item.text().lower()
+            item.setHidden(pattern not in hay_text)
+
+    def _on_activity_filter_changed(self, text: str):
+        self._activity_filter_text = text.strip().lower()
+        self._apply_activity_filter()
+
+    def _export_activity_log(self):
+        if not hasattr(self, "lst_activity") or self.lst_activity.count() == 0:
+            self._post_status("Нет событий для экспорта", state="warn")
+            return
+        default_path = _project_path(self.cfg.get("history_file", str(HIST_FILE))).with_name("activity_log.txt")
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Сохранить историю событий",
+            str(default_path),
+            "Текстовые файлы (*.txt);;Все файлы (*.*)",
+        )
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                for i in range(self.lst_activity.count()):
+                    item = self.lst_activity.item(i)
+                    f.write(item.text() + "\n")
+            self._post_status(f"История сохранена: {Path(path).name}", state="ok")
+        except Exception as exc:
+            self._post_status(f"Не удалось сохранить историю: {exc}", state="error")
 
     # helper для статуса
     def _post_status(self, text: str, progress: int = 0, total: int = 0, state: str = "idle"):
@@ -3077,6 +3729,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lst_activity.clear()
         self._post_status("Лента событий очищена", state="idle")
         self._update_current_event("—", "info")
+        self._apply_activity_filter()
 
     def _update_current_event(self, text: str, kind: str = "info", persist: bool = False, preserve_timer: bool = False):
         if not hasattr(self, "current_event_card"):
@@ -3325,6 +3978,11 @@ class MainWindow(QtWidgets.QMainWindow):
             return self._default_profile_prompts(None)
         return self._default_profile_prompts(active)
 
+    def _image_prompts_path(self) -> Path:
+        auto_cfg = self.cfg.get("autogen", {}) or {}
+        raw = auto_cfg.get("image_prompts_file") or str(WORKERS_DIR / "autogen" / "image_prompts.txt")
+        return _project_path(raw)
+
     def _load_prompts(self):
         path = self._prompts_path()
         self._ensure_path_exists(str(path))
@@ -3342,22 +4000,100 @@ class MainWindow(QtWidgets.QMainWindow):
             self.lbl_prompts_path.setText(str(path))
         self._post_status("Промпты сохранены", state="ok")
 
-    def _save_and_run_autogen(self):
-        self._save_prompts()
-        sl = WORKERS_DIR / "autogen" / "submitted.log"
-        if sl.exists():
-            box = QtWidgets.QMessageBox.question(self, "Очистить submitted.log?", "Очистить submitted.log перед запуском?",
-                                                 QtWidgets.QMessageBox.StandardButton.Yes|QtWidgets.QMessageBox.StandardButton.No)
-            if box == QtWidgets.QMessageBox.StandardButton.Yes:
-                try: sl.unlink()
-                except: pass
+    def _load_image_prompts(self):
+        path = self._image_prompts_path()
+        self._ensure_path_exists(path)
+        txt = path.read_text(encoding="utf-8") if path.exists() else ""
+        if hasattr(self, "ed_image_prompts"):
+            self.ed_image_prompts.setPlainText(txt)
+        if hasattr(self, "lbl_image_prompts_path"):
+            self.lbl_image_prompts_path.setText(str(path))
+        self._post_status(f"Image-промпты загружены ({path})", state="idle")
+
+    def _save_image_prompts(self):
+        path = self._image_prompts_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if hasattr(self, "ed_image_prompts"):
+            path.write_text(self.ed_image_prompts.toPlainText(), encoding="utf-8")
+        if hasattr(self, "lbl_image_prompts_path"):
+            self.lbl_image_prompts_path.setText(str(path))
+        self._post_status("Image-промпты сохранены", state="ok")
+
+    def _open_genai_output_dir(self):
+        genai_cfg = self.cfg.get("google_genai", {}) or {}
+        output_raw = genai_cfg.get("output_dir") or IMAGES_DIR
+        path = self._ensure_path_exists(output_raw)
+        if path:
+            open_in_finder(path)
+
+    def _autogen_env(self, force_images: Optional[bool] = None, *, images_only: bool = False) -> dict:
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
+        env["SORA_PROMPTS_FILE"] = str(self._prompts_path())
+        genai_cfg = self.cfg.get("google_genai", {}) or {}
+        genai_enabled = bool(genai_cfg.get("enabled"))
+        if force_images is True:
+            genai_enabled = True
+        elif force_images is False:
+            genai_enabled = False
+        if genai_enabled and not genai_cfg.get("api_key", "").strip():
+            genai_enabled = False
+        env["GENAI_ENABLED"] = "1" if genai_enabled else "0"
+        env["GENAI_API_KEY"] = genai_cfg.get("api_key", "").strip()
+        env["GENAI_MODEL"] = genai_cfg.get("model", "").strip()
+        env["GENAI_PERSON_GENERATION"] = genai_cfg.get("person_generation", "").strip()
+        env["GENAI_ASPECT_RATIO"] = genai_cfg.get("aspect_ratio", "").strip()
+        env["GENAI_IMAGE_SIZE"] = genai_cfg.get("image_size", "").strip()
+        env["GENAI_OUTPUT_MIME_TYPE"] = genai_cfg.get("output_mime_type", "").strip()
+        env["GENAI_NUMBER_OF_IMAGES"] = str(int(genai_cfg.get("number_of_images", 1) or 1))
+        env["GENAI_RATE_LIMIT"] = str(int(genai_cfg.get("rate_limit_per_minute", 0) or 0))
+        env["GENAI_MAX_RETRIES"] = str(int(genai_cfg.get("max_retries", 3) or 0))
+        env["GENAI_OUTPUT_DIR"] = str(_project_path(genai_cfg.get("output_dir", str(IMAGES_DIR))))
+        env["GENAI_BASE_DIR"] = str(_project_path(self.cfg.get("project_root", PROJECT_ROOT)))
+        env["GENAI_PROMPTS_DIR"] = str(self._prompts_path().parent.resolve())
+        env["GENAI_IMAGE_PROMPTS_FILE"] = str(self._image_prompts_path())
+        env["GENAI_ATTACH_TO_SORA"] = "1" if bool(genai_cfg.get("attach_to_sora", True)) else "0"
+        manifest_raw = genai_cfg.get("manifest_file") or (Path(genai_cfg.get("output_dir", str(IMAGES_DIR))) / "manifest.json")
+        env["GENAI_MANIFEST_FILE"] = str(_project_path(manifest_raw))
+        env["GENAI_IMAGES_ONLY"] = "1" if images_only else "0"
+        return env
+
+    def _save_and_run_autogen(self, force_images: Optional[bool] = None, *, images_only: bool = False):
+        if images_only:
+            self._save_image_prompts()
+        else:
+            self._save_prompts()
+        if force_images:
+            genai_cfg = self.cfg.get("google_genai", {}) or {}
+            if not genai_cfg.get("api_key", "").strip():
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Google AI Studio",
+                    "Укажи API-ключ Google AI Studio в настройках, чтобы запустить генерацию изображений.",
+                )
+                return
+        if not images_only:
+            sl = WORKERS_DIR / "autogen" / "submitted.log"
+            if sl.exists():
+                box = QtWidgets.QMessageBox.question(self, "Очистить submitted.log?", "Очистить submitted.log перед запуском?",
+                                                     QtWidgets.QMessageBox.StandardButton.Yes|QtWidgets.QMessageBox.StandardButton.No)
+                if box == QtWidgets.QMessageBox.StandardButton.Yes:
+                    try: sl.unlink()
+                    except: pass
         # НЕ блокируем UI: запускаем через ProcRunner
         workdir=self.cfg.get("autogen",{}).get("workdir", str(WORKERS_DIR / "autogen"))
         entry=self.cfg.get("autogen",{}).get("entry","main.py")
-        env=os.environ.copy(); env["PYTHONUNBUFFERED"]="1"
-        env["SORA_PROMPTS_FILE"]=str(self._prompts_path())  # FIX: автоген читает именно этот файл
-        self._post_status("Вставка промптов…", state="running")
+        env = self._autogen_env(force_images=force_images, images_only=images_only)
+        status_msg = "Вставка промптов…"
+        if images_only:
+            status_msg = "Только генерация картинок…"
+        elif force_images:
+            status_msg = "Генерация картинок и вставка промптов…"
+        self._post_status(status_msg, state="running")
         self.runner_autogen.run([sys.executable, entry], cwd=workdir, env=env)
+
+    def _save_and_run_autogen_images(self):
+        self._save_and_run_autogen(force_images=True, images_only=True)
 
     def _titles_path(self)->Path:
         return _project_path(self.cfg.get("titles_file", str(TITLES_FILE)))
@@ -3402,6 +4138,7 @@ class MainWindow(QtWidgets.QMainWindow):
     # ----- Scenario -----
     def _run_scenario(self):
         steps = []
+        if self.cb_do_images.isChecked(): steps.append("images")
         if self.cb_do_autogen.isChecked(): steps.append("autogen")
         if self.cb_do_download.isChecked(): steps.append("download")
         if self.cb_do_blur.isChecked(): steps.append("blur")
@@ -3416,6 +4153,7 @@ class MainWindow(QtWidgets.QMainWindow):
         append_history(self.cfg, {"event":"scenario_start","steps":steps})
 
         label_map = {
+            "images": "Images",
             "autogen": "Autogen",
             "download": "Download",
             "blur": "Blur",
@@ -3429,6 +4167,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
         def flow():
             ok_all = True
+            if "images" in steps:
+                ok = self._run_autogen_sync(force_images=True, images_only=True); ok_all = ok_all and ok
+                if not ok:
+                    self._post_status("Генерация картинок завершена с ошибкой", state="error")
+                    return
             if "autogen" in steps:
                 ok = self._run_autogen_sync(); ok_all = ok_all and ok
                 if not ok:
@@ -3466,6 +4209,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def _run_autogen(self):
         self._run_autogen_sync()
 
+    def _run_autogen_images(self):
+        self._run_autogen_sync(force_images=True, images_only=True)
+
     def _await_runner(self, runner: ProcRunner, tag: str, starter: Callable[[], None]) -> int:
         if runner.proc and runner.proc.poll() is None:
             self._append_activity(f"{tag}: задача уже выполняется", kind="error", card_text=False)
@@ -3496,17 +4242,27 @@ class MainWindow(QtWidgets.QMainWindow):
 
         return rc
 
-    def _run_autogen_sync(self) -> bool:
+    def _run_autogen_sync(self, force_images: Optional[bool] = None, *, images_only: bool = False) -> bool:
         self._save_settings_clicked(silent=True)
         workdir=self.cfg.get("autogen",{}).get("workdir", str(WORKERS_DIR / "autogen"))
         entry=self.cfg.get("autogen",{}).get("entry","main.py")
-        python=sys.executable; cmd=[python, entry]; env=os.environ.copy(); env["PYTHONUNBUFFERED"]="1"
-        env["SORA_PROMPTS_FILE"]=str(self._prompts_path())  # FIX: синхронный запуск тоже
-        self._send_tg("✍️ Autogen запускается")
-        self._post_status("Вставка промптов…", state="running")
+        python=sys.executable; cmd=[python, entry]; env=self._autogen_env(force_images=force_images, images_only=images_only)
+        if images_only:
+            self._send_tg("🖼️ Autogen (картинки) запускается")
+            status_msg = "Только генерация картинок…"
+        elif force_images:
+            self._send_tg("🖼️ Autogen (картинки) запускается")
+            status_msg = "Генерация картинок и вставка промптов…"
+        else:
+            self._send_tg("✍️ Autogen запускается")
+            status_msg = "Вставка промптов…"
+        self._post_status(status_msg, state="running")
         rc = self._await_runner(self.runner_autogen, "AUTOGEN", lambda: self.runner_autogen.run(cmd, cwd=workdir, env=env))
         ok = rc == 0
-        self._send_tg("✍️ Autogen завершён" if ok else "⚠️ Autogen завершён с ошибками")
+        if images_only or force_images:
+            self._send_tg("🖼️ Autogen (картинки) завершён" if ok else "⚠️ Autogen (картинки) завершён с ошибками")
+        else:
+            self._send_tg("✍️ Autogen завершён" if ok else "⚠️ Autogen завершён с ошибками")
         return ok
 
     def _run_download(self):
@@ -4109,6 +4865,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.cfg["blur_src_dir"] = self.ed_blur_src.text().strip() or self.cfg["downloads_dir"]
         self.cfg["merge_src_dir"] = self.ed_merge_src.text().strip() or self.cfg["blurred_dir"]
+        history_line = getattr(self, "ed_history_path", None)
+        titles_line = getattr(self, "ed_titles_path", None)
+        history_value = history_line.text().strip() if isinstance(history_line, QtWidgets.QLineEdit) else ""
+        titles_value = titles_line.text().strip() if isinstance(titles_line, QtWidgets.QLineEdit) else ""
+        self.cfg["history_file"] = history_value or str(HIST_FILE)
+        self.cfg["titles_file"] = titles_value or str(TITLES_FILE)
 
         ff = self.cfg.setdefault("ffmpeg", {})
         ff["binary"] = self.ed_ff_bin.text().strip() or "ffmpeg"
@@ -4161,6 +4923,35 @@ class MainWindow(QtWidgets.QMainWindow):
         ui_cfg = self.cfg.setdefault("ui", {})
         ui_cfg["show_activity"] = bool(self.cb_ui_show_activity.isChecked())
         ui_cfg["activity_density"] = self.cmb_ui_activity_density.currentData() or "compact"
+
+        genai_cfg = self.cfg.setdefault("google_genai", {})
+        genai_cfg["enabled"] = bool(self.cb_genai_enabled.isChecked())
+        genai_cfg["attach_to_sora"] = bool(self.cb_genai_attach.isChecked())
+        genai_cfg["api_key"] = self.ed_genai_api_key.text().strip()
+        genai_cfg["model"] = self.ed_genai_model.text().strip() or "models/imagen-4.0-generate-001"
+        current_person = self.cmb_genai_person.currentData()
+        if isinstance(current_person, str) and current_person:
+            value = current_person
+        else:
+            value = self.cmb_genai_person.currentText()
+        genai_cfg["person_generation"] = value.strip()
+        genai_cfg["aspect_ratio"] = self.ed_genai_aspect.text().strip() or "1:1"
+        genai_cfg["image_size"] = self.ed_genai_size.text().strip() or "1K"
+        genai_cfg["output_mime_type"] = self.ed_genai_mime.text().strip() or "image/jpeg"
+        genai_cfg["number_of_images"] = int(self.sb_genai_images.value())
+        genai_cfg["rate_limit_per_minute"] = int(self.sb_genai_rpm.value())
+        genai_cfg["max_retries"] = int(self.sb_genai_retries.value())
+        images_dir_value = self.ed_genai_output_dir.text().strip() or self.ed_images_dir.text().strip() or str(IMAGES_DIR)
+        genai_cfg["output_dir"] = images_dir_value
+        if hasattr(self, "ed_images_dir"):
+            self.ed_images_dir.blockSignals(True)
+            self.ed_images_dir.setText(images_dir_value)
+            self.ed_images_dir.blockSignals(False)
+        if hasattr(self, "ed_genai_output_dir"):
+            self.ed_genai_output_dir.blockSignals(True)
+            self.ed_genai_output_dir.setText(images_dir_value)
+            self.ed_genai_output_dir.blockSignals(False)
+        genai_cfg["manifest_file"] = str(Path(genai_cfg["output_dir"]) / "manifest.json")
 
         maint_cfg = self.cfg.setdefault("maintenance", {})
         maint_cfg["auto_cleanup_on_start"] = bool(self.cb_maintenance_auto.isChecked())
@@ -4453,21 +5244,74 @@ class MainWindow(QtWidgets.QMainWindow):
             self._post_status(f"Не удалось сохранить autogen config: {e}", state="error")
 
     # ----- simple stats -----
+    def _stat_for_path(self, path: Path, suffixes: Tuple[str, ...]) -> Tuple[int, int]:
+        key = (str(path), tuple(sorted(suffixes)))
+        try:
+            mtime = path.stat().st_mtime
+        except Exception:
+            mtime = 0.0
+        cached = self._stat_cache.get(key)
+        if cached and abs(cached[0] - mtime) < 0.1:
+            return cached[1], cached[2]
+
+        count = 0
+        total_size = 0
+        if path.exists():
+            try:
+                for entry in path.iterdir():
+                    if not entry.is_file():
+                        continue
+                    if suffixes and entry.suffix.lower() not in suffixes:
+                        continue
+                    count += 1
+                    try:
+                        total_size += entry.stat().st_size
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
+        self._stat_cache[key] = (mtime, count, total_size)
+        return count, total_size
+
     def _refresh_stats(self):
         try:
-            def _count_vids(p: Path) -> int:
-                if not p.exists():
-                    return 0
-                return sum(len(list(p.glob(x))) for x in ("*.mp4", "*.mov", "*.m4v", "*.webm"))
+            video_suffixes = (".mp4", ".mov", ".m4v", ".webm", ".mkv")
+            image_suffixes = (".jpg", ".jpeg", ".png", ".webp")
 
-            raw  = _count_vids(_project_path(self.cfg.get("downloads_dir", str(DL_DIR))))
-            blur = _count_vids(_project_path(self.cfg.get("blurred_dir", str(BLUR_DIR))))
-            merg = _count_vids(_project_path(self.cfg.get("merged_dir", str(MERG_DIR))))
-            upload_src = _count_vids(_project_path(self.cfg.get("youtube", {}).get("upload_src_dir", self.cfg.get("merged_dir", str(MERG_DIR)))))
-            tiktok_src = _count_vids(_project_path(self.cfg.get("tiktok", {}).get("upload_src_dir", self.cfg.get("merged_dir", str(MERG_DIR)))))
-            self.sig_log.emit(f"[STAT] RAW={raw} BLURRED={blur} MERGED={merg} YT={upload_src} TT={tiktok_src}")
+            raw_path = _project_path(self.cfg.get("downloads_dir", str(DL_DIR)))
+            blur_path = _project_path(self.cfg.get("blurred_dir", str(BLUR_DIR)))
+            merge_path = _project_path(self.cfg.get("merged_dir", str(MERG_DIR)))
+            upload_path = _project_path(self.cfg.get("youtube", {}).get("upload_src_dir", self.cfg.get("merged_dir", str(MERG_DIR))))
+            tiktok_path = _project_path(self.cfg.get("tiktok", {}).get("upload_src_dir", self.cfg.get("merged_dir", str(MERG_DIR))))
+            images_path = _project_path(self.cfg.get("google_genai", {}).get("output_dir", str(IMAGES_DIR)))
 
-            # обновляем визуальные счетчики
+            raw, raw_size = self._stat_for_path(raw_path, video_suffixes)
+            blur, blur_size = self._stat_for_path(blur_path, video_suffixes)
+            merg, merge_size = self._stat_for_path(merge_path, video_suffixes)
+            upload_src, upload_size = self._stat_for_path(upload_path, video_suffixes)
+            tiktok_src, tiktok_size = self._stat_for_path(tiktok_path, video_suffixes)
+            images_count, images_size = self._stat_for_path(images_path, image_suffixes)
+
+            manifest_count = 0
+            manifest_path = _project_path(self.cfg.get("google_genai", {}).get("manifest_file", str(Path(images_path) / "manifest.json")))
+            if manifest_path.exists():
+                try:
+                    data = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    if isinstance(data, list):
+                        manifest_count = len(data)
+                    elif isinstance(data, dict):
+                        if isinstance(data.get("images"), list):
+                            manifest_count = len(data.get("images"))
+                    else:
+                        manifest_count = 0
+                except Exception:
+                    manifest_count = 0
+
+            self.sig_log.emit(
+                f"[STAT] RAW={raw} BLURRED={blur} MERGED={merg} YT={upload_src} TT={tiktok_src} IMG={images_count}"
+            )
+
             fmt = lambda value: format(value, ",").replace(",", " ")
             self.lbl_stat_raw.setText(fmt(raw))
             self.lbl_stat_blur.setText(fmt(blur))
@@ -4475,6 +5319,20 @@ class MainWindow(QtWidgets.QMainWindow):
             self.lbl_stat_upload.setText(fmt(upload_src))
             if hasattr(self, "lbl_stat_tiktok"):
                 self.lbl_stat_tiktok.setText(fmt(tiktok_src))
+            if hasattr(self, "lbl_stat_images"):
+                self.lbl_stat_images.setText(fmt(images_count))
+
+            def _set_desc(key: str, text: str):
+                label = self._stat_desc_labels.get(key)
+                if label:
+                    label.setText(text)
+
+            _set_desc("raw", f"{_human_size(raw_size)} · {raw_path.name or raw_path}")
+            _set_desc("blur", f"{_human_size(blur_size)} · {blur_path.name or blur_path}")
+            _set_desc("merge", f"{_human_size(merge_size)} · {merge_path.name or merge_path}")
+            _set_desc("youtube", f"{_human_size(upload_size)} · {upload_path.name or upload_path}")
+            _set_desc("tiktok", f"{_human_size(tiktok_size)} · {tiktok_path.name or tiktok_path}")
+            _set_desc("images", f"{_human_size(images_size)} · манифест {manifest_count}")
         except Exception as e:
             self.sig_log.emit(f"[STAT] ошибка: {e}")
 
@@ -4490,6 +5348,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self, "lbl_prompts_path"):
             path = self._prompts_path()
             self.lbl_prompts_path.setText(str(path))
+        if hasattr(self, "lbl_image_prompts_path"):
+            img_path = self._image_prompts_path()
+            self.lbl_image_prompts_path.setText(str(img_path))
 
     def _set_active_prompt_profile(self, key: str, persist: bool = True, reload: bool = True):
         normalized = key or PROMPTS_DEFAULT_KEY
@@ -4565,6 +5426,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lbl_prof_active.setText(active if active else "—")
         self._refresh_prompt_profiles_ui()
 
+        if hasattr(self, "cmb_chrome_profile_top"):
+            self.cmb_chrome_profile_top.blockSignals(True)
+            self.cmb_chrome_profile_top.clear()
+            self.cmb_chrome_profile_top.addItem("— без профиля —", "")
+            for p in profiles:
+                label = p.get("name") or p.get("profile_directory") or ""
+                if not label:
+                    continue
+                value = p.get("name") or label
+                self.cmb_chrome_profile_top.addItem(label, value)
+            idx = self.cmb_chrome_profile_top.findData(active)
+            if idx < 0:
+                idx = 0
+            self.cmb_chrome_profile_top.setCurrentIndex(idx)
+            self.cmb_chrome_profile_top.blockSignals(False)
+
     def _on_profile_selected(self):
         items = self.lst_profiles.selectedItems()
         if not items:
@@ -4619,15 +5496,43 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_profiles_ui()
         self._post_status(f"Профиль «{name}» удалён", state="ok")
 
+    def _set_active_chrome_profile(self, name: str, notify: bool = True):
+        chrome_cfg = self.cfg.setdefault("chrome", {})
+        current = chrome_cfg.get("active_profile", "") or ""
+        if current == (name or ""):
+            self._refresh_profiles_ui()
+            return
+        chrome_cfg["active_profile"] = name or ""
+        save_cfg(self.cfg)
+        self._refresh_profiles_ui()
+        if notify:
+            label = name or "—"
+            self._post_status(f"Активный профиль: {label}", state="ok")
+
     def _on_profile_set_active(self):
         items = self.lst_profiles.selectedItems()
         if not items:
             return
         name = items[0].text()
-        self.cfg.setdefault("chrome", {})["active_profile"] = name
-        save_cfg(self.cfg)
+        self._set_active_chrome_profile(name, notify=True)
+
+    def _on_top_chrome_profile_changed(self, index: int):
+        if index < 0:
+            return
+        data = self.cmb_chrome_profile_top.itemData(index)
+        name = data if isinstance(data, str) else str(data or "")
+        self._set_active_chrome_profile(name, notify=True)
+
+    def _on_toolbar_scan_profiles(self):
+        added, total = self._apply_profile_scan(auto=False)
+        if total:
+            if added:
+                self._post_status(f"Найдено {total} профилей Chrome, добавлено {added}", state="ok")
+            else:
+                self._post_status("Профили Chrome уже добавлены", state="idle")
+        else:
+            self._post_status("Профили Chrome не найдены", state="error")
         self._refresh_profiles_ui()
-        self._post_status(f"Активный профиль: {name}", state="ok")
 
     def _auto_scan_profiles_at_start(self):
         chrome_cfg = self.cfg.get("chrome", {})
@@ -5371,7 +6276,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._post_status("Обновление завершено", state="ok")
             self._refresh_youtube_ui()
             self._refresh_tiktok_ui()
-            self._load_readme_preview()
+            self._load_readme_preview(force=True)
         else:
             err_text = pull.stderr.strip() or pull.stdout.strip() or "Не удалось выполнить git pull"
             self._append_activity(f"git pull: {err_text}", kind="error")
