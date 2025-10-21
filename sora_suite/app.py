@@ -1190,10 +1190,11 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         folders_block = QtWidgets.QHBoxLayout(folders_frame)
         folders_block.setContentsMargins(4, 0, 4, 0)
-        folders_block.setSpacing(4)
+        folders_block.setSpacing(6)
         lbl_folders = QtWidgets.QLabel("Каталоги")
         lbl_folders.setObjectName("foldersTopLabel")
         folders_block.addWidget(lbl_folders)
+        folders_block.addSpacing(4)
         self.btn_open_root = make_folder_button("Проект")
         self.btn_open_raw = make_folder_button("RAW")
         self.btn_open_blur = make_folder_button("BLURRED")
@@ -1255,20 +1256,27 @@ class MainWindow(QtWidgets.QMainWindow):
         self.current_event_card.setStyleSheet(
             "QFrame#currentEventCard{background:transparent;border:1px solid #27364d;border-radius:14px;padding:0;}"
             "QLabel#currentEventTitle{color:#9fb7ff;font-size:11px;letter-spacing:1px;text-transform:uppercase;}"
-            "QLabel#currentEventBody{color:#f8fafc;font-size:15px;font-weight:600;background:rgba(76,110,245,0.18);"
-            "border-radius:10px;padding:8px 12px;}")
+            "QFrame#currentEventBodyFrame{background:rgba(76,110,245,0.2);border:1px solid #3b4cc0;border-radius:10px;}"
+            "QLabel#currentEventBody{color:#f8fafc;font-size:15px;font-weight:600;background:transparent;}"
+        )
         card_layout = QtWidgets.QVBoxLayout(self.current_event_card)
         card_layout.setContentsMargins(14, 12, 14, 12)
         self.lbl_current_event_title = QtWidgets.QLabel("Сейчас")
         self.lbl_current_event_title.setObjectName("currentEventTitle")
+        body_wrap = QtWidgets.QFrame()
+        body_wrap.setObjectName("currentEventBodyFrame")
+        body_layout = QtWidgets.QVBoxLayout(body_wrap)
+        body_layout.setContentsMargins(12, 8, 12, 8)
+        body_layout.setSpacing(0)
         self.lbl_current_event_body = QtWidgets.QLabel("—")
         self.lbl_current_event_body.setObjectName("currentEventBody")
         self.lbl_current_event_body.setWordWrap(True)
+        body_layout.addWidget(self.lbl_current_event_body)
         self.lbl_current_event_timer = QtWidgets.QLabel("—")
         self.lbl_current_event_timer.setObjectName("currentEventTimer")
         self.lbl_current_event_timer.setStyleSheet("color:#94a3b8;font-size:11px;")
         card_layout.addWidget(self.lbl_current_event_title)
-        card_layout.addWidget(self.lbl_current_event_body)
+        card_layout.addWidget(body_wrap)
         card_layout.addWidget(self.lbl_current_event_timer)
         current_layout.addWidget(self.current_event_card)
         self.activity_splitter.addWidget(current_wrap)
@@ -2452,39 +2460,84 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # --- YouTube дефолты ---
         page_yt = QtWidgets.QWidget()
-        grid_yt = QtWidgets.QGridLayout(page_yt)
+        yt_layout = QtWidgets.QVBoxLayout(page_yt)
+        yt_layout.setContentsMargins(12, 12, 12, 12)
+        yt_layout.setSpacing(8)
+
+        yt_intro = QtWidgets.QLabel(
+            "Укажи значения по умолчанию для очередей YouTube. Подробные шаги есть во вкладке «Документация → Автопостинг YouTube»."
+        )
+        yt_intro.setWordWrap(True)
+        yt_intro.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
+        yt_layout.addWidget(yt_intro)
+
+        grp_yt = QtWidgets.QGroupBox("Параметры очереди по умолчанию")
+        grid_yt = QtWidgets.QGridLayout(grp_yt)
         grid_yt.setColumnStretch(1, 1)
-        self.sb_youtube_default_delay = QtWidgets.QSpinBox(); self.sb_youtube_default_delay.setRange(0, 7 * 24 * 60)
+        grid_yt.setHorizontalSpacing(8)
+        grid_yt.setVerticalSpacing(6)
+
+        self.sb_youtube_default_delay = QtWidgets.QSpinBox()
+        self.sb_youtube_default_delay.setRange(0, 7 * 24 * 60)
         self.sb_youtube_default_delay.setValue(int(yt_cfg.get("schedule_minutes_from_now", 60)))
         grid_yt.addWidget(QtWidgets.QLabel("Отложить по умолчанию (мин):"), 0, 0)
         grid_yt.addWidget(self.sb_youtube_default_delay, 0, 1)
+
         self.cb_youtube_default_draft = QtWidgets.QCheckBox("По умолчанию только приватный черновик")
         self.cb_youtube_default_draft.setChecked(bool(yt_cfg.get("draft_only", False)))
         grid_yt.addWidget(self.cb_youtube_default_draft, 1, 0, 1, 2)
 
-        archive_wrap = QtWidgets.QWidget(); archive_l = QtWidgets.QHBoxLayout(archive_wrap); archive_l.setContentsMargins(0, 0, 0, 0)
+        archive_wrap = QtWidgets.QWidget()
+        archive_l = QtWidgets.QHBoxLayout(archive_wrap)
+        archive_l.setContentsMargins(0, 0, 0, 0)
+        archive_l.setSpacing(4)
         self.ed_youtube_archive = QtWidgets.QLineEdit(yt_cfg.get("archive_dir", str(PROJECT_ROOT / "uploaded")))
         self.btn_youtube_archive_browse = QtWidgets.QPushButton("…")
+        self.btn_youtube_archive_open = QtWidgets.QToolButton()
+        self.btn_youtube_archive_open.setText("↗")
+        self.btn_youtube_archive_open.setToolTip("Открыть папку архива YouTube")
         archive_l.addWidget(self.ed_youtube_archive, 1)
         archive_l.addWidget(self.btn_youtube_archive_browse)
+        archive_l.addWidget(self.btn_youtube_archive_open)
         grid_yt.addWidget(QtWidgets.QLabel("Архив загруженных:"), 2, 0)
         grid_yt.addWidget(archive_wrap, 2, 1)
 
         grid_yt.addWidget(QtWidgets.QLabel("Интервал для пакетов (мин):"), 3, 0)
-        self.sb_youtube_interval_default = QtWidgets.QSpinBox(); self.sb_youtube_interval_default.setRange(0, 7 * 24 * 60)
+        self.sb_youtube_interval_default = QtWidgets.QSpinBox()
+        self.sb_youtube_interval_default.setRange(0, 7 * 24 * 60)
         self.sb_youtube_interval_default.setValue(int(yt_cfg.get("batch_step_minutes", 60)))
         grid_yt.addWidget(self.sb_youtube_interval_default, 3, 1)
+
         grid_yt.addWidget(QtWidgets.QLabel("Ограничение пакета (0 = все):"), 4, 0)
-        self.sb_youtube_limit_default = QtWidgets.QSpinBox(); self.sb_youtube_limit_default.setRange(0, 999)
+        self.sb_youtube_limit_default = QtWidgets.QSpinBox()
+        self.sb_youtube_limit_default.setRange(0, 999)
         self.sb_youtube_limit_default.setValue(int(yt_cfg.get("batch_limit", 0)))
         grid_yt.addWidget(self.sb_youtube_limit_default, 4, 1)
+
+        yt_layout.addWidget(grp_yt)
+        yt_layout.addStretch(1)
 
         self.settings_tabs.addTab(page_yt, "YouTube")
 
         page_tt = QtWidgets.QWidget()
-        grid_tt = QtWidgets.QGridLayout(page_tt)
-        grid_tt.setColumnStretch(1, 1)
+        tt_layout = QtWidgets.QVBoxLayout(page_tt)
+        tt_layout.setContentsMargins(12, 12, 12, 12)
+        tt_layout.setSpacing(8)
         tk_defaults = self.cfg.get("tiktok", {}) or {}
+
+        tt_intro = QtWidgets.QLabel(
+            "Эти параметры используются при автопостинге TikTok. Дополнительные пояснения смотри во вкладке "
+            "«Документация → Автопостинг TikTok»."
+        )
+        tt_intro.setWordWrap(True)
+        tt_intro.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
+        tt_layout.addWidget(tt_intro)
+
+        grp_tt = QtWidgets.QGroupBox("Параметры очереди по умолчанию")
+        grid_tt = QtWidgets.QGridLayout(grp_tt)
+        grid_tt.setColumnStretch(1, 1)
+        grid_tt.setHorizontalSpacing(8)
+        grid_tt.setVerticalSpacing(6)
 
         self.sb_tiktok_default_delay = QtWidgets.QSpinBox()
         self.sb_tiktok_default_delay.setRange(0, 7 * 24 * 60)
@@ -2499,10 +2552,15 @@ class MainWindow(QtWidgets.QMainWindow):
         archive_tt_wrap = QtWidgets.QWidget()
         archive_tt_layout = QtWidgets.QHBoxLayout(archive_tt_wrap)
         archive_tt_layout.setContentsMargins(0, 0, 0, 0)
+        archive_tt_layout.setSpacing(4)
         self.ed_tiktok_archive = QtWidgets.QLineEdit(tk_defaults.get("archive_dir", str(PROJECT_ROOT / "uploaded_tiktok")))
         self.btn_tiktok_archive_browse = QtWidgets.QPushButton("…")
+        self.btn_tiktok_archive_open = QtWidgets.QToolButton()
+        self.btn_tiktok_archive_open.setText("↗")
+        self.btn_tiktok_archive_open.setToolTip("Открыть архив TikTok")
         archive_tt_layout.addWidget(self.ed_tiktok_archive, 1)
         archive_tt_layout.addWidget(self.btn_tiktok_archive_browse)
+        archive_tt_layout.addWidget(self.btn_tiktok_archive_open)
         grid_tt.addWidget(QtWidgets.QLabel("Архив загруженных:"), 2, 0)
         grid_tt.addWidget(archive_tt_wrap, 2, 1)
 
@@ -2521,12 +2579,16 @@ class MainWindow(QtWidgets.QMainWindow):
         workflow_tt_wrap = QtWidgets.QWidget()
         workflow_tt_layout = QtWidgets.QHBoxLayout(workflow_tt_wrap)
         workflow_tt_layout.setContentsMargins(0, 0, 0, 0)
+        workflow_tt_layout.setSpacing(4)
         self.ed_tiktok_workflow_settings = QtWidgets.QLineEdit(tk_defaults.get("github_workflow", ".github/workflows/tiktok-upload.yml"))
         self.ed_tiktok_ref_settings = QtWidgets.QLineEdit(tk_defaults.get("github_ref", "main"))
         workflow_tt_layout.addWidget(self.ed_tiktok_workflow_settings, 1)
         workflow_tt_layout.addWidget(self.ed_tiktok_ref_settings, 1)
         grid_tt.addWidget(QtWidgets.QLabel("Workflow / Branch:"), 5, 0)
         grid_tt.addWidget(workflow_tt_wrap, 5, 1)
+
+        tt_layout.addWidget(grp_tt)
+        tt_layout.addStretch(1)
 
         self.settings_tabs.addTab(page_tt, "TikTok")
 
@@ -2744,10 +2806,10 @@ class MainWindow(QtWidgets.QMainWindow):
             ("TikTok", page_tt),
             ("Telegram", page_tg),
             ("Интерфейс", page_ui),
-            ("История", self.tab_history),
-            ("Ошибки", self.tab_errors),
             ("Обслуживание", page_maint),
+            ("Ошибки", self.tab_errors),
             ("Документация", page_docs),
+            ("История", self.tab_history),
         ]
         tab_bar = self.settings_tabs.tabBar()
         for target, (_, widget) in enumerate(page_sequence):
@@ -3247,7 +3309,9 @@ class MainWindow(QtWidgets.QMainWindow):
             ("btn_open_history_path", "ed_history_path"),
             ("btn_open_titles_path", "ed_titles_path"),
             ("btn_youtube_src_open", "ed_youtube_src"),
+            ("btn_youtube_archive_open", "ed_youtube_archive"),
             ("btn_tiktok_src_open", "ed_tiktok_src"),
+            ("btn_tiktok_archive_open", "ed_tiktok_archive"),
             ("btn_genai_output_open", "ed_genai_output_dir"),
         ]:
             button = getattr(self, button_attr, None)
