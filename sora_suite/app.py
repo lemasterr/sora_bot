@@ -219,6 +219,9 @@ def load_cfg() -> dict:
     auto_wm.setdefault("threshold", 0.75)
     auto_wm.setdefault("frames", 5)
     auto_wm.setdefault("downscale", 0)
+    auto_wm.setdefault("bbox_padding", 12)
+    auto_wm.setdefault("bbox_padding_pct", 0.15)
+    auto_wm.setdefault("bbox_min_size", 48)
     presets = ff.setdefault("presets", {})
     if isinstance(presets, list):
         migrated: Dict[str, dict] = {}
@@ -2468,6 +2471,26 @@ class MainWindow(QtWidgets.QMainWindow):
         auto_form.addRow("Кадров для анализа:", self.sb_aw_frames)
         self.sb_aw_downscale = QtWidgets.QSpinBox(); self.sb_aw_downscale.setRange(0, 4096); self.sb_aw_downscale.setSpecialValueText("без изменений"); self.sb_aw_downscale.setSuffix(" px"); self.sb_aw_downscale.setValue(int(auto_cfg.get("downscale", 0) or 0))
         auto_form.addRow("Макс. ширина кадра:", self.sb_aw_downscale)
+        self.sb_aw_bbox_pad = QtWidgets.QSpinBox()
+        self.sb_aw_bbox_pad.setRange(0, 512)
+        self.sb_aw_bbox_pad.setValue(int(auto_cfg.get("bbox_padding", 12) or 0))
+        auto_form.addRow("Запас по краям (px):", self.sb_aw_bbox_pad)
+        self.dsb_aw_bbox_pct = QtWidgets.QDoubleSpinBox()
+        self.dsb_aw_bbox_pct.setRange(0.0, 100.0)
+        self.dsb_aw_bbox_pct.setSingleStep(1.0)
+        self.dsb_aw_bbox_pct.setDecimals(1)
+        self.dsb_aw_bbox_pct.setSuffix(" %")
+        try:
+            bbox_pct_val = float(auto_cfg.get("bbox_padding_pct", 0.15) or 0.0) * 100.0
+        except Exception:
+            bbox_pct_val = 0.0
+        self.dsb_aw_bbox_pct.setValue(max(0.0, min(100.0, bbox_pct_val)))
+        auto_form.addRow("Доп. процент ширины:", self.dsb_aw_bbox_pct)
+        self.sb_aw_bbox_min = QtWidgets.QSpinBox()
+        self.sb_aw_bbox_min.setRange(2, 1920)
+        self.sb_aw_bbox_min.setSingleStep(2)
+        self.sb_aw_bbox_min.setValue(int(auto_cfg.get("bbox_min_size", 48) or 2))
+        auto_form.addRow("Мин. размер зоны (px):", self.sb_aw_bbox_min)
         self.cmb_active_preset = QtWidgets.QComboBox()
         ff_form.addRow("Активный пресет:", self.cmb_active_preset)
         ff_layout.addLayout(ff_form)
@@ -2916,6 +2939,9 @@ class MainWindow(QtWidgets.QMainWindow):
             (self.dsb_aw_threshold, "valueChanged"),
             (self.sb_aw_frames, "valueChanged"),
             (self.sb_aw_downscale, "valueChanged"),
+            (self.sb_aw_bbox_pad, "valueChanged"),
+            (self.dsb_aw_bbox_pct, "valueChanged"),
+            (self.sb_aw_bbox_min, "valueChanged"),
             (self.cmb_active_preset, "currentIndexChanged"),
             (self.sb_blur_threads, "valueChanged"),
             (self.sb_youtube_default_delay, "valueChanged"),
@@ -4486,6 +4512,21 @@ class MainWindow(QtWidgets.QMainWindow):
                     except (TypeError, ValueError):
                         downscale_num = 0.0
                     downscale_value: Optional[float] = downscale_num if downscale_num > 0 else None
+                    try:
+                        bbox_padding_val = int(auto_cfg.get("bbox_padding", 12) or 0)
+                    except (TypeError, ValueError):
+                        bbox_padding_val = 12
+                    bbox_padding_val = max(0, bbox_padding_val)
+                    try:
+                        bbox_padding_pct_val = float(auto_cfg.get("bbox_padding_pct", 0.15) or 0.0)
+                    except (TypeError, ValueError):
+                        bbox_padding_pct_val = 0.15
+                    bbox_padding_pct_val = max(0.0, min(1.0, bbox_padding_pct_val))
+                    try:
+                        bbox_min_size_val = int(auto_cfg.get("bbox_min_size", 48) or 0)
+                    except (TypeError, ValueError):
+                        bbox_min_size_val = 48
+                    bbox_min_size_val = max(2, bbox_min_size_val)
                     auto_runtime.update(
                         {
                             "enabled": True,
@@ -4497,6 +4538,9 @@ class MainWindow(QtWidgets.QMainWindow):
                             "frames": frames_to_scan,
                             "downscale": downscale_value,
                             "mask_threshold": auto_runtime.get("mask_threshold", 8),
+                            "bbox_padding": bbox_padding_val,
+                            "bbox_padding_pct": bbox_padding_pct_val,
+                            "bbox_min_size": bbox_min_size_val,
                         }
                     )
 
@@ -4636,6 +4680,61 @@ class MainWindow(QtWidgets.QMainWindow):
                 clipped.append({"x": int(x), "y": int(y), "w": int(w), "h": int(h)})
 
             return clipped
+
+        def _bbox_to_zone(
+            bbox: Tuple[int, int, int, int],
+            *,
+            frame_size: Optional[Tuple[int, int]],
+            pad_px: int = 0,
+            pad_pct: float = 0.0,
+            min_size: int = 2,
+        ) -> Optional[Dict[str, int]]:
+            try:
+                x_raw, y_raw, w_raw, h_raw = [int(round(float(v))) for v in bbox]
+            except Exception:
+                return None
+            if w_raw <= 0 or h_raw <= 0:
+                return None
+
+            pad_abs = max(0, int(pad_px))
+            try:
+                pad_ratio = float(pad_pct)
+            except Exception:
+                pad_ratio = 0.0
+            pad_ratio = max(0.0, pad_ratio)
+            try:
+                min_dim = int(min_size)
+            except Exception:
+                min_dim = 2
+            min_dim = max(2, min_dim)
+
+            pad_w = int(round(w_raw * pad_ratio))
+            pad_h = int(round(h_raw * pad_ratio))
+            total_pad_x = pad_abs + pad_w
+            total_pad_y = pad_abs + pad_h
+
+            x = x_raw - total_pad_x
+            y = y_raw - total_pad_y
+            w = w_raw + total_pad_x * 2
+            h = h_raw + total_pad_y * 2
+
+            x = max(0, int(x))
+            y = max(0, int(y))
+            w = max(min_dim, int(w))
+            h = max(min_dim, int(h))
+
+            x = _round_to_even(x, minimum=0, default=x)
+            y = _round_to_even(y, minimum=0, default=y)
+            w = _round_to_even(w, minimum=min_dim, default=w)
+            h = _round_to_even(h, minimum=min_dim, default=h)
+
+            zone = {"x": int(x), "y": int(y), "w": int(w), "h": int(h)}
+            if frame_size:
+                clipped = _clip_zones_to_frame([zone], frame_size)
+                if not clipped:
+                    return None
+                zone = clipped[0]
+            return zone
 
         def _probe_frame_size(video_path: Path) -> Optional[Tuple[int, int]]:
             try:
@@ -4838,6 +4937,22 @@ class MainWindow(QtWidgets.QMainWindow):
 
             if auto_runtime.get("enabled"):
                 threshold_value = float(auto_runtime.get("threshold", 0.75) or 0.75)
+                try:
+                    bbox_pad_px = int(auto_runtime.get("bbox_padding", 0) or 0)
+                except Exception:
+                    bbox_pad_px = 0
+                bbox_pad_px = max(0, bbox_pad_px)
+                try:
+                    bbox_pad_pct = float(auto_runtime.get("bbox_padding_pct", 0.0) or 0.0)
+                except Exception:
+                    bbox_pad_pct = 0.0
+                bbox_pad_pct = max(0.0, bbox_pad_pct)
+                try:
+                    bbox_min_size = int(auto_runtime.get("bbox_min_size", 2) or 2)
+                except Exception:
+                    bbox_min_size = 2
+                bbox_min_size = max(2, bbox_min_size)
+
                 detect_kwargs = {
                     "threshold": auto_runtime.get("threshold", 0.75),
                     "frames": auto_runtime.get("frames", 5),
@@ -4920,6 +5035,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     score_allows_detection = True
                     if detection_score is not None and detection_score < threshold_value:
                         score_allows_detection = False
+                    per_video_zones: List[Dict[str, int]] = []
                     if bbox and score_allows_detection:
                         x, y, w, h = bbox
                         if w > 0 and h > 0:
@@ -4953,85 +5069,119 @@ class MainWindow(QtWidgets.QMainWindow):
                                         duration_value,
                                         fps_value,
                                     )
-                            try:
-                                projected = _project_detection_onto_zones(
-                                    base_zones,
-                                    (int(x), int(y), int(w), int(h)),
-                                    frame_size,
-                                )
-                            except Exception as exc:  # noqa: BLE001
-                                detection_error_text = f"проекция зон не удалась: {exc}"
-                                fallback_note = "проекция зон не удалась"
+                            target_frame_size = frame_size
+                            if target_frame_size is None:
+                                target_frame_size = _probe_frame_size(v)
+                            if target_frame_size and not frame_size:
+                                frame_size = target_frame_size
+
+                            zone_from_bbox = _bbox_to_zone(
+                                (int(x), int(y), int(w), int(h)),
+                                frame_size=target_frame_size,
+                                pad_px=bbox_pad_px,
+                                pad_pct=bbox_pad_pct,
+                                min_size=bbox_min_size,
+                            )
+                            if zone_from_bbox:
+                                per_video_zones = [zone_from_bbox]
+                                per_video_zones_result = [dict(zone_from_bbox)]
                             else:
-                                per_video_zones = list(projected)
-                                per_video_zones_result = list(projected)
-                                if segments:
-                                    try:
-                                        timeline_segment_count = len(segments)
-                                        timeline_zones_local: List[Dict[str, Any]] = []
-                                        for seg in segments:
-                                            seg_bbox = seg.get("bbox")
-                                            if not seg_bbox or len(seg_bbox) != 4:
-                                                continue
-                                            seg_frame_size = seg.get("frame_size")
-                                            if not seg_frame_size:
-                                                seg_frame_size = frame_size
+                                try:
+                                    projected = _project_detection_onto_zones(
+                                        base_zones,
+                                        (int(x), int(y), int(w), int(h)),
+                                        target_frame_size,
+                                    )
+                                except Exception as exc:  # noqa: BLE001
+                                    if not detection_error_text:
+                                        detection_error_text = f"проекция зон не удалась: {exc}"
+                                    fallback_note = fallback_note or "проекция зон не удалась"
+                                    projected = []
+                                if projected:
+                                    per_video_zones = list(projected)
+                                    per_video_zones_result = list(projected)
+
+                            if segments:
+                                try:
+                                    timeline_zones_local: List[Dict[str, Any]] = []
+                                    appended = 0
+                                    for seg in segments:
+                                        seg_bbox = seg.get("bbox")
+                                        if not seg_bbox or len(seg_bbox) != 4:
+                                            continue
+                                        seg_frame_val = seg.get("frame_size")
+                                        seg_frame: Optional[Tuple[int, int]]
+                                        if isinstance(seg_frame_val, (list, tuple)) and len(seg_frame_val) == 2:
                                             try:
-                                                per_segment = _project_detection_onto_zones(
-                                                    base_zones,
-                                                    (
-                                                        int(seg_bbox[0]),
-                                                        int(seg_bbox[1]),
-                                                        int(seg_bbox[2]),
-                                                        int(seg_bbox[3]),
-                                                    ),
-                                                    seg_frame_size,
+                                                seg_frame = (
+                                                    int(seg_frame_val[0]),
+                                                    int(seg_frame_val[1]),
                                                 )
                                             except Exception:
-                                                continue
-                                            for zone in per_segment:
-                                                start_val = seg.get("start")
-                                                end_val = seg.get("end")
-                                                if start_val is None and end_val is None:
-                                                    continue
-                                                try:
-                                                    start_f = float(start_val) if start_val is not None else 0.0
-                                                except Exception:
-                                                    start_f = 0.0
-                                                try:
-                                                    end_f = float(end_val) if end_val is not None else start_f
-                                                except Exception:
-                                                    end_f = start_f
-                                                if end_f <= start_f:
-                                                    end_f = start_f + 0.1
-                                                timeline_zones_local.append({
-                                                    "x": int(zone.get("x", 0)),
-                                                    "y": int(zone.get("y", 0)),
-                                                    "w": int(zone.get("w", 1)),
-                                                    "h": int(zone.get("h", 1)),
-                                                    "start": max(0.0, start_f),
-                                                    "end": max(start_f + 0.05, end_f),
-                                                })
-                                        if timeline_zones_local:
-                                            timeline_zones = timeline_zones_local
-                                    except Exception as exc:  # noqa: BLE001
+                                                seg_frame = None
+                                        else:
+                                            seg_frame = None
+                                        target_seg_frame = seg_frame or target_frame_size
+                                        zone_for_segment = _bbox_to_zone(
+                                            (
+                                                int(seg_bbox[0]),
+                                                int(seg_bbox[1]),
+                                                int(seg_bbox[2]),
+                                                int(seg_bbox[3]),
+                                            ),
+                                            frame_size=target_seg_frame,
+                                            pad_px=bbox_pad_px,
+                                            pad_pct=bbox_pad_pct,
+                                            min_size=bbox_min_size,
+                                        )
+                                        if not zone_for_segment:
+                                            continue
+                                        start_val = seg.get("start")
+                                        end_val = seg.get("end")
+                                        if start_val is None and end_val is None:
+                                            continue
+                                        try:
+                                            start_f = float(start_val) if start_val is not None else 0.0
+                                        except Exception:
+                                            start_f = 0.0
+                                        try:
+                                            end_f = float(end_val) if end_val is not None else start_f
+                                        except Exception:
+                                            end_f = start_f
+                                        if end_f <= start_f:
+                                            end_f = start_f + 0.1
+                                        appended += 1
+                                        timeline_zones_local.append(
+                                            {
+                                                **zone_for_segment,
+                                                "start": max(0.0, start_f),
+                                                "end": max(start_f + 0.05, end_f),
+                                            }
+                                        )
+                                    if timeline_zones_local:
+                                        timeline_zones = timeline_zones_local
+                                        timeline_segment_count = appended
+                                except Exception as exc:  # noqa: BLE001
+                                    if not detection_error_text:
                                         detection_error_text = f"проекция по временной шкале не удалась: {exc}"
-                                        fallback_note = "проекция по временной шкале не удалась"
-                                if not timeline_zones and per_video_zones:
-                                    active_zones = per_video_zones
-                                if timeline_zones or per_video_zones:
-                                    detection_applied = True
-                                    zone_count = len(timeline_zones) if timeline_zones else len(per_video_zones)
-                                    detection_info_msg = (
-                                        f"[BLUR] {v.name}: автодетект → {zone_count} зон"
-                                    )
-                                    if timeline_zones and timeline_segment_count:
-                                        detection_info_msg += f" в {timeline_segment_count} окнах"
-                                    if detection_score is not None:
-                                        detection_info_msg += f" (score={detection_score:.2f})"
-                                else:
+                                    fallback_note = fallback_note or "проекция по временной шкале не удалась"
+
+                            if not timeline_zones and per_video_zones:
+                                active_zones = per_video_zones
+                            if timeline_zones or per_video_zones:
+                                detection_applied = True
+                                zone_count = len(timeline_zones) if timeline_zones else len(per_video_zones)
+                                detection_info_msg = (
+                                    f"[BLUR] {v.name}: автодетект → {zone_count} зон"
+                                )
+                                if timeline_zones and timeline_segment_count:
+                                    detection_info_msg += f" в {timeline_segment_count} окнах"
+                                if detection_score is not None:
+                                    detection_info_msg += f" (score={detection_score:.2f})"
+                            else:
+                                if not detection_error_text:
                                     detection_error_text = "проекция зон вернула пустой результат"
-                                    fallback_note = "проекция зон вернула пустой результат"
+                                fallback_note = fallback_note or "проекция зон вернула пустой результат"
                         else:
                             detection_error_text = "некорректная зона от детектора"
                             fallback_note = "детектор вернул пустую зону"
@@ -5663,6 +5813,9 @@ class MainWindow(QtWidgets.QMainWindow):
         auto_cfg["threshold"] = float(self.dsb_aw_threshold.value())
         auto_cfg["frames"] = int(self.sb_aw_frames.value())
         auto_cfg["downscale"] = int(self.sb_aw_downscale.value())
+        auto_cfg["bbox_padding"] = int(self.sb_aw_bbox_pad.value())
+        auto_cfg["bbox_padding_pct"] = round(float(self.dsb_aw_bbox_pct.value()) / 100.0, 4)
+        auto_cfg["bbox_min_size"] = int(self.sb_aw_bbox_min.value())
 
         presets = ff.setdefault("presets", {})
         presets.clear()

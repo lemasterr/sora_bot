@@ -72,6 +72,9 @@ ffmpeg:
     threshold: 0.75
     frames: 8
     downscale: 0
+    bbox_padding: 12
+    bbox_padding_pct: 0.15
+    bbox_min_size: 48
   presets:
     portrait_9x16:
       zones:
