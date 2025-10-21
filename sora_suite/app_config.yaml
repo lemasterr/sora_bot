@@ -66,6 +66,12 @@ ffmpeg:
   format: mp4
   copy_audio: true
   blur_threads: 2
+  auto_watermark:
+    enabled: false
+    template: ''
+    threshold: 0.75
+    frames: 5
+    downscale: 0
   presets:
     portrait_9x16:
       zones:

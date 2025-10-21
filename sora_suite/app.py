@@ -212,6 +212,12 @@ def load_cfg() -> dict:
     ff.setdefault("format", "mp4")
     ff.setdefault("copy_audio", True)
     ff.setdefault("blur_threads", 2)
+    auto_wm = ff.setdefault("auto_watermark", {})
+    auto_wm.setdefault("enabled", False)
+    auto_wm.setdefault("template", "")
+    auto_wm.setdefault("threshold", 0.75)
+    auto_wm.setdefault("frames", 5)
+    auto_wm.setdefault("downscale", 0)
     presets = ff.setdefault("presets", {})
     if isinstance(presets, list):
         migrated: Dict[str, dict] = {}
@@ -2439,9 +2445,32 @@ class MainWindow(QtWidgets.QMainWindow):
         ff_form.addRow("format:", self.cmb_format)
         ff_form.addRow("Потоки BLUR:", self.sb_blur_threads)
         ff_form.addRow("", self.cb_copy_audio)
+        auto_cfg = ff.get("auto_watermark", {}) or {}
+        grp_auto = QtWidgets.QGroupBox("Автодетект водяного знака")
+        auto_form = QtWidgets.QFormLayout(grp_auto)
+        auto_form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignLeft)
+        self.cb_aw_enabled = QtWidgets.QCheckBox("Включить автодетект")
+        self.cb_aw_enabled.setChecked(bool(auto_cfg.get("enabled")))
+        auto_form.addRow("Автодетект:", self.cb_aw_enabled)
+        aw_template_wrap = QtWidgets.QWidget()
+        aw_template_layout = QtWidgets.QHBoxLayout(aw_template_wrap)
+        aw_template_layout.setContentsMargins(0, 0, 0, 0)
+        aw_template_layout.setSpacing(4)
+        self.ed_aw_template = QtWidgets.QLineEdit(auto_cfg.get("template", ""))
+        self.btn_aw_template = QtWidgets.QToolButton(); self.btn_aw_template.setText("…")
+        aw_template_layout.addWidget(self.ed_aw_template, 1)
+        aw_template_layout.addWidget(self.btn_aw_template)
+        auto_form.addRow("Шаблон:", aw_template_wrap)
+        self.dsb_aw_threshold = QtWidgets.QDoubleSpinBox(); self.dsb_aw_threshold.setRange(0.0, 1.0); self.dsb_aw_threshold.setSingleStep(0.01); self.dsb_aw_threshold.setDecimals(3); self.dsb_aw_threshold.setValue(float(auto_cfg.get("threshold", 0.75) or 0.75))
+        auto_form.addRow("Порог совпадения:", self.dsb_aw_threshold)
+        self.sb_aw_frames = QtWidgets.QSpinBox(); self.sb_aw_frames.setRange(1, 120); self.sb_aw_frames.setValue(int(auto_cfg.get("frames", 5) or 5))
+        auto_form.addRow("Кадров для анализа:", self.sb_aw_frames)
+        self.sb_aw_downscale = QtWidgets.QSpinBox(); self.sb_aw_downscale.setRange(0, 4096); self.sb_aw_downscale.setSpecialValueText("без изменений"); self.sb_aw_downscale.setSuffix(" px"); self.sb_aw_downscale.setValue(int(auto_cfg.get("downscale", 0) or 0))
+        auto_form.addRow("Макс. ширина кадра:", self.sb_aw_downscale)
         self.cmb_active_preset = QtWidgets.QComboBox()
         ff_form.addRow("Активный пресет:", self.cmb_active_preset)
         ff_layout.addLayout(ff_form)
+        ff_layout.addWidget(grp_auto)
 
         preset_btns = QtWidgets.QHBoxLayout()
         self.btn_preset_add = QtWidgets.QPushButton("Добавить пресет")
@@ -2881,6 +2910,11 @@ class MainWindow(QtWidgets.QMainWindow):
             (self.cmb_preset, "currentIndexChanged"),
             (self.cmb_format, "currentIndexChanged"),
             (self.cb_copy_audio, "toggled"),
+            (self.cb_aw_enabled, "toggled"),
+            (self.ed_aw_template, "textEdited"),
+            (self.dsb_aw_threshold, "valueChanged"),
+            (self.sb_aw_frames, "valueChanged"),
+            (self.sb_aw_downscale, "valueChanged"),
             (self.cmb_active_preset, "currentIndexChanged"),
             (self.sb_blur_threads, "valueChanged"),
             (self.sb_youtube_default_delay, "valueChanged"),
@@ -3222,6 +3256,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_preset_add.clicked.connect(self._on_preset_add)
         self.btn_preset_delete.clicked.connect(self._on_preset_delete)
         self.btn_preset_preview.clicked.connect(self._open_blur_preview)
+        self.btn_aw_template.clicked.connect(lambda: self._browse_file(self.ed_aw_template, "Выбери шаблон водяного знака", "Изображения (*.png *.jpg *.jpeg *.bmp);;Все файлы (*.*)"))
 
         self.btn_youtube_src_browse.clicked.connect(lambda: self._browse_dir(self.ed_youtube_src, "Выбери папку с клипами"))
         self.cb_youtube_draft_only.toggled.connect(self._toggle_youtube_schedule)
@@ -4383,6 +4418,60 @@ class MainWindow(QtWidgets.QMainWindow):
             self._post_status("В пресете нет зон для блюра", state="error")
             return False
 
+        auto_cfg = ff_cfg.get("auto_watermark") or {}
+        auto_runtime: Dict[str, object] = {"enabled": False, "reason": ""}
+        auto_stats: Dict[str, List[dict]] = {"fallbacks": [], "errors": []}
+        if bool(auto_cfg.get("enabled")):
+            try:
+                from watermark_detector import detect_watermark  # type: ignore[import]
+            except Exception as exc:  # noqa: BLE001
+                auto_runtime["reason"] = f"не удалось импортировать детектор: {exc}"
+            else:
+                template_raw = str(auto_cfg.get("template", "") or "").strip()
+                if not template_raw:
+                    auto_runtime["reason"] = "не указан путь к шаблону"
+                else:
+                    template_path = _project_path(template_raw)
+                    if not template_path.exists():
+                        auto_runtime["reason"] = f"шаблон не найден: {template_path}"
+                if not auto_runtime.get("reason"):
+                    try:
+                        import cv2  # type: ignore[import]
+                    except Exception as exc:  # noqa: BLE001
+                        auto_runtime["reason"] = f"opencv недоступен: {exc}"
+                    else:
+                        template_image = cv2.imread(str(template_path), cv2.IMREAD_GRAYSCALE)
+                        if template_image is None or getattr(template_image, "size", 0) == 0:
+                            auto_runtime["reason"] = f"не удалось загрузить шаблон: {template_path}"
+                if not auto_runtime.get("reason"):
+                    try:
+                        threshold = float(auto_cfg.get("threshold", 0.75) or 0.75)
+                    except (TypeError, ValueError):
+                        threshold = 0.75
+                    frames_to_scan = auto_cfg.get("frames", 5)
+                    try:
+                        frames_to_scan = int(frames_to_scan or 0)
+                    except (TypeError, ValueError):
+                        frames_to_scan = 5
+                    frames_to_scan = max(frames_to_scan, 1)
+                    downscale_val = auto_cfg.get("downscale")
+                    try:
+                        downscale_num = float(downscale_val)
+                    except (TypeError, ValueError):
+                        downscale_num = 0.0
+                    downscale_value: Optional[float] = downscale_num if downscale_num > 0 else None
+                    auto_runtime.update(
+                        {
+                            "enabled": True,
+                            "func": detect_watermark,
+                            "template_path": str(template_path),
+                            "template_image": template_image,
+                            "threshold": threshold,
+                            "frames": frames_to_scan,
+                            "downscale": downscale_value,
+                        }
+                    )
+
         # источник для BLUR
         downloads_dir = _project_path(self.cfg.get("downloads_dir", str(DL_DIR)))
         src_primary = _project_path(
@@ -4440,10 +4529,71 @@ class MainWindow(QtWidgets.QMainWindow):
 
         def blur_one(v: Path) -> bool:
             out = dst_dir / v.name
-            delogos = ",".join([
-                f"delogo=x={z['x']}:y={z['y']}:w={z['w']}:h={z['h']}:show=0" for z in zones
-            ])
-            vf = delogos + (f",{post}" if post else "") + ",format=yuv420p"
+            base_zones = [dict(z) for z in zones]
+            active_zones = list(base_zones)
+            detection_score: Optional[float] = None
+            detection_error_text: Optional[str] = None
+            fallback_note: Optional[str] = None
+
+            if auto_runtime.get("enabled"):
+                detect_kwargs = {
+                    "threshold": auto_runtime.get("threshold", 0.75),
+                    "frames": auto_runtime.get("frames", 5),
+                    "downscale": auto_runtime.get("downscale"),
+                    "template_image": auto_runtime.get("template_image"),
+                    "return_score": True,
+                }
+                try:
+                    result = auto_runtime["func"](  # type: ignore[index]
+                        str(v),
+                        auto_runtime["template_path"],  # type: ignore[index]
+                        **detect_kwargs,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    detection_error_text = str(exc)
+                    fallback_note = f"ошибка детектора: {exc}"
+                else:
+                    bbox = result
+                    if isinstance(result, tuple) and len(result) == 2:
+                        bbox = result[0]
+                        detection_score = result[1]
+                    if bbox:
+                        x, y, w, h = bbox
+                        if w > 0 and h > 0:
+                            active_zones = [
+                                {
+                                    "x": max(0, int(x)),
+                                    "y": max(0, int(y)),
+                                    "w": max(1, int(w)),
+                                    "h": max(1, int(h)),
+                                }
+                            ]
+                        else:
+                            detection_error_text = "некорректная зона от детектора"
+                            fallback_note = "детектор вернул пустую зону"
+                    else:
+                        fallback_note = f"совпадение ниже порога ({auto_runtime['threshold']:.2f})"
+                        if detection_score is not None:
+                            fallback_note += f", score={detection_score:.2f}"
+
+            filter_parts = [
+                f"delogo=x={z['x']}:y={z['y']}:w={z['w']}:h={z['h']}:show=0" for z in active_zones
+            ]
+            if not filter_parts:
+                filter_parts = [
+                    f"delogo=x={z['x']}:y={z['y']}:w={z['w']}:h={z['h']}:show=0" for z in zones
+                ]
+            if not filter_parts:
+                with lock:
+                    counter["done"] += 1
+                    self._post_status("Блюр…", progress=counter["done"], total=total, state="running")
+                    self.sig_log.emit(f"[BLUR] Ошибка {v.name}: не найдены зоны delogo")
+                    failures.append(f"{v.name}: не найдены зоны delogo")
+                return False
+            if post:
+                filter_parts.append(post)
+            filter_parts.append("format=yuv420p")
+            vf = ",".join(filter_parts)
 
             def _build_cmd(use_hw: bool, audio_copy: bool) -> List[str]:
                 cmd = [ffbin, "-hide_banner", "-loglevel", "info", "-y"]
@@ -4513,6 +4663,19 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.sig_log.emit(f"[BLUR] {'OK' if ok else 'FAIL'} ({detail}): {v.name}")
                 if ok and copy_audio and not final_audio_copy:
                     self.sig_log.emit(f"[BLUR] {v.name}: аудио сконвертировано в AAC для совместимости")
+                if auto_runtime.get("enabled"):
+                    if detection_error_text:
+                        auto_stats["errors"].append({"name": v.name, "error": detection_error_text})
+                        self.sig_log.emit(
+                            f"[BLUR] {v.name}: автодетект → пресет ({detection_error_text})"
+                        )
+                    elif fallback_note:
+                        auto_stats["fallbacks"].append(
+                            {"name": v.name, "score": detection_score, "note": fallback_note}
+                        )
+                        self.sig_log.emit(
+                            f"[BLUR] {v.name}: автодетект → пресет ({fallback_note})"
+                        )
                 if not ok:
                     note = error_note or last_line or "ffmpeg завершился с ошибкой"
                     failures.append(f"{v.name}: {note}")
@@ -4520,6 +4683,45 @@ class MainWindow(QtWidgets.QMainWindow):
 
         with ThreadPoolExecutor(max_workers=max(1, threads)) as ex:
             results = list(ex.map(blur_one, videos))
+
+        if auto_cfg.get("enabled"):
+            if not auto_runtime.get("enabled"):
+                reason = str(auto_runtime.get("reason") or "не удалось инициализировать детектор")
+                msg = f"Автодетект водяного знака отключён: {reason}"
+                self.sig_log.emit(f"[BLUR] {msg}")
+                self._append_activity(f"Блюр: {msg}", kind="warn")
+                self._send_tg(f"⚠️ {msg}")
+            else:
+                if auto_stats["errors"]:
+                    err_preview_parts = [
+                        f"{entry['name']}: {entry['error']}" for entry in auto_stats["errors"][:3]
+                    ]
+                    err_preview = "; ".join(err_preview_parts)
+                    if len(auto_stats["errors"]) > 3:
+                        err_preview += f" … и ещё {len(auto_stats['errors']) - 3}"
+                    msg = f"Автодетект водяного знака: ошибки → {err_preview}"
+                    self.sig_log.emit(f"[BLUR] {msg}")
+                    self._append_activity(msg, kind="warn")
+                    self._send_tg(f"⚠️ {msg}")
+                if auto_stats["fallbacks"]:
+                    fb_preview_parts: List[str] = []
+                    for entry in auto_stats["fallbacks"][:3]:
+                        note = entry.get("note") or ""
+                        if note:
+                            fb_preview_parts.append(f"{entry['name']}: {note}")
+                        else:
+                            score = entry.get("score")
+                            if isinstance(score, (int, float)):
+                                fb_preview_parts.append(f"{entry['name']} (score={score:.2f})")
+                            else:
+                                fb_preview_parts.append(entry["name"])
+                    fb_preview = "; ".join(fb_preview_parts)
+                    if len(auto_stats["fallbacks"]) > 3:
+                        fb_preview += f" … и ещё {len(auto_stats['fallbacks']) - 3}"
+                    msg = f"Автодетект водяного знака: fallback к пресету → {fb_preview}"
+                    self.sig_log.emit(f"[BLUR] {msg}")
+                    self._append_activity(msg, kind="warn")
+                    self._send_tg(f"⚠️ {msg}")
 
         ok_all = all(results)
         append_history(
@@ -4882,6 +5084,12 @@ class MainWindow(QtWidgets.QMainWindow):
         ff["copy_audio"] = bool(self.cb_copy_audio.isChecked())
         ff["active_preset"] = self.cmb_active_preset.currentText().strip()
         ff["blur_threads"] = int(self.sb_blur_threads.value())
+        auto_cfg = ff.setdefault("auto_watermark", {})
+        auto_cfg["enabled"] = bool(self.cb_aw_enabled.isChecked())
+        auto_cfg["template"] = self.ed_aw_template.text().strip()
+        auto_cfg["threshold"] = float(self.dsb_aw_threshold.value())
+        auto_cfg["frames"] = int(self.sb_aw_frames.value())
+        auto_cfg["downscale"] = int(self.sb_aw_downscale.value())
 
         presets = ff.setdefault("presets", {})
         presets.clear()
