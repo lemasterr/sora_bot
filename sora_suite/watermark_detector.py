@@ -49,6 +49,7 @@ def detect_watermark(
     template_path = str(template_path)
 
     return_score = bool(cfg.get("return_score"))
+    return_details = bool(cfg.get("return_details"))
     threshold = float(cfg.get("threshold", 0.7) or 0.7)
     frames_to_scan = max(int(cfg.get("frames", 5) or 1), 1)
     blur_kernel = int(cfg.get("blur_kernel", 5) or 0)
@@ -157,8 +158,22 @@ def detect_watermark(
         w = max(1, min(w, frame_w - x))
         h = max(1, min(h, frame_h - y))
         bbox = (x, y, w, h)
-        return (bbox, best_score) if return_score else bbox
+        if return_details:
+            return {
+                "bbox": bbox,
+                "score": best_score,
+                "frame_size": best_frame_size,
+            }
+        if return_score:
+            return (bbox, best_score)
+        return bbox
 
+    if return_details:
+        return {
+            "bbox": None,
+            "score": best_score if best_score >= 0 else None,
+            "frame_size": best_frame_size,
+        }
     if return_score:
         score = best_score if best_score >= 0 else None
         return (None, score)

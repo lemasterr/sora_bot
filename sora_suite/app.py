@@ -4527,6 +4527,63 @@ class MainWindow(QtWidgets.QMainWindow):
         lock = Lock()
         failures: List[str] = []
 
+        def _project_detection_onto_zones(
+            base: List[Dict[str, int]],
+            detected: Tuple[int, int, int, int],
+            frame_size: Optional[Tuple[int, int]] = None,
+        ) -> List[Dict[str, int]]:
+            if not base:
+                x, y, w, h = detected
+                return [
+                    {
+                        "x": max(0, int(x)),
+                        "y": max(0, int(y)),
+                        "w": max(1, int(w)),
+                        "h": max(1, int(h)),
+                    }
+                ]
+
+            ref = base[0]
+            ref_w = max(1, int(ref.get("w", 1)))
+            ref_h = max(1, int(ref.get("h", 1)))
+            det_x, det_y, det_w, det_h = detected
+            scale_x = det_w / ref_w if ref_w else 1.0
+            scale_y = det_h / ref_h if ref_h else 1.0
+
+            frame_w: Optional[int] = None
+            frame_h: Optional[int] = None
+            if frame_size and len(frame_size) == 2:
+                frame_w = max(1, int(frame_size[0]))
+                frame_h = max(1, int(frame_size[1]))
+
+            projected: List[Dict[str, int]] = []
+            for zone in base:
+                base_x = int(zone.get("x", 0))
+                base_y = int(zone.get("y", 0))
+                base_w = max(1, int(zone.get("w", 1)))
+                base_h = max(1, int(zone.get("h", 1)))
+
+                offset_x = base_x - int(ref.get("x", 0))
+                offset_y = base_y - int(ref.get("y", 0))
+
+                new_w = max(1, int(round(base_w * scale_x)))
+                new_h = max(1, int(round(base_h * scale_y)))
+                new_x = int(round(det_x + offset_x * scale_x))
+                new_y = int(round(det_y + offset_y * scale_y))
+
+                if frame_w is not None and frame_h is not None:
+                    new_x = max(0, min(new_x, frame_w - 1))
+                    new_y = max(0, min(new_y, frame_h - 1))
+                    new_w = max(1, min(new_w, frame_w - new_x))
+                    new_h = max(1, min(new_h, frame_h - new_y))
+                else:
+                    new_x = max(0, new_x)
+                    new_y = max(0, new_y)
+
+                projected.append({"x": new_x, "y": new_y, "w": new_w, "h": new_h})
+
+            return projected
+
         def blur_one(v: Path) -> bool:
             out = dst_dir / v.name
             base_zones = [dict(z) for z in zones]
@@ -4534,6 +4591,8 @@ class MainWindow(QtWidgets.QMainWindow):
             detection_score: Optional[float] = None
             detection_error_text: Optional[str] = None
             fallback_note: Optional[str] = None
+            frame_size: Optional[Tuple[int, int]] = None
+            detection_info_msg: Optional[str] = None
 
             if auto_runtime.get("enabled"):
                 detect_kwargs = {
@@ -4542,6 +4601,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     "downscale": auto_runtime.get("downscale"),
                     "template_image": auto_runtime.get("template_image"),
                     "return_score": True,
+                    "return_details": True,
                 }
                 try:
                     result = auto_runtime["func"](  # type: ignore[index]
@@ -4556,18 +4616,45 @@ class MainWindow(QtWidgets.QMainWindow):
                     bbox = result
                     if isinstance(result, tuple) and len(result) == 2:
                         bbox = result[0]
-                        detection_score = result[1]
+                        try:
+                            detection_score = float(result[1]) if result[1] is not None else None
+                        except (TypeError, ValueError):
+                            detection_score = None
+                    elif isinstance(result, dict):
+                        bbox = result.get("bbox")
+                        raw_score = result.get("score")
+                        if raw_score is not None:
+                            try:
+                                detection_score = float(raw_score)
+                            except (TypeError, ValueError):
+                                detection_score = None
+                        fs = result.get("frame_size")
+                        if isinstance(fs, (tuple, list)) and len(fs) == 2:
+                            try:
+                                frame_size = (int(fs[0]), int(fs[1]))
+                            except Exception:
+                                frame_size = None
                     if bbox:
                         x, y, w, h = bbox
                         if w > 0 and h > 0:
-                            active_zones = [
-                                {
-                                    "x": max(0, int(x)),
-                                    "y": max(0, int(y)),
-                                    "w": max(1, int(w)),
-                                    "h": max(1, int(h)),
-                                }
-                            ]
+                            try:
+                                projected = _project_detection_onto_zones(
+                                    base_zones,
+                                    (int(x), int(y), int(w), int(h)),
+                                    frame_size,
+                                )
+                            except Exception as exc:  # noqa: BLE001
+                                detection_error_text = f"проекция зон не удалась: {exc}"
+                                fallback_note = "проекция зон не удалась"
+                            else:
+                                if projected:
+                                    active_zones = projected
+                                    detection_info_msg = f"[BLUR] {v.name}: автодетект → {len(projected)} зон"
+                                    if detection_score is not None:
+                                        detection_info_msg += f" (score={detection_score:.2f})"
+                                else:
+                                    detection_error_text = "проекция зон вернула пустой результат"
+                                    fallback_note = "проекция зон вернула пустой результат"
                         else:
                             detection_error_text = "некорректная зона от детектора"
                             fallback_note = "детектор вернул пустую зону"
@@ -4663,6 +4750,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.sig_log.emit(f"[BLUR] {'OK' if ok else 'FAIL'} ({detail}): {v.name}")
                 if ok and copy_audio and not final_audio_copy:
                     self.sig_log.emit(f"[BLUR] {v.name}: аудио сконвертировано в AAC для совместимости")
+                if detection_info_msg:
+                    self.sig_log.emit(detection_info_msg)
                 if auto_runtime.get("enabled"):
                     if detection_error_text:
                         auto_stats["errors"].append({"name": v.name, "error": detection_error_text})
