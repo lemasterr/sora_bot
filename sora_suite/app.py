@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 import os  # FIX: нужен в load_cfg/_open_chrome
 import re  # FIX: используется в _slot_log, _natural_key
+import math
 import sys
 import json
 try:
@@ -22,7 +23,7 @@ from pathlib import Path
 from functools import partial
 from urllib.request import urlopen, Request
 from collections import deque
-from typing import Optional, List, Union, Tuple, Dict, Callable
+from typing import Optional, List, Union, Tuple, Dict, Callable, Any
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 
@@ -212,6 +213,15 @@ def load_cfg() -> dict:
     ff.setdefault("format", "mp4")
     ff.setdefault("copy_audio", True)
     ff.setdefault("blur_threads", 2)
+    auto_wm = ff.setdefault("auto_watermark", {})
+    auto_wm.setdefault("enabled", False)
+    auto_wm.setdefault("template", "")
+    auto_wm.setdefault("threshold", 0.75)
+    auto_wm.setdefault("frames", 5)
+    auto_wm.setdefault("downscale", 0)
+    auto_wm.setdefault("bbox_padding", 12)
+    auto_wm.setdefault("bbox_padding_pct", 0.15)
+    auto_wm.setdefault("bbox_min_size", 48)
     presets = ff.setdefault("presets", {})
     if isinstance(presets, list):
         migrated: Dict[str, dict] = {}
@@ -2439,9 +2449,52 @@ class MainWindow(QtWidgets.QMainWindow):
         ff_form.addRow("format:", self.cmb_format)
         ff_form.addRow("Потоки BLUR:", self.sb_blur_threads)
         ff_form.addRow("", self.cb_copy_audio)
+        auto_cfg = ff.get("auto_watermark", {}) or {}
+        grp_auto = QtWidgets.QGroupBox("Автодетект водяного знака")
+        auto_form = QtWidgets.QFormLayout(grp_auto)
+        auto_form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignLeft)
+        self.cb_aw_enabled = QtWidgets.QCheckBox("Включить автодетект")
+        self.cb_aw_enabled.setChecked(bool(auto_cfg.get("enabled")))
+        auto_form.addRow("Автодетект:", self.cb_aw_enabled)
+        aw_template_wrap = QtWidgets.QWidget()
+        aw_template_layout = QtWidgets.QHBoxLayout(aw_template_wrap)
+        aw_template_layout.setContentsMargins(0, 0, 0, 0)
+        aw_template_layout.setSpacing(4)
+        self.ed_aw_template = QtWidgets.QLineEdit(auto_cfg.get("template", ""))
+        self.btn_aw_template = QtWidgets.QToolButton(); self.btn_aw_template.setText("…")
+        aw_template_layout.addWidget(self.ed_aw_template, 1)
+        aw_template_layout.addWidget(self.btn_aw_template)
+        auto_form.addRow("Шаблон:", aw_template_wrap)
+        self.dsb_aw_threshold = QtWidgets.QDoubleSpinBox(); self.dsb_aw_threshold.setRange(0.0, 1.0); self.dsb_aw_threshold.setSingleStep(0.01); self.dsb_aw_threshold.setDecimals(3); self.dsb_aw_threshold.setValue(float(auto_cfg.get("threshold", 0.75) or 0.75))
+        auto_form.addRow("Порог совпадения:", self.dsb_aw_threshold)
+        self.sb_aw_frames = QtWidgets.QSpinBox(); self.sb_aw_frames.setRange(1, 120); self.sb_aw_frames.setValue(int(auto_cfg.get("frames", 5) or 5))
+        auto_form.addRow("Кадров для анализа:", self.sb_aw_frames)
+        self.sb_aw_downscale = QtWidgets.QSpinBox(); self.sb_aw_downscale.setRange(0, 4096); self.sb_aw_downscale.setSpecialValueText("без изменений"); self.sb_aw_downscale.setSuffix(" px"); self.sb_aw_downscale.setValue(int(auto_cfg.get("downscale", 0) or 0))
+        auto_form.addRow("Макс. ширина кадра:", self.sb_aw_downscale)
+        self.sb_aw_bbox_pad = QtWidgets.QSpinBox()
+        self.sb_aw_bbox_pad.setRange(0, 512)
+        self.sb_aw_bbox_pad.setValue(int(auto_cfg.get("bbox_padding", 12) or 0))
+        auto_form.addRow("Запас по краям (px):", self.sb_aw_bbox_pad)
+        self.dsb_aw_bbox_pct = QtWidgets.QDoubleSpinBox()
+        self.dsb_aw_bbox_pct.setRange(0.0, 100.0)
+        self.dsb_aw_bbox_pct.setSingleStep(1.0)
+        self.dsb_aw_bbox_pct.setDecimals(1)
+        self.dsb_aw_bbox_pct.setSuffix(" %")
+        try:
+            bbox_pct_val = float(auto_cfg.get("bbox_padding_pct", 0.15) or 0.0) * 100.0
+        except Exception:
+            bbox_pct_val = 0.0
+        self.dsb_aw_bbox_pct.setValue(max(0.0, min(100.0, bbox_pct_val)))
+        auto_form.addRow("Доп. процент ширины:", self.dsb_aw_bbox_pct)
+        self.sb_aw_bbox_min = QtWidgets.QSpinBox()
+        self.sb_aw_bbox_min.setRange(2, 1920)
+        self.sb_aw_bbox_min.setSingleStep(2)
+        self.sb_aw_bbox_min.setValue(int(auto_cfg.get("bbox_min_size", 48) or 2))
+        auto_form.addRow("Мин. размер зоны (px):", self.sb_aw_bbox_min)
         self.cmb_active_preset = QtWidgets.QComboBox()
         ff_form.addRow("Активный пресет:", self.cmb_active_preset)
         ff_layout.addLayout(ff_form)
+        ff_layout.addWidget(grp_auto)
 
         preset_btns = QtWidgets.QHBoxLayout()
         self.btn_preset_add = QtWidgets.QPushButton("Добавить пресет")
@@ -2881,6 +2934,14 @@ class MainWindow(QtWidgets.QMainWindow):
             (self.cmb_preset, "currentIndexChanged"),
             (self.cmb_format, "currentIndexChanged"),
             (self.cb_copy_audio, "toggled"),
+            (self.cb_aw_enabled, "toggled"),
+            (self.ed_aw_template, "textEdited"),
+            (self.dsb_aw_threshold, "valueChanged"),
+            (self.sb_aw_frames, "valueChanged"),
+            (self.sb_aw_downscale, "valueChanged"),
+            (self.sb_aw_bbox_pad, "valueChanged"),
+            (self.dsb_aw_bbox_pct, "valueChanged"),
+            (self.sb_aw_bbox_min, "valueChanged"),
             (self.cmb_active_preset, "currentIndexChanged"),
             (self.sb_blur_threads, "valueChanged"),
             (self.sb_youtube_default_delay, "valueChanged"),
@@ -3222,6 +3283,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_preset_add.clicked.connect(self._on_preset_add)
         self.btn_preset_delete.clicked.connect(self._on_preset_delete)
         self.btn_preset_preview.clicked.connect(self._open_blur_preview)
+        self.btn_aw_template.clicked.connect(lambda: self._browse_file(self.ed_aw_template, "Выбери шаблон водяного знака", "Изображения (*.png *.jpg *.jpeg *.bmp);;Все файлы (*.*)"))
 
         self.btn_youtube_src_browse.clicked.connect(lambda: self._browse_dir(self.ed_youtube_src, "Выбери папку с клипами"))
         self.cb_youtube_draft_only.toggled.connect(self._toggle_youtube_schedule)
@@ -4383,6 +4445,105 @@ class MainWindow(QtWidgets.QMainWindow):
             self._post_status("В пресете нет зон для блюра", state="error")
             return False
 
+        auto_cfg = ff_cfg.get("auto_watermark") or {}
+        auto_runtime: Dict[str, object] = {"enabled": False, "reason": ""}
+        auto_stats: Dict[str, List[dict]] = {"fallbacks": [], "errors": []}
+        if bool(auto_cfg.get("enabled")):
+            try:
+                from watermark_detector import (  # type: ignore[import]
+                    detect_watermark,
+                    prepare_template,
+                )
+            except Exception as exc:  # noqa: BLE001
+                auto_runtime["reason"] = f"не удалось импортировать детектор: {exc}"
+            else:
+                template_raw = str(auto_cfg.get("template", "") or "").strip()
+                if not template_raw:
+                    auto_runtime["reason"] = "не указан путь к шаблону"
+                else:
+                    template_path = _project_path(template_raw)
+                    if not template_path.exists():
+                        auto_runtime["reason"] = f"шаблон не найден: {template_path}"
+                if not auto_runtime.get("reason"):
+                    try:
+                        import cv2  # type: ignore[import]
+                    except Exception as exc:  # noqa: BLE001
+                        auto_runtime["reason"] = f"opencv недоступен: {exc}"
+                    else:
+                        template_image = cv2.imread(str(template_path), cv2.IMREAD_UNCHANGED)
+                        if template_image is None or getattr(template_image, "size", 0) == 0:
+                            auto_runtime["reason"] = f"не удалось загрузить шаблон: {template_path}"
+                        else:
+                            mask_threshold_raw = auto_cfg.get("mask_threshold")
+                            try:
+                                mask_threshold = (
+                                    int(mask_threshold_raw)
+                                    if mask_threshold_raw is not None
+                                    else 8
+                                )
+                            except (TypeError, ValueError):
+                                mask_threshold = 8
+                            try:
+                                template_package = prepare_template(
+                                    template_image,
+                                    template_path,
+                                    mask_threshold=mask_threshold,
+                                )
+                            except Exception as exc:  # noqa: BLE001
+                                auto_runtime["reason"] = f"не удалось подготовить шаблон: {exc}"
+                                template_package = None
+                            else:
+                                auto_runtime["template_package"] = template_package
+                                auto_runtime["mask_threshold"] = mask_threshold
+                if not auto_runtime.get("reason"):
+                    try:
+                        threshold = float(auto_cfg.get("threshold", 0.75) or 0.75)
+                    except (TypeError, ValueError):
+                        threshold = 0.75
+                    frames_to_scan = auto_cfg.get("frames", 5)
+                    try:
+                        frames_to_scan = int(frames_to_scan or 0)
+                    except (TypeError, ValueError):
+                        frames_to_scan = 5
+                    frames_to_scan = max(frames_to_scan, 1)
+                    downscale_val = auto_cfg.get("downscale")
+                    try:
+                        downscale_num = float(downscale_val)
+                    except (TypeError, ValueError):
+                        downscale_num = 0.0
+                    downscale_value: Optional[float] = downscale_num if downscale_num > 0 else None
+                    try:
+                        bbox_padding_val = int(auto_cfg.get("bbox_padding", 12) or 0)
+                    except (TypeError, ValueError):
+                        bbox_padding_val = 12
+                    bbox_padding_val = max(0, bbox_padding_val)
+                    try:
+                        bbox_padding_pct_val = float(auto_cfg.get("bbox_padding_pct", 0.15) or 0.0)
+                    except (TypeError, ValueError):
+                        bbox_padding_pct_val = 0.15
+                    bbox_padding_pct_val = max(0.0, min(1.0, bbox_padding_pct_val))
+                    try:
+                        bbox_min_size_val = int(auto_cfg.get("bbox_min_size", 48) or 0)
+                    except (TypeError, ValueError):
+                        bbox_min_size_val = 48
+                    bbox_min_size_val = max(2, bbox_min_size_val)
+                    auto_runtime.update(
+                        {
+                            "enabled": True,
+                            "func": detect_watermark,
+                            "template_path": str(template_path),
+                            "template_image": template_image,
+                            "template_package": auto_runtime.get("template_package"),
+                            "threshold": threshold,
+                            "frames": frames_to_scan,
+                            "downscale": downscale_value,
+                            "mask_threshold": auto_runtime.get("mask_threshold", 8),
+                            "bbox_padding": bbox_padding_val,
+                            "bbox_padding_pct": bbox_padding_pct_val,
+                            "bbox_min_size": bbox_min_size_val,
+                        }
+                    )
+
         # источник для BLUR
         downloads_dir = _project_path(self.cfg.get("downloads_dir", str(DL_DIR)))
         src_primary = _project_path(
@@ -4438,18 +4599,692 @@ class MainWindow(QtWidgets.QMainWindow):
         lock = Lock()
         failures: List[str] = []
 
+        def _round_to_even(value: object, *, minimum: Optional[int] = None, default: int = 0) -> int:
+            try:
+                num = float(value)
+            except Exception:
+                num = float(default)
+            if not math.isfinite(num):
+                num = float(default)
+            even = int(round(num / 2.0) * 2)
+            if minimum is not None:
+                min_even = int(minimum)
+                if min_even < 0:
+                    min_even = 0
+                if min_even % 2 != 0:
+                    min_even += 1
+                if even < min_even:
+                    even = min_even
+            return even
+
+        def _clip_zones_to_frame(
+            zone_list: List[Dict[str, int]],
+            frame_size: Optional[Tuple[int, int]],
+        ) -> List[Dict[str, int]]:
+            if not frame_size:
+                return [dict(z) for z in zone_list]
+
+            try:
+                frame_w = max(2, int(float(frame_size[0])))
+                frame_h = max(2, int(float(frame_size[1])))
+            except Exception:
+                return [dict(z) for z in zone_list]
+
+            clipped: List[Dict[str, int]] = []
+            for zone in zone_list:
+                if not isinstance(zone, dict):
+                    continue
+                try:
+                    raw_x = float(zone.get("x", 0))
+                    raw_y = float(zone.get("y", 0))
+                    raw_w = float(zone.get("w", 0))
+                    raw_h = float(zone.get("h", 0))
+                except Exception:
+                    continue
+
+                x = int(round(raw_x))
+                y = int(round(raw_y))
+                x = max(0, min(x, frame_w - 2))
+                y = max(0, min(y, frame_h - 2))
+                x -= x % 2
+                y -= y % 2
+                x = max(0, min(x, frame_w - 2))
+                y = max(0, min(y, frame_h - 2))
+
+                max_w = frame_w - x
+                max_h = frame_h - y
+                if max_w < 2 or max_h < 2:
+                    continue
+
+                w = int(round(raw_w))
+                h = int(round(raw_h))
+                w = max(2, min(w, max_w))
+                h = max(2, min(h, max_h))
+
+                if w % 2 != 0:
+                    if w + 1 <= max_w:
+                        w += 1
+                    else:
+                        w = max(2, w - 1)
+                if h % 2 != 0:
+                    if h + 1 <= max_h:
+                        h += 1
+                    else:
+                        h = max(2, h - 1)
+
+                max_w = frame_w - x
+                max_h = frame_h - y
+                w = max(2, min(w, max_w))
+                h = max(2, min(h, max_h))
+
+                clipped.append({"x": int(x), "y": int(y), "w": int(w), "h": int(h)})
+
+            return clipped
+
+        def _bbox_to_zone(
+            bbox: Tuple[int, int, int, int],
+            *,
+            frame_size: Optional[Tuple[int, int]],
+            pad_px: int = 0,
+            pad_pct: float = 0.0,
+            min_size: int = 2,
+        ) -> Optional[Dict[str, int]]:
+            try:
+                x_raw, y_raw, w_raw, h_raw = [int(round(float(v))) for v in bbox]
+            except Exception:
+                return None
+            if w_raw <= 0 or h_raw <= 0:
+                return None
+
+            pad_abs = max(0, int(pad_px))
+            try:
+                pad_ratio = float(pad_pct)
+            except Exception:
+                pad_ratio = 0.0
+            pad_ratio = max(0.0, pad_ratio)
+            try:
+                min_dim = int(min_size)
+            except Exception:
+                min_dim = 2
+            min_dim = max(2, min_dim)
+
+            pad_w = int(round(w_raw * pad_ratio))
+            pad_h = int(round(h_raw * pad_ratio))
+            total_pad_x = pad_abs + pad_w
+            total_pad_y = pad_abs + pad_h
+
+            x = x_raw - total_pad_x
+            y = y_raw - total_pad_y
+            w = w_raw + total_pad_x * 2
+            h = h_raw + total_pad_y * 2
+
+            x = max(0, int(x))
+            y = max(0, int(y))
+            w = max(min_dim, int(w))
+            h = max(min_dim, int(h))
+
+            x = _round_to_even(x, minimum=0, default=x)
+            y = _round_to_even(y, minimum=0, default=y)
+            w = _round_to_even(w, minimum=min_dim, default=w)
+            h = _round_to_even(h, minimum=min_dim, default=h)
+
+            zone = {"x": int(x), "y": int(y), "w": int(w), "h": int(h)}
+            if frame_size:
+                clipped = _clip_zones_to_frame([zone], frame_size)
+                if not clipped:
+                    return None
+                zone = clipped[0]
+            return zone
+
+        def _probe_frame_size(video_path: Path) -> Optional[Tuple[int, int]]:
+            try:
+                import cv2  # type: ignore[import]
+            except Exception:
+                return None
+
+            cap = cv2.VideoCapture(str(video_path))
+            if not cap.isOpened():
+                cap.release()
+                return None
+
+            try:
+                width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+                height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+                if width <= 0 or height <= 0:
+                    ok, frame = cap.read()
+                    if ok and frame is not None:
+                        try:
+                            frame_height, frame_width = frame.shape[:2]
+                        except Exception:
+                            frame_height = 0
+                            frame_width = 0
+                        if frame_width > 0 and frame_height > 0:
+                            width = frame_width
+                            height = frame_height
+                if width > 0 and height > 0:
+                    return (width, height)
+                return None
+            finally:
+                cap.release()
+
+        def _project_detection_onto_zones(
+            base: List[Dict[str, int]],
+            detected: Tuple[int, int, int, int],
+            frame_size: Optional[Tuple[int, int]] = None,
+        ) -> List[Dict[str, int]]:
+            if not base:
+                x, y, w, h = detected
+                return [
+                    {
+                        "x": max(0, _round_to_even(x, minimum=0, default=0)),
+                        "y": max(0, _round_to_even(y, minimum=0, default=0)),
+                        "w": max(2, _round_to_even(w, minimum=2, default=2)),
+                        "h": max(2, _round_to_even(h, minimum=2, default=2)),
+                    }
+                ]
+
+            ref = base[0]
+            ref_w = max(1, int(ref.get("w", 1)))
+            ref_h = max(1, int(ref.get("h", 1)))
+            det_x, det_y, det_w, det_h = detected
+            scale_x = det_w / ref_w if ref_w else 1.0
+            scale_y = det_h / ref_h if ref_h else 1.0
+
+            frame_w: Optional[int] = None
+            frame_h: Optional[int] = None
+            if frame_size and len(frame_size) == 2:
+                frame_w = max(1, int(frame_size[0]))
+                frame_h = max(1, int(frame_size[1]))
+
+            projected: List[Dict[str, int]] = []
+            for zone in base:
+                base_x = int(zone.get("x", 0))
+                base_y = int(zone.get("y", 0))
+                base_w = max(1, int(zone.get("w", 1)))
+                base_h = max(1, int(zone.get("h", 1)))
+
+                offset_x = base_x - int(ref.get("x", 0))
+                offset_y = base_y - int(ref.get("y", 0))
+
+                new_w = max(2, _round_to_even(base_w * scale_x, minimum=2, default=base_w))
+                new_h = max(2, _round_to_even(base_h * scale_y, minimum=2, default=base_h))
+                new_x = max(0, _round_to_even(det_x + offset_x * scale_x, minimum=0, default=det_x))
+                new_y = max(0, _round_to_even(det_y + offset_y * scale_y, minimum=0, default=det_y))
+
+                projected.append({"x": new_x, "y": new_y, "w": new_w, "h": new_h})
+
+            if frame_w is not None and frame_h is not None:
+                return _clip_zones_to_frame(projected, (frame_w, frame_h))
+
+            return projected
+
+        def _series_to_segments(
+            entries: List[Dict[str, Any]],
+            duration: Optional[float],
+            fps: Optional[float],
+            *,
+            padding: float = 0.25,
+        ) -> List[Dict[str, Any]]:
+            cleaned: List[Dict[str, Any]] = []
+            for entry in entries:
+                bbox = entry.get("bbox")
+                if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+                    continue
+                try:
+                    x, y, w, h = [int(round(float(v))) for v in bbox]
+                except Exception:
+                    continue
+                score_val = entry.get("score")
+                try:
+                    score_num = float(score_val) if score_val is not None else None
+                except Exception:
+                    score_num = None
+                if score_num is None:
+                    continue
+                time_val = entry.get("time")
+                try:
+                    time_num = float(time_val) if time_val is not None else None
+                except Exception:
+                    time_num = None
+                frame_idx = entry.get("frame")
+                if time_num is None and fps and frame_idx is not None:
+                    try:
+                        time_num = int(frame_idx) / fps if fps else None
+                    except Exception:
+                        time_num = None
+                if time_num is None:
+                    continue
+                frame_size_val = entry.get("frame_size")
+                frame_size_tuple: Optional[Tuple[int, int]] = None
+                if isinstance(frame_size_val, (list, tuple)) and len(frame_size_val) == 2:
+                    try:
+                        frame_size_tuple = (int(frame_size_val[0]), int(frame_size_val[1]))
+                    except Exception:
+                        frame_size_tuple = None
+                cleaned.append(
+                    {
+                        "bbox": (x, y, w, h),
+                        "score": score_num,
+                        "time": max(0.0, time_num),
+                        "frame": frame_idx,
+                        "frame_size": frame_size_tuple,
+                    }
+                )
+
+            if not cleaned:
+                return []
+
+            cleaned.sort(key=lambda item: item["time"])
+            segments: List[Dict[str, Any]] = []
+            epsilon = 0.05
+            for idx, item in enumerate(cleaned):
+                current_time = item["time"]
+                prev_time = cleaned[idx - 1]["time"] if idx > 0 else None
+                next_time = cleaned[idx + 1]["time"] if idx + 1 < len(cleaned) else None
+
+                if prev_time is None:
+                    if next_time is not None:
+                        start = current_time - max(next_time - current_time, 0.0) / 2.0
+                    else:
+                        start = current_time - 1.0
+                else:
+                    start = (prev_time + current_time) / 2.0
+
+                if next_time is None:
+                    if duration is not None:
+                        end = duration
+                    elif prev_time is not None:
+                        end = current_time + max(current_time - prev_time, 0.0) / 2.0
+                    else:
+                        end = current_time + 1.0
+                else:
+                    end = (current_time + next_time) / 2.0
+
+                start = max(0.0, start - padding)
+                end = end + padding
+                if duration is not None:
+                    end = min(duration, end)
+                if end <= start:
+                    end = start + max(padding, epsilon)
+                    if duration is not None:
+                        end = min(duration, max(end, start + epsilon))
+
+                segments.append(
+                    {
+                        **item,
+                        "start": max(0.0, start),
+                        "end": max(max(0.0, start) + epsilon, end),
+                    }
+                )
+
+            return segments
+
         def blur_one(v: Path) -> bool:
             out = dst_dir / v.name
-            delogos = ",".join([
-                f"delogo=x={z['x']}:y={z['y']}:w={z['w']}:h={z['h']}:show=0" for z in zones
-            ])
-            vf = delogos + (f",{post}" if post else "") + ",format=yuv420p"
+            base_zones = [dict(z) for z in zones]
+            active_zones = list(base_zones)
+            detection_score: Optional[float] = None
+            detection_error_text: Optional[str] = None
+            fallback_note: Optional[str] = None
+            frame_size: Optional[Tuple[int, int]] = None
+            detection_info_msg: Optional[str] = None
+            clip_info_msg: Optional[str] = None
+            detection_applied = False
+            timeline_zones: List[Dict[str, Any]] = []
+            timeline_segment_count = 0
+            per_video_zones_result: List[Dict[str, int]] = []
+            timeline_switch_note: Optional[str] = None
 
-            def _build_cmd(use_hw: bool, audio_copy: bool) -> List[str]:
+            if auto_runtime.get("enabled"):
+                threshold_value = float(auto_runtime.get("threshold", 0.75) or 0.75)
+                try:
+                    bbox_pad_px = int(auto_runtime.get("bbox_padding", 0) or 0)
+                except Exception:
+                    bbox_pad_px = 0
+                bbox_pad_px = max(0, bbox_pad_px)
+                try:
+                    bbox_pad_pct = float(auto_runtime.get("bbox_padding_pct", 0.0) or 0.0)
+                except Exception:
+                    bbox_pad_pct = 0.0
+                bbox_pad_pct = max(0.0, bbox_pad_pct)
+                try:
+                    bbox_min_size = int(auto_runtime.get("bbox_min_size", 2) or 2)
+                except Exception:
+                    bbox_min_size = 2
+                bbox_min_size = max(2, bbox_min_size)
+
+                detect_kwargs = {
+                    "threshold": auto_runtime.get("threshold", 0.75),
+                    "frames": auto_runtime.get("frames", 5),
+                    "downscale": auto_runtime.get("downscale"),
+                    "template_image": auto_runtime.get("template_image"),
+                    "template_package": auto_runtime.get("template_package"),
+                    "mask_threshold": auto_runtime.get("mask_threshold", auto_cfg.get("mask_threshold")),
+                    "return_score": True,
+                    "return_details": True,
+                    "return_series": True,
+                }
+                extra_keys = (
+                    "blur_kernel",
+                    "scales",
+                    "scale_min",
+                    "scale_max",
+                    "scale_steps",
+                    "edge_weight",
+                    "canny_low",
+                    "canny_high",
+                    "score_bias",
+                    "score_floor",
+                    "score_z_weight",
+                )
+                for key in extra_keys:
+                    if key in auto_cfg:
+                        value = auto_cfg.get(key)
+                        if value is not None and (not isinstance(value, str) or value.strip()):
+                            detect_kwargs[key] = value
+                try:
+                    result = auto_runtime["func"](  # type: ignore[index]
+                        str(v),
+                        auto_runtime["template_path"],  # type: ignore[index]
+                        **detect_kwargs,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    detection_error_text = str(exc)
+                    fallback_note = f"ошибка детектора: {exc}"
+                else:
+                    bbox = result
+                    series_entries: List[Dict[str, Any]] = []
+                    fps_value: Optional[float] = None
+                    duration_value: Optional[float] = None
+                    if isinstance(result, tuple) and len(result) == 2:
+                        bbox = result[0]
+                        try:
+                            detection_score = float(result[1]) if result[1] is not None else None
+                        except (TypeError, ValueError):
+                            detection_score = None
+                    elif isinstance(result, dict):
+                        bbox = result.get("bbox")
+                        raw_score = result.get("score")
+                        if raw_score is not None:
+                            try:
+                                detection_score = float(raw_score)
+                            except (TypeError, ValueError):
+                                detection_score = None
+                        fs = result.get("frame_size")
+                        if isinstance(fs, (tuple, list)) and len(fs) == 2:
+                            try:
+                                frame_size = (int(fs[0]), int(fs[1]))
+                            except Exception:
+                                frame_size = None
+                        best_bbox = result.get("best_bbox")
+                        if not bbox and best_bbox:
+                            bbox = best_bbox
+                        series_raw = result.get("series")
+                        if isinstance(series_raw, list):
+                            series_entries = [entry for entry in series_raw if isinstance(entry, dict)]
+                        fps_raw = result.get("fps")
+                        try:
+                            fps_value = float(fps_raw) if fps_raw is not None else None
+                        except Exception:
+                            fps_value = None
+                        duration_raw = result.get("duration")
+                        try:
+                            duration_value = float(duration_raw) if duration_raw is not None else None
+                        except Exception:
+                            duration_value = None
+                    score_allows_detection = True
+                    if detection_score is not None and detection_score < threshold_value:
+                        score_allows_detection = False
+                    per_video_zones: List[Dict[str, int]] = []
+                    if bbox and score_allows_detection:
+                        x, y, w, h = bbox
+                        if w > 0 and h > 0:
+                            segments: List[Dict[str, Any]] = []
+                            if series_entries:
+                                valid_series: List[Dict[str, Any]] = []
+                                for entry in series_entries:
+                                    score_raw = entry.get("score")
+                                    try:
+                                        score_val = float(score_raw)
+                                    except (TypeError, ValueError):
+                                        continue
+                                    if score_val < threshold_value:
+                                        continue
+                                    entry_copy = dict(entry)
+                                    entry_copy["score"] = score_val
+                                    valid_series.append(entry_copy)
+                                if not valid_series:
+                                    for entry in series_entries:
+                                        if entry.get("accepted"):
+                                            try:
+                                                score_val = float(entry.get("score", threshold_value))
+                                            except (TypeError, ValueError):
+                                                score_val = threshold_value
+                                            entry_copy = dict(entry)
+                                            entry_copy["score"] = score_val
+                                            valid_series.append(entry_copy)
+                                if valid_series:
+                                    segments = _series_to_segments(
+                                        valid_series,
+                                        duration_value,
+                                        fps_value,
+                                    )
+                            target_frame_size = frame_size
+                            if target_frame_size is None:
+                                target_frame_size = _probe_frame_size(v)
+                            if target_frame_size and not frame_size:
+                                frame_size = target_frame_size
+
+                            zone_from_bbox = _bbox_to_zone(
+                                (int(x), int(y), int(w), int(h)),
+                                frame_size=target_frame_size,
+                                pad_px=bbox_pad_px,
+                                pad_pct=bbox_pad_pct,
+                                min_size=bbox_min_size,
+                            )
+                            if zone_from_bbox:
+                                per_video_zones = [zone_from_bbox]
+                                per_video_zones_result = [dict(zone_from_bbox)]
+                            else:
+                                try:
+                                    projected = _project_detection_onto_zones(
+                                        base_zones,
+                                        (int(x), int(y), int(w), int(h)),
+                                        target_frame_size,
+                                    )
+                                except Exception as exc:  # noqa: BLE001
+                                    if not detection_error_text:
+                                        detection_error_text = f"проекция зон не удалась: {exc}"
+                                    fallback_note = fallback_note or "проекция зон не удалась"
+                                    projected = []
+                                if projected:
+                                    per_video_zones = list(projected)
+                                    per_video_zones_result = list(projected)
+
+                            if segments:
+                                try:
+                                    timeline_zones_local: List[Dict[str, Any]] = []
+                                    appended = 0
+                                    for seg in segments:
+                                        seg_bbox = seg.get("bbox")
+                                        if not seg_bbox or len(seg_bbox) != 4:
+                                            continue
+                                        seg_frame_val = seg.get("frame_size")
+                                        seg_frame: Optional[Tuple[int, int]]
+                                        if isinstance(seg_frame_val, (list, tuple)) and len(seg_frame_val) == 2:
+                                            try:
+                                                seg_frame = (
+                                                    int(seg_frame_val[0]),
+                                                    int(seg_frame_val[1]),
+                                                )
+                                            except Exception:
+                                                seg_frame = None
+                                        else:
+                                            seg_frame = None
+                                        target_seg_frame = seg_frame or target_frame_size
+                                        zone_for_segment = _bbox_to_zone(
+                                            (
+                                                int(seg_bbox[0]),
+                                                int(seg_bbox[1]),
+                                                int(seg_bbox[2]),
+                                                int(seg_bbox[3]),
+                                            ),
+                                            frame_size=target_seg_frame,
+                                            pad_px=bbox_pad_px,
+                                            pad_pct=bbox_pad_pct,
+                                            min_size=bbox_min_size,
+                                        )
+                                        if not zone_for_segment:
+                                            continue
+                                        start_val = seg.get("start")
+                                        end_val = seg.get("end")
+                                        if start_val is None and end_val is None:
+                                            continue
+                                        try:
+                                            start_f = float(start_val) if start_val is not None else 0.0
+                                        except Exception:
+                                            start_f = 0.0
+                                        try:
+                                            end_f = float(end_val) if end_val is not None else start_f
+                                        except Exception:
+                                            end_f = start_f
+                                        if end_f <= start_f:
+                                            end_f = start_f + 0.1
+                                        appended += 1
+                                        timeline_zones_local.append(
+                                            {
+                                                **zone_for_segment,
+                                                "start": max(0.0, start_f),
+                                                "end": max(start_f + 0.05, end_f),
+                                            }
+                                        )
+                                    if timeline_zones_local:
+                                        timeline_zones = timeline_zones_local
+                                        timeline_segment_count = appended
+                                except Exception as exc:  # noqa: BLE001
+                                    if not detection_error_text:
+                                        detection_error_text = f"проекция по временной шкале не удалась: {exc}"
+                                    fallback_note = fallback_note or "проекция по временной шкале не удалась"
+
+                            if not timeline_zones and per_video_zones:
+                                active_zones = per_video_zones
+                            if timeline_zones or per_video_zones:
+                                detection_applied = True
+                                zone_count = len(timeline_zones) if timeline_zones else len(per_video_zones)
+                                detection_info_msg = (
+                                    f"[BLUR] {v.name}: автодетект → {zone_count} зон"
+                                )
+                                if timeline_zones and timeline_segment_count:
+                                    detection_info_msg += f" в {timeline_segment_count} окнах"
+                                if detection_score is not None:
+                                    detection_info_msg += f" (score={detection_score:.2f})"
+                            else:
+                                if not detection_error_text:
+                                    detection_error_text = "проекция зон вернула пустой результат"
+                                fallback_note = fallback_note or "проекция зон вернула пустой результат"
+                        else:
+                            detection_error_text = "некорректная зона от детектора"
+                            fallback_note = "детектор вернул пустую зону"
+                    if not score_allows_detection and detection_score is not None:
+                        fallback_note = (
+                            f"совпадение ниже порога ({threshold_value:.2f}),"
+                            f" score={detection_score:.2f}"
+                        )
+                    elif not bbox and detection_score is not None:
+                        fallback_note = f"совпадение ниже порога ({auto_runtime['threshold']:.2f})"
+                        fallback_note += f", score={detection_score:.2f}"
+                    elif not bbox:
+                        fallback_note = f"совпадение ниже порога ({auto_runtime['threshold']:.2f})"
+
+            if detection_applied and per_video_zones_result:
+                active_zones = [dict(z) for z in per_video_zones_result]
+
+            if frame_size is None:
+                frame_size = _probe_frame_size(v)
+
+            if active_zones and frame_size:
+                clipped = _clip_zones_to_frame(active_zones, frame_size)
+                if clipped:
+                    if clipped != active_zones:
+                        active_zones = clipped
+                        if detection_applied and per_video_zones_result:
+                            per_video_zones_result = [dict(z) for z in clipped]
+                        clip_note = (
+                            f"[BLUR] {v.name}: зоны скорректированы под кадр {frame_size[0]}x{frame_size[1]}"
+                        )
+                        if clip_info_msg:
+                            clip_info_msg = f"{clip_info_msg}; {clip_note}"
+                        else:
+                            clip_info_msg = clip_note
+
+            def _build_filter_parts(zone_list: List[Dict[str, Any]], *, timeline: bool) -> List[str]:
+                parts: List[str] = []
+                for zone in zone_list:
+                    try:
+                        x = int(zone.get("x", 0))
+                        y = int(zone.get("y", 0))
+                        w = int(zone.get("w", 1))
+                        h = int(zone.get("h", 1))
+                    except Exception:
+                        continue
+                    if w <= 0 or h <= 0:
+                        continue
+                    enable_expr = ""
+                    if timeline:
+                        start_val = zone.get("start")
+                        end_val = zone.get("end")
+                        try:
+                            start_f = float(start_val) if start_val is not None else None
+                        except Exception:
+                            start_f = None
+                        try:
+                            end_f = float(end_val) if end_val is not None else None
+                        except Exception:
+                            end_f = None
+                        if start_f is None and end_f is None:
+                            continue
+                        start_safe = max(0.0, start_f if start_f is not None else 0.0)
+                        end_safe = end_f if end_f is not None else (start_safe + 0.1)
+                        if end_safe <= start_safe:
+                            end_safe = start_safe + 0.1
+                        enable_expr = f":enable='between(t,{start_safe:.3f},{end_safe:.3f})'"
+                    parts.append(f"delogo=x={x}:y={y}:w={w}:h={h}:show=0{enable_expr}")
+                return parts
+
+            timeline_parts = _build_filter_parts(timeline_zones, timeline=True) if timeline_zones else []
+            if timeline_zones and not timeline_parts:
+                timeline_zones = []
+            static_source = active_zones if active_zones else zones
+            static_parts = _build_filter_parts(static_source, timeline=False)
+
+            def _compose_vf(parts: List[str]) -> str:
+                if not parts:
+                    return ""
+                chain = list(parts)
+                if post:
+                    chain.append(post)
+                chain.append("format=yuv420p")
+                return ",".join(chain)
+
+            vf_timeline = _compose_vf(timeline_parts)
+            vf_static = _compose_vf(static_parts)
+
+            if not vf_timeline and not vf_static:
+                with lock:
+                    counter["done"] += 1
+                    self._post_status("Блюр…", progress=counter["done"], total=total, state="running")
+                    self.sig_log.emit(f"[BLUR] Ошибка {v.name}: не найдены зоны delogo")
+                    failures.append(f"{v.name}: не найдены зоны delogo")
+                return False
+
+            vf_current = vf_timeline or vf_static
+            using_timeline = bool(vf_timeline)
+
+            def _build_cmd(vf_expr: str, use_hw: bool, audio_copy: bool) -> List[str]:
                 cmd = [ffbin, "-hide_banner", "-loglevel", "info", "-y"]
                 if use_hw and sys.platform == "darwin":
                     cmd += ["-hwaccel", "videotoolbox"]
-                cmd += ["-i", str(v), "-vf", vf, "-map", "0:v", "-map", "0:a?"]
+                cmd += ["-i", str(v), "-vf", vf_expr, "-map", "0:v", "-map", "0:a?"]
                 if use_hw and sys.platform == "darwin":
                     cmd += ["-c:v", "h264_videotoolbox", "-b:v", "0", "-crf", crf]
                 else:
@@ -4488,13 +5323,40 @@ class MainWindow(QtWidgets.QMainWindow):
             tail: List[str] = []
             final_audio_copy = copy_audio
             error_note: Optional[str] = None
+            fallback_attempted = False
             try:
                 for label, use_hw, audio_copy_flag in attempts:
-                    tried_labels.append(label)
-                    rc, tail = _run_ffmpeg(_build_cmd(use_hw, audio_copy_flag), log_prefix=f"BLUR:{v.name}")
+                    label_repr = label + ("[timeline]" if using_timeline else "")
+                    tried_labels.append(label_repr)
+                    rc, tail = _run_ffmpeg(
+                        _build_cmd(vf_current, use_hw, audio_copy_flag),
+                        log_prefix=f"BLUR:{v.name}",
+                    )
                     if rc == 0:
                         final_audio_copy = audio_copy_flag
                         break
+                    tail_text = "\n".join(tail[-6:]) if tail else ""
+                    if (
+                        using_timeline
+                        and vf_static
+                        and not fallback_attempted
+                        and tail_text
+                        and "Error reinitializing filters" in tail_text
+                    ):
+                        fallback_attempted = True
+                        using_timeline = False
+                        vf_current = vf_static
+                        timeline_switch_note = "FFmpeg не смог перезапустить фильтр delogo (Error reinitializing filters)"
+                        if detection_info_msg:
+                            detection_info_msg += " (timeline→static)"
+                        tried_labels[-1] = label + "[timeline→static]"
+                        rc, tail = _run_ffmpeg(
+                            _build_cmd(vf_current, use_hw, audio_copy_flag),
+                            log_prefix=f"BLUR:{v.name}",
+                        )
+                        if rc == 0:
+                            final_audio_copy = audio_copy_flag
+                            break
                 ok = (rc == 0)
             except Exception as exc:  # noqa: BLE001
                 ok = False
@@ -4513,6 +5375,30 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.sig_log.emit(f"[BLUR] {'OK' if ok else 'FAIL'} ({detail}): {v.name}")
                 if ok and copy_audio and not final_audio_copy:
                     self.sig_log.emit(f"[BLUR] {v.name}: аудио сконвертировано в AAC для совместимости")
+                if detection_info_msg:
+                    self.sig_log.emit(detection_info_msg)
+                if clip_info_msg:
+                    self.sig_log.emit(clip_info_msg)
+                if timeline_switch_note:
+                    msg_switch = (
+                        f"Автодетект водяного знака: таймлайн → статично → {v.name}: {timeline_switch_note}"
+                    )
+                    self.sig_log.emit(f"[BLUR] {msg_switch}")
+                    self._append_activity(msg_switch, kind="warn")
+                    self._send_tg(f"⚠️ {msg_switch}")
+                if auto_runtime.get("enabled"):
+                    if detection_error_text:
+                        auto_stats["errors"].append({"name": v.name, "error": detection_error_text})
+                        self.sig_log.emit(
+                            f"[BLUR] {v.name}: автодетект → пресет ({detection_error_text})"
+                        )
+                    elif fallback_note:
+                        auto_stats["fallbacks"].append(
+                            {"name": v.name, "score": detection_score, "note": fallback_note}
+                        )
+                        self.sig_log.emit(
+                            f"[BLUR] {v.name}: автодетект → пресет ({fallback_note})"
+                        )
                 if not ok:
                     note = error_note or last_line or "ffmpeg завершился с ошибкой"
                     failures.append(f"{v.name}: {note}")
@@ -4520,6 +5406,45 @@ class MainWindow(QtWidgets.QMainWindow):
 
         with ThreadPoolExecutor(max_workers=max(1, threads)) as ex:
             results = list(ex.map(blur_one, videos))
+
+        if auto_cfg.get("enabled"):
+            if not auto_runtime.get("enabled"):
+                reason = str(auto_runtime.get("reason") or "не удалось инициализировать детектор")
+                msg = f"Автодетект водяного знака отключён: {reason}"
+                self.sig_log.emit(f"[BLUR] {msg}")
+                self._append_activity(f"Блюр: {msg}", kind="warn")
+                self._send_tg(f"⚠️ {msg}")
+            else:
+                if auto_stats["errors"]:
+                    err_preview_parts = [
+                        f"{entry['name']}: {entry['error']}" for entry in auto_stats["errors"][:3]
+                    ]
+                    err_preview = "; ".join(err_preview_parts)
+                    if len(auto_stats["errors"]) > 3:
+                        err_preview += f" … и ещё {len(auto_stats['errors']) - 3}"
+                    msg = f"Автодетект водяного знака: ошибки → {err_preview}"
+                    self.sig_log.emit(f"[BLUR] {msg}")
+                    self._append_activity(msg, kind="warn")
+                    self._send_tg(f"⚠️ {msg}")
+                if auto_stats["fallbacks"]:
+                    fb_preview_parts: List[str] = []
+                    for entry in auto_stats["fallbacks"][:3]:
+                        note = entry.get("note") or ""
+                        if note:
+                            fb_preview_parts.append(f"{entry['name']}: {note}")
+                        else:
+                            score = entry.get("score")
+                            if isinstance(score, (int, float)):
+                                fb_preview_parts.append(f"{entry['name']} (score={score:.2f})")
+                            else:
+                                fb_preview_parts.append(entry["name"])
+                    fb_preview = "; ".join(fb_preview_parts)
+                    if len(auto_stats["fallbacks"]) > 3:
+                        fb_preview += f" … и ещё {len(auto_stats['fallbacks']) - 3}"
+                    msg = f"Автодетект водяного знака: fallback к пресету → {fb_preview}"
+                    self.sig_log.emit(f"[BLUR] {msg}")
+                    self._append_activity(msg, kind="warn")
+                    self._send_tg(f"⚠️ {msg}")
 
         ok_all = all(results)
         append_history(
@@ -4882,6 +5807,15 @@ class MainWindow(QtWidgets.QMainWindow):
         ff["copy_audio"] = bool(self.cb_copy_audio.isChecked())
         ff["active_preset"] = self.cmb_active_preset.currentText().strip()
         ff["blur_threads"] = int(self.sb_blur_threads.value())
+        auto_cfg = ff.setdefault("auto_watermark", {})
+        auto_cfg["enabled"] = bool(self.cb_aw_enabled.isChecked())
+        auto_cfg["template"] = self.ed_aw_template.text().strip()
+        auto_cfg["threshold"] = float(self.dsb_aw_threshold.value())
+        auto_cfg["frames"] = int(self.sb_aw_frames.value())
+        auto_cfg["downscale"] = int(self.sb_aw_downscale.value())
+        auto_cfg["bbox_padding"] = int(self.sb_aw_bbox_pad.value())
+        auto_cfg["bbox_padding_pct"] = round(float(self.dsb_aw_bbox_pct.value()) / 100.0, 4)
+        auto_cfg["bbox_min_size"] = int(self.sb_aw_bbox_min.value())
 
         presets = ff.setdefault("presets", {})
         presets.clear()
