@@ -14,6 +14,7 @@ import os
 import re
 import time
 import uuid
+from datetime import date
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -57,6 +58,20 @@ def _to_int(value: Optional[str], fallback: int) -> int:
             return int(float(value))
         except (TypeError, ValueError):
             return fallback
+
+
+def _parse_seed_list(raw: str) -> List[int]:
+    values: List[int] = []
+    if not raw:
+        return values
+    for chunk in re.split(r"[\s,;]+", raw.strip()):
+        if not chunk:
+            continue
+        try:
+            values.append(int(chunk))
+        except ValueError:
+            continue
+    return values
 
 
 IMAGES_ONLY = _env_bool("GENAI_IMAGES_ONLY", False)
@@ -160,6 +175,17 @@ class GenAiConfig:
     max_retries: int
     attach_to_sora: bool
     manifest_path: Path
+    seeds: List[int]
+    consistent_character_design: bool
+    lens_type: str
+    color_palette: str
+    style: str
+    reference_hint: str
+    quota_enabled: bool
+    daily_quota: int
+    quota_warning_prompts: int
+    quota_enforce: bool
+    usage_file: Path
 
     @classmethod
     def from_env(cls) -> "GenAiConfig":
@@ -186,6 +212,23 @@ class GenAiConfig:
         else:
             manifest_path = output_dir / "manifest.json"
         attach = _env_bool("GENAI_ATTACH_TO_SORA", True)
+        seeds = _parse_seed_list(os.getenv("GENAI_SEEDS", ""))
+        consistent_character = _env_bool("GENAI_CONSISTENT_CHARACTER", False)
+        lens_type = os.getenv("GENAI_LENS_TYPE", "").strip()
+        color_palette = os.getenv("GENAI_COLOR_PALETTE", "").strip()
+        style_text = os.getenv("GENAI_STYLE_PRESET", "").strip()
+        reference_hint = os.getenv("GENAI_REFERENCE_HINT", "").strip()
+        quota_enabled = _env_bool("GENAI_QUOTA_ENABLED", False)
+        daily_quota = max(_to_int(os.getenv("GENAI_DAILY_QUOTA"), 0), 0)
+        quota_warning = max(_to_int(os.getenv("GENAI_QUOTA_WARNING_LEFT"), 0), 0)
+        quota_enforce = _env_bool("GENAI_QUOTA_ENFORCE", False)
+        usage_raw = os.getenv("GENAI_USAGE_FILE", "").strip()
+        if usage_raw:
+            usage_path = Path(usage_raw).expanduser()
+            if not usage_path.is_absolute():
+                usage_path = (BASE_MEDIA_DIR / usage_path).resolve()
+        else:
+            usage_path = output_dir / "usage.json"
         return cls(
             enabled=enabled and bool(api_key),
             api_key=api_key,
@@ -200,7 +243,99 @@ class GenAiConfig:
             max_retries=retries,
             attach_to_sora=attach,
             manifest_path=manifest_path,
+            seeds=seeds,
+            consistent_character_design=consistent_character,
+            lens_type=lens_type,
+            color_palette=color_palette,
+            style=style_text,
+            reference_hint=reference_hint,
+            quota_enabled=quota_enabled and bool(daily_quota),
+            daily_quota=daily_quota,
+            quota_warning_prompts=quota_warning,
+            quota_enforce=quota_enforce,
+            usage_file=usage_path,
         )
+
+
+class QuotaTracker:
+    def __init__(self, cfg: GenAiConfig):
+        self.cfg = cfg
+        self._state: Dict[str, Dict[str, Any]] = {}
+        self._warned: Set[int] = set()
+        self._loaded = False
+        if cfg.quota_enabled:
+            self._load()
+
+    @property
+    def enabled(self) -> bool:
+        return self.cfg.quota_enabled and bool(str(self.cfg.usage_file))
+
+    def _load(self) -> None:
+        if not self.enabled:
+            return
+        try:
+            data = json.loads(self.cfg.usage_file.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                self._state = data
+        except FileNotFoundError:
+            self._state = {}
+        except Exception as exc:  # noqa: BLE001
+            print(f"[WARN] Не удалось прочитать файл квоты {self.cfg.usage_file}: {exc}")
+            self._state = {}
+        finally:
+            self._loaded = True
+
+    def _save(self) -> None:
+        if not self.enabled:
+            return
+        try:
+            self.cfg.usage_file.parent.mkdir(parents=True, exist_ok=True)
+            self.cfg.usage_file.write_text(json.dumps(self._state, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[WARN] Не удалось сохранить файл квоты {self.cfg.usage_file}: {exc}")
+
+    def _record(self) -> Dict[str, Any]:
+        today = date.today().isoformat()
+        record = self._state.get(self.cfg.model)
+        if not isinstance(record, dict) or record.get("date") != today:
+            record = {"date": today, "used": 0}
+        self._state[self.cfg.model] = record
+        return record
+
+    def check_and_warn(self, prompts: int = 1) -> bool:
+        if not self.enabled or self.cfg.daily_quota <= 0:
+            return True
+        record = self._record()
+        used = int(record.get("used", 0))
+        remaining = max(self.cfg.daily_quota - used, 0)
+        if remaining <= 0:
+            if 0 not in self._warned:
+                print(f"[WARN] Суточная квота модели {self.cfg.model} исчерпана.")
+                self._warned.add(0)
+            return not self.cfg.quota_enforce
+        if remaining <= self.cfg.quota_warning_prompts and remaining not in self._warned:
+            print(f"[WARN] До суточной квоты модели {self.cfg.model} осталось {remaining} промптов.")
+            self._warned.add(remaining)
+        if remaining < prompts:
+            if remaining not in self._warned:
+                print(
+                    f"[WARN] Недостаточно квоты для модели {self.cfg.model}: осталось {remaining}, требуется {prompts}."
+                )
+                self._warned.add(remaining)
+            return not self.cfg.quota_enforce
+        return True
+
+    def consume(self, prompts: int = 1) -> None:
+        if not self.enabled or self.cfg.daily_quota <= 0:
+            return
+        record = self._record()
+        record["used"] = int(record.get("used", 0)) + max(1, prompts)
+        self._state[self.cfg.model] = record
+        self._save()
+        remaining = max(self.cfg.daily_quota - record["used"], 0)
+        if remaining <= 0 and 0 not in self._warned:
+            print(f"[WARN] Суточная квота модели {self.cfg.model} исчерпана.")
+            self._warned.add(0)
 
 
 class ImageManifest:
@@ -339,6 +474,7 @@ class GenAiClient:
         self._rate = RateLimiter(cfg.rate_limit)
         self._client = None
         self._available = False
+        self._quota = QuotaTracker(cfg)
         if not cfg.enabled:
             return
         try:
@@ -355,6 +491,26 @@ class GenAiClient:
     def enabled(self) -> bool:
         return self._available
 
+    def _compose_prompt(self, prompt: str) -> str:
+        extras: List[str] = []
+        if self.cfg.consistent_character_design:
+            extras.append("consistent character design: true")
+        if self.cfg.lens_type:
+            extras.append(f"lens type: {self.cfg.lens_type}")
+        if self.cfg.color_palette:
+            extras.append(f"color palette: {self.cfg.color_palette}")
+        if self.cfg.style:
+            extras.append(f"style: {self.cfg.style}")
+        if self.cfg.reference_hint:
+            extras.append(self.cfg.reference_hint)
+        if not extras:
+            return prompt
+        base = (prompt or "").strip()
+        extras_text = "\n".join(extras)
+        if base:
+            return f"{base}\n\n{extras_text}"
+        return extras_text
+
     @staticmethod
     def _is_person_generation_error(exc: Exception) -> bool:
         message = str(exc)
@@ -365,55 +521,80 @@ class GenAiClient:
         if not self.enabled:
             return []
         self.cfg.output_dir.mkdir(parents=True, exist_ok=True)
-        attempt = 0
-        last_err: Optional[Exception] = None
-        while attempt <= self.cfg.max_retries:
-            attempt += 1
-            try:
-                self._rate.wait()
-                config_payload = dict(
-                    number_of_images=max(1, count),
-                    output_mime_type=self.cfg.mime_type,
-                    aspect_ratio=self.cfg.aspect_ratio,
-                    image_size=self.cfg.image_size,
-                )
-                if self.cfg.person_generation:
-                    config_payload["person_generation"] = self.cfg.person_generation
-                result = self._client.models.generate_images(  # type: ignore[union-attr]
-                    model=self.cfg.model,
-                    prompt=prompt,
-                    config=config_payload,
-                )
-                if not getattr(result, "generated_images", None):
-                    print(f"[WARN] API не вернуло изображений для промпта: {prompt!r}")
-                    return []
-                saved: List[Path] = []
-                ext = _image_extension_for_mime(self.cfg.mime_type)
-                for generated in result.generated_images:
-                    dest = _next_image_path(self.cfg.output_dir, ext)
-                    try:
-                        generated.image.save(dest)  # type: ignore[attr-defined]
-                        saved.append(dest)
-                    except Exception as save_err:  # noqa: BLE001
-                        print(f"[WARN] Не удалось сохранить изображение {dest.name}: {save_err}")
-                if saved:
-                    names = ", ".join(p.name for p in saved)
-                    print(f"[OK] Сгенерировано {len(saved)} изображений → {self.cfg.output_dir} ({names})")
-                return saved
-            except Exception as exc:  # noqa: BLE001
-                last_err = exc
-                if self.cfg.person_generation and self._is_person_generation_error(exc):
-                    print("[WARN] person_generation отклонён API. Повтор без этого параметра.")
-                    self.cfg.person_generation = None
-                    attempt -= 1
-                    time.sleep(1)
-                    continue
-                print(f"[WARN] Ошибка генерации (попытка {attempt}/{self.cfg.max_retries + 1}): {exc}")
-                if attempt <= self.cfg.max_retries:
-                    time.sleep(min(5 * attempt, 20))
-        if last_err:
-            print(f"[x] Генерация не удалась окончательно: {last_err}")
-        return []
+        total_needed = max(1, count)
+        enriched_prompt = self._compose_prompt(prompt)
+        seeds = self.cfg.seeds if self.cfg.seeds else [None]
+        seed_index = 0
+        collected: List[Path] = []
+        while len(collected) < total_needed:
+            seed_value = seeds[seed_index % len(seeds)] if seeds else None
+            seed_index += 1
+            per_request = min(self.cfg.number_of_images, total_needed - len(collected))
+            attempt = 0
+            last_err: Optional[Exception] = None
+            success = False
+            while attempt <= self.cfg.max_retries:
+                attempt += 1
+                if self._quota.enabled and not self._quota.check_and_warn(1):
+                    return collected
+                try:
+                    self._rate.wait()
+                    config_payload = dict(
+                        number_of_images=max(1, per_request),
+                        output_mime_type=self.cfg.mime_type,
+                        aspect_ratio=self.cfg.aspect_ratio,
+                        image_size=self.cfg.image_size,
+                    )
+                    if seed_value is not None:
+                        try:
+                            config_payload["seed"] = int(seed_value)
+                        except (TypeError, ValueError):
+                            pass
+                    if self.cfg.person_generation:
+                        config_payload["person_generation"] = self.cfg.person_generation
+                    result = self._client.models.generate_images(  # type: ignore[union-attr]
+                        model=self.cfg.model,
+                        prompt=enriched_prompt,
+                        config=config_payload,
+                    )
+                    if self._quota.enabled:
+                        self._quota.consume()
+                    if not getattr(result, "generated_images", None):
+                        print(f"[WARN] API не вернуло изображений для промпта: {prompt!r}")
+                        break
+                    ext = _image_extension_for_mime(self.cfg.mime_type)
+                    saved: List[Path] = []
+                    for generated in result.generated_images:
+                        dest = _next_image_path(self.cfg.output_dir, ext)
+                        try:
+                            generated.image.save(dest)  # type: ignore[attr-defined]
+                            saved.append(dest)
+                        except Exception as save_err:  # noqa: BLE001
+                            print(f"[WARN] Не удалось сохранить изображение {dest.name}: {save_err}")
+                    if saved:
+                        names = ", ".join(p.name for p in saved)
+                        print(f"[OK] Сгенерировано {len(saved)} изображений → {self.cfg.output_dir} ({names})")
+                        collected.extend(saved)
+                    success = True
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    last_err = exc
+                    if self.cfg.person_generation and self._is_person_generation_error(exc):
+                        print("[WARN] person_generation отклонён API. Повтор без этого параметра.")
+                        self.cfg.person_generation = None
+                        attempt -= 1
+                        time.sleep(1)
+                        continue
+                    print(f"[WARN] Ошибка генерации (попытка {attempt}/{self.cfg.max_retries + 1}): {exc}")
+                    if attempt <= self.cfg.max_retries:
+                        time.sleep(min(5 * attempt, 20))
+            if not success:
+                if last_err:
+                    print(f"[x] Генерация не удалась окончательно: {last_err}")
+                if not self.cfg.seeds or len(seeds) <= 1:
+                    break
+                continue
+        return collected[:total_needed]
 
 # ----------------- utils -----------------
 def load_yaml(path: Path) -> dict:
