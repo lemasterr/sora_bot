@@ -4585,6 +4585,37 @@ class MainWindow(QtWidgets.QMainWindow):
 
             return clipped
 
+        def _probe_frame_size(video_path: Path) -> Optional[Tuple[int, int]]:
+            try:
+                import cv2  # type: ignore[import]
+            except Exception:
+                return None
+
+            cap = cv2.VideoCapture(str(video_path))
+            if not cap.isOpened():
+                cap.release()
+                return None
+
+            try:
+                width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+                height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+                if width <= 0 or height <= 0:
+                    ok, frame = cap.read()
+                    if ok and frame is not None:
+                        try:
+                            frame_height, frame_width = frame.shape[:2]
+                        except Exception:
+                            frame_height = 0
+                            frame_width = 0
+                        if frame_width > 0 and frame_height > 0:
+                            width = frame_width
+                            height = frame_height
+                if width > 0 and height > 0:
+                    return (width, height)
+                return None
+            finally:
+                cap.release()
+
         def _project_detection_onto_zones(
             base: List[Dict[str, int]],
             detected: Tuple[int, int, int, int],
@@ -4966,13 +4997,23 @@ class MainWindow(QtWidgets.QMainWindow):
             if detection_applied and per_video_zones_result:
                 active_zones = [dict(z) for z in per_video_zones_result]
 
-            if detection_applied and not timeline_zones and frame_size and active_zones:
+            if frame_size is None:
+                frame_size = _probe_frame_size(v)
+
+            if active_zones and frame_size:
                 clipped = _clip_zones_to_frame(active_zones, frame_size)
-                if clipped and clipped != active_zones:
-                    active_zones = clipped
-                    clip_info_msg = (
-                        f"[BLUR] {v.name}: зоны скорректированы под кадр {frame_size[0]}x{frame_size[1]}"
-                    )
+                if clipped:
+                    if clipped != active_zones:
+                        active_zones = clipped
+                        if detection_applied and per_video_zones_result:
+                            per_video_zones_result = [dict(z) for z in clipped]
+                        clip_note = (
+                            f"[BLUR] {v.name}: зоны скорректированы под кадр {frame_size[0]}x{frame_size[1]}"
+                        )
+                        if clip_info_msg:
+                            clip_info_msg = f"{clip_info_msg}; {clip_note}"
+                        else:
+                            clip_info_msg = clip_note
 
             def _build_filter_parts(zone_list: List[Dict[str, Any]], *, timeline: bool) -> List[str]:
                 parts: List[str] = []
