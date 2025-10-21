@@ -2117,18 +2117,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings_tabs.setTabPosition(QtWidgets.QTabWidget.TabPosition.North)
         settings_layout.addWidget(self.settings_tabs, 1)
 
-        self._build_settings_pages()
-
-        controls_row = QtWidgets.QHBoxLayout()
-        self.lbl_settings_status = QtWidgets.QLabel("Изменения сохраняются автоматически")
-        self.lbl_settings_status.setStyleSheet("color:#2c3e50;")
-        self.btn_save_settings = QtWidgets.QPushButton("Применить настройки")
-        controls_row.addWidget(self.lbl_settings_status)
-        controls_row.addStretch(1)
-        controls_row.addWidget(self.btn_save_settings)
-        settings_layout.addLayout(controls_row)
-
-        self.tab_settings.setWidget(settings_body)
         # Справочники (перенесены в настройки)
         self.tab_errors = QtWidgets.QWidget()
         err_layout = QtWidgets.QVBoxLayout(self.tab_errors)
@@ -2154,6 +2142,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.txt_history = QtWidgets.QPlainTextEdit()
         self.txt_history.setReadOnly(True)
         h.addWidget(self.txt_history, 1)
+
+        self._build_settings_pages()
+
+        controls_row = QtWidgets.QHBoxLayout()
+        self.lbl_settings_status = QtWidgets.QLabel("Изменения сохраняются автоматически")
+        self.lbl_settings_status.setStyleSheet("color:#2c3e50;")
+        self.btn_save_settings = QtWidgets.QPushButton("Применить настройки")
+        controls_row.addWidget(self.lbl_settings_status)
+        controls_row.addStretch(1)
+        controls_row.addWidget(self.btn_save_settings)
+        settings_layout.addLayout(controls_row)
+
+        self.tab_settings.setWidget(settings_body)
 
         overview_host = QtWidgets.QWidget()
         overview_layout = QtWidgets.QVBoxLayout(overview_host)
