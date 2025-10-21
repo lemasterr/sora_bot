@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 import cv2  # type: ignore[import]
 import numpy as np
@@ -50,6 +50,7 @@ def detect_watermark(
 
     return_score = bool(cfg.get("return_score"))
     return_details = bool(cfg.get("return_details"))
+    return_series = bool(cfg.get("return_series")) or return_details
     threshold = float(cfg.get("threshold", 0.7) or 0.7)
     frames_to_scan = max(int(cfg.get("frames", 5) or 1), 1)
     blur_kernel = int(cfg.get("blur_kernel", 5) or 0)
@@ -80,9 +81,15 @@ def detect_watermark(
     best_template_shape = template_gray.shape
     best_frame_size: Optional[Tuple[int, int]] = None
     template_cache: Dict[float, np.ndarray] = {}
+    series: List[Dict[str, Any]] = []
 
     frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
     frame_indices = list(_iter_sample_frames(frame_count, frames_to_scan))
+    fps_raw = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+    fps = fps_raw if fps_raw > 0 else None
+    duration: Optional[float] = None
+    if fps and frame_count > 0:
+        duration = frame_count / fps
 
     try:
         for idx in frame_indices:
@@ -129,7 +136,43 @@ def detect_watermark(
 
             result = cv2.matchTemplate(gray_scaled, tmpl, cv2.TM_CCOEFF_NORMED)
             _, max_val, _, max_loc = cv2.minMaxLoc(result)
-            if max_val > best_score:
+
+            tmpl_h, tmpl_w = tmpl.shape[:2]
+            cur_bbox: Optional[Tuple[int, int, int, int]] = None
+            if gray_scaled.shape[0] >= tmpl_h and gray_scaled.shape[1] >= tmpl_w:
+                if scale_factor != 1.0:
+                    inv = 1.0 / scale_factor
+                    x = int(round(max_loc[0] * inv))
+                    y = int(round(max_loc[1] * inv))
+                    w = int(round(tmpl_w * inv))
+                    h = int(round(tmpl_h * inv))
+                else:
+                    x = int(max_loc[0])
+                    y = int(max_loc[1])
+                    w = int(tmpl_w)
+                    h = int(tmpl_h)
+
+                x = max(0, min(x, orig_w - 1))
+                y = max(0, min(y, orig_h - 1))
+                w = max(1, min(w, orig_w - x))
+                h = max(1, min(h, orig_h - y))
+                cur_bbox = (x, y, w, h)
+
+            if cur_bbox:
+                entry_time: Optional[float] = None
+                if fps and idx >= 0:
+                    entry_time = idx / fps
+                series.append(
+                    {
+                        "frame": idx,
+                        "time": entry_time,
+                        "score": float(max_val),
+                        "bbox": cur_bbox,
+                        "frame_size": (orig_w, orig_h),
+                    }
+                )
+
+            if max_val > best_score and cur_bbox:
                 best_score = float(max_val)
                 best_loc = (int(max_loc[0]), int(max_loc[1]))
                 best_scale = scale_factor
@@ -160,25 +203,64 @@ def detect_watermark(
         h = max(1, min(h, frame_h - y))
         best_bbox = (x, y, w, h)
 
+    series_payload: List[Dict[str, Any]] = []
+    if return_series:
+        for entry in series:
+            bbox = entry.get("bbox")
+            if not bbox or len(bbox) != 4:
+                continue
+            series_payload.append(
+                {
+                    "frame": entry.get("frame"),
+                    "time": entry.get("time"),
+                    "score": entry.get("score"),
+                    "bbox": bbox,
+                    "frame_size": entry.get("frame_size"),
+                    "accepted": bool(entry.get("score", 0) >= threshold),
+                }
+            )
+
     if best_bbox and best_score >= threshold:
         if return_details:
-            return {
+            payload: Dict[str, Any] = {
                 "bbox": best_bbox,
                 "best_bbox": best_bbox,
                 "score": best_score,
                 "frame_size": best_frame_size,
             }
+            if return_series:
+                payload.update(
+                    {
+                        "series": series_payload,
+                        "threshold": threshold,
+                        "frame_count": frame_count,
+                        "fps": fps,
+                        "duration": duration,
+                    }
+                )
+            return payload
         if return_score:
             return (best_bbox, best_score)
         return best_bbox
 
     if return_details:
-        return {
+        payload = {
             "bbox": None,
             "best_bbox": best_bbox,
             "score": best_score if best_score >= 0 else None,
             "frame_size": best_frame_size,
         }
+        if return_series:
+            payload.update(
+                {
+                    "series": series_payload,
+                    "threshold": threshold,
+                    "frame_count": frame_count,
+                    "fps": fps,
+                    "duration": duration,
+                }
+            )
+        return payload
     if return_score:
         score = best_score if best_score >= 0 else None
         return (None, score)

@@ -22,7 +22,7 @@ from pathlib import Path
 from functools import partial
 from urllib.request import urlopen, Request
 from collections import deque
-from typing import Optional, List, Union, Tuple, Dict, Callable
+from typing import Optional, List, Union, Tuple, Dict, Callable, Any
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 
@@ -4609,6 +4609,107 @@ class MainWindow(QtWidgets.QMainWindow):
 
             return projected
 
+        def _series_to_segments(
+            entries: List[Dict[str, Any]],
+            duration: Optional[float],
+            fps: Optional[float],
+            *,
+            padding: float = 0.25,
+        ) -> List[Dict[str, Any]]:
+            cleaned: List[Dict[str, Any]] = []
+            for entry in entries:
+                bbox = entry.get("bbox")
+                if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+                    continue
+                try:
+                    x, y, w, h = [int(round(float(v))) for v in bbox]
+                except Exception:
+                    continue
+                score_val = entry.get("score")
+                try:
+                    score_num = float(score_val) if score_val is not None else None
+                except Exception:
+                    score_num = None
+                if score_num is None:
+                    continue
+                time_val = entry.get("time")
+                try:
+                    time_num = float(time_val) if time_val is not None else None
+                except Exception:
+                    time_num = None
+                frame_idx = entry.get("frame")
+                if time_num is None and fps and frame_idx is not None:
+                    try:
+                        time_num = int(frame_idx) / fps if fps else None
+                    except Exception:
+                        time_num = None
+                if time_num is None:
+                    continue
+                frame_size_val = entry.get("frame_size")
+                frame_size_tuple: Optional[Tuple[int, int]] = None
+                if isinstance(frame_size_val, (list, tuple)) and len(frame_size_val) == 2:
+                    try:
+                        frame_size_tuple = (int(frame_size_val[0]), int(frame_size_val[1]))
+                    except Exception:
+                        frame_size_tuple = None
+                cleaned.append(
+                    {
+                        "bbox": (x, y, w, h),
+                        "score": score_num,
+                        "time": max(0.0, time_num),
+                        "frame": frame_idx,
+                        "frame_size": frame_size_tuple,
+                    }
+                )
+
+            if not cleaned:
+                return []
+
+            cleaned.sort(key=lambda item: item["time"])
+            segments: List[Dict[str, Any]] = []
+            epsilon = 0.05
+            for idx, item in enumerate(cleaned):
+                current_time = item["time"]
+                prev_time = cleaned[idx - 1]["time"] if idx > 0 else None
+                next_time = cleaned[idx + 1]["time"] if idx + 1 < len(cleaned) else None
+
+                if prev_time is None:
+                    if next_time is not None:
+                        start = current_time - max(next_time - current_time, 0.0) / 2.0
+                    else:
+                        start = current_time - 1.0
+                else:
+                    start = (prev_time + current_time) / 2.0
+
+                if next_time is None:
+                    if duration is not None:
+                        end = duration
+                    elif prev_time is not None:
+                        end = current_time + max(current_time - prev_time, 0.0) / 2.0
+                    else:
+                        end = current_time + 1.0
+                else:
+                    end = (current_time + next_time) / 2.0
+
+                start = max(0.0, start - padding)
+                end = end + padding
+                if duration is not None:
+                    end = min(duration, end)
+                if end <= start:
+                    end = start + max(padding, epsilon)
+                    if duration is not None:
+                        end = min(duration, max(end, start + epsilon))
+
+                segments.append(
+                    {
+                        **item,
+                        "start": max(0.0, start),
+                        "end": max(max(0.0, start) + epsilon, end),
+                    }
+                )
+
+            return segments
+
         def blur_one(v: Path) -> bool:
             out = dst_dir / v.name
             base_zones = [dict(z) for z in zones]
@@ -4620,6 +4721,8 @@ class MainWindow(QtWidgets.QMainWindow):
             detection_info_msg: Optional[str] = None
             clip_info_msg: Optional[str] = None
             detection_applied = False
+            timeline_zones: List[Dict[str, Any]] = []
+            timeline_segment_count = 0
 
             if auto_runtime.get("enabled"):
                 threshold_value = float(auto_runtime.get("threshold", 0.75) or 0.75)
@@ -4630,6 +4733,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     "template_image": auto_runtime.get("template_image"),
                     "return_score": True,
                     "return_details": True,
+                    "return_series": True,
                 }
                 try:
                     result = auto_runtime["func"](  # type: ignore[index]
@@ -4642,6 +4746,9 @@ class MainWindow(QtWidgets.QMainWindow):
                     fallback_note = f"ошибка детектора: {exc}"
                 else:
                     bbox = result
+                    series_entries: List[Dict[str, Any]] = []
+                    fps_value: Optional[float] = None
+                    duration_value: Optional[float] = None
                     if isinstance(result, tuple) and len(result) == 2:
                         bbox = result[0]
                         try:
@@ -4665,12 +4772,55 @@ class MainWindow(QtWidgets.QMainWindow):
                         best_bbox = result.get("best_bbox")
                         if not bbox and best_bbox:
                             bbox = best_bbox
+                        series_raw = result.get("series")
+                        if isinstance(series_raw, list):
+                            series_entries = [entry for entry in series_raw if isinstance(entry, dict)]
+                        fps_raw = result.get("fps")
+                        try:
+                            fps_value = float(fps_raw) if fps_raw is not None else None
+                        except Exception:
+                            fps_value = None
+                        duration_raw = result.get("duration")
+                        try:
+                            duration_value = float(duration_raw) if duration_raw is not None else None
+                        except Exception:
+                            duration_value = None
                     score_allows_detection = True
                     if detection_score is not None and detection_score < threshold_value:
                         score_allows_detection = False
                     if bbox and score_allows_detection:
                         x, y, w, h = bbox
                         if w > 0 and h > 0:
+                            segments: List[Dict[str, Any]] = []
+                            if series_entries:
+                                valid_series: List[Dict[str, Any]] = []
+                                for entry in series_entries:
+                                    score_raw = entry.get("score")
+                                    try:
+                                        score_val = float(score_raw)
+                                    except (TypeError, ValueError):
+                                        continue
+                                    if score_val < threshold_value:
+                                        continue
+                                    entry_copy = dict(entry)
+                                    entry_copy["score"] = score_val
+                                    valid_series.append(entry_copy)
+                                if not valid_series:
+                                    for entry in series_entries:
+                                        if entry.get("accepted"):
+                                            try:
+                                                score_val = float(entry.get("score", threshold_value))
+                                            except (TypeError, ValueError):
+                                                score_val = threshold_value
+                                            entry_copy = dict(entry)
+                                            entry_copy["score"] = score_val
+                                            valid_series.append(entry_copy)
+                                if valid_series:
+                                    segments = _series_to_segments(
+                                        valid_series,
+                                        duration_value,
+                                        fps_value,
+                                    )
                             try:
                                 projected = _project_detection_onto_zones(
                                     base_zones,
@@ -4681,10 +4831,69 @@ class MainWindow(QtWidgets.QMainWindow):
                                 detection_error_text = f"проекция зон не удалась: {exc}"
                                 fallback_note = "проекция зон не удалась"
                             else:
-                                if projected:
-                                    active_zones = projected
+                                per_video_zones = list(projected)
+                                if segments:
+                                    try:
+                                        timeline_segment_count = len(segments)
+                                        timeline_zones_local: List[Dict[str, Any]] = []
+                                        for seg in segments:
+                                            seg_bbox = seg.get("bbox")
+                                            if not seg_bbox or len(seg_bbox) != 4:
+                                                continue
+                                            seg_frame_size = seg.get("frame_size")
+                                            if not seg_frame_size:
+                                                seg_frame_size = frame_size
+                                            try:
+                                                per_segment = _project_detection_onto_zones(
+                                                    base_zones,
+                                                    (
+                                                        int(seg_bbox[0]),
+                                                        int(seg_bbox[1]),
+                                                        int(seg_bbox[2]),
+                                                        int(seg_bbox[3]),
+                                                    ),
+                                                    seg_frame_size,
+                                                )
+                                            except Exception:
+                                                continue
+                                            for zone in per_segment:
+                                                start_val = seg.get("start")
+                                                end_val = seg.get("end")
+                                                if start_val is None and end_val is None:
+                                                    continue
+                                                try:
+                                                    start_f = float(start_val) if start_val is not None else 0.0
+                                                except Exception:
+                                                    start_f = 0.0
+                                                try:
+                                                    end_f = float(end_val) if end_val is not None else start_f
+                                                except Exception:
+                                                    end_f = start_f
+                                                if end_f <= start_f:
+                                                    end_f = start_f + 0.1
+                                                timeline_zones_local.append({
+                                                    "x": int(zone.get("x", 0)),
+                                                    "y": int(zone.get("y", 0)),
+                                                    "w": int(zone.get("w", 1)),
+                                                    "h": int(zone.get("h", 1)),
+                                                    "start": max(0.0, start_f),
+                                                    "end": max(start_f + 0.05, end_f),
+                                                })
+                                        if timeline_zones_local:
+                                            timeline_zones = timeline_zones_local
+                                    except Exception as exc:  # noqa: BLE001
+                                        detection_error_text = f"проекция по временной шкале не удалась: {exc}"
+                                        fallback_note = "проекция по временной шкале не удалась"
+                                if not timeline_zones and per_video_zones:
+                                    active_zones = per_video_zones
+                                if timeline_zones or per_video_zones:
                                     detection_applied = True
-                                    detection_info_msg = f"[BLUR] {v.name}: автодетект → {len(projected)} зон"
+                                    zone_count = len(timeline_zones) if timeline_zones else len(per_video_zones)
+                                    detection_info_msg = (
+                                        f"[BLUR] {v.name}: автодетект → {zone_count} зон"
+                                    )
+                                    if timeline_zones and timeline_segment_count:
+                                        detection_info_msg += f" в {timeline_segment_count} окнах"
                                     if detection_score is not None:
                                         detection_info_msg += f" (score={detection_score:.2f})"
                                 else:
@@ -4704,7 +4913,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     elif not bbox:
                         fallback_note = f"совпадение ниже порога ({auto_runtime['threshold']:.2f})"
 
-            if detection_applied and frame_size and active_zones:
+            if detection_applied and not timeline_zones and frame_size and active_zones:
                 clipped = _clip_zones_to_frame(active_zones, frame_size)
                 if clipped and clipped != active_zones:
                     active_zones = clipped
@@ -4712,13 +4921,46 @@ class MainWindow(QtWidgets.QMainWindow):
                         f"[BLUR] {v.name}: зоны скорректированы под кадр {frame_size[0]}x{frame_size[1]}"
                     )
 
-            filter_parts = [
-                f"delogo=x={z['x']}:y={z['y']}:w={z['w']}:h={z['h']}:show=0" for z in active_zones
-            ]
-            if not filter_parts:
+            if timeline_zones:
+                filter_parts = []
+                for zone in timeline_zones:
+                    try:
+                        x = int(zone.get("x", 0))
+                        y = int(zone.get("y", 0))
+                        w = int(zone.get("w", 1))
+                        h = int(zone.get("h", 1))
+                    except Exception:
+                        continue
+                    start = zone.get("start")
+                    end = zone.get("end")
+                    enable_expr = ""
+                    start_val: Optional[float] = None
+                    end_val: Optional[float] = None
+                    try:
+                        start_val = float(start) if start is not None else None
+                    except Exception:
+                        start_val = None
+                    try:
+                        end_val = float(end) if end is not None else None
+                    except Exception:
+                        end_val = None
+                    if start_val is not None or end_val is not None:
+                        start_safe = max(0.0, start_val if start_val is not None else 0.0)
+                        end_safe = end_val if end_val is not None else (start_safe + 0.1)
+                        if end_safe <= start_safe:
+                            end_safe = start_safe + 0.1
+                        enable_expr = f":enable='between(t,{start_safe:.3f},{end_safe:.3f})'"
+                    filter_parts.append(
+                        f"delogo=x={x}:y={y}:w={w}:h={h}:show=0{enable_expr}"
+                    )
+            else:
                 filter_parts = [
-                    f"delogo=x={z['x']}:y={z['y']}:w={z['w']}:h={z['h']}:show=0" for z in zones
+                    f"delogo=x={z['x']}:y={z['y']}:w={z['w']}:h={z['h']}:show=0" for z in active_zones
                 ]
+                if not filter_parts:
+                    filter_parts = [
+                        f"delogo=x={z['x']}:y={z['y']}:w={z['w']}:h={z['h']}:show=0" for z in zones
+                    ]
             if not filter_parts:
                 with lock:
                     counter["done"] += 1
