@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 import os  # FIX: нужен в load_cfg/_open_chrome
 import re  # FIX: используется в _slot_log, _natural_key
+import math
 import sys
 import json
 try:
@@ -4554,6 +4555,24 @@ class MainWindow(QtWidgets.QMainWindow):
         lock = Lock()
         failures: List[str] = []
 
+        def _round_to_even(value: object, *, minimum: Optional[int] = None, default: int = 0) -> int:
+            try:
+                num = float(value)
+            except Exception:
+                num = float(default)
+            if not math.isfinite(num):
+                num = float(default)
+            even = int(round(num / 2.0) * 2)
+            if minimum is not None:
+                min_even = int(minimum)
+                if min_even < 0:
+                    min_even = 0
+                if min_even % 2 != 0:
+                    min_even += 1
+                if even < min_even:
+                    even = min_even
+            return even
+
         def _clip_zones_to_frame(
             zone_list: List[Dict[str, int]],
             frame_size: Optional[Tuple[int, int]],
@@ -4562,26 +4581,59 @@ class MainWindow(QtWidgets.QMainWindow):
                 return [dict(z) for z in zone_list]
 
             try:
-                frame_w = max(1, int(frame_size[0]))
-                frame_h = max(1, int(frame_size[1]))
+                frame_w = max(2, int(float(frame_size[0])))
+                frame_h = max(2, int(float(frame_size[1])))
             except Exception:
                 return [dict(z) for z in zone_list]
 
             clipped: List[Dict[str, int]] = []
             for zone in zone_list:
+                if not isinstance(zone, dict):
+                    continue
                 try:
-                    x = int(zone.get("x", 0))
-                    y = int(zone.get("y", 0))
-                    w = int(zone.get("w", 0))
-                    h = int(zone.get("h", 0))
+                    raw_x = float(zone.get("x", 0))
+                    raw_y = float(zone.get("y", 0))
+                    raw_w = float(zone.get("w", 0))
+                    raw_h = float(zone.get("h", 0))
                 except Exception:
                     continue
 
-                x = max(0, min(x, frame_w - 1))
-                y = max(0, min(y, frame_h - 1))
-                w = max(1, min(max(1, w), frame_w - x))
-                h = max(1, min(max(1, h), frame_h - y))
-                clipped.append({"x": x, "y": y, "w": w, "h": h})
+                x = int(round(raw_x))
+                y = int(round(raw_y))
+                x = max(0, min(x, frame_w - 2))
+                y = max(0, min(y, frame_h - 2))
+                x -= x % 2
+                y -= y % 2
+                x = max(0, min(x, frame_w - 2))
+                y = max(0, min(y, frame_h - 2))
+
+                max_w = frame_w - x
+                max_h = frame_h - y
+                if max_w < 2 or max_h < 2:
+                    continue
+
+                w = int(round(raw_w))
+                h = int(round(raw_h))
+                w = max(2, min(w, max_w))
+                h = max(2, min(h, max_h))
+
+                if w % 2 != 0:
+                    if w + 1 <= max_w:
+                        w += 1
+                    else:
+                        w = max(2, w - 1)
+                if h % 2 != 0:
+                    if h + 1 <= max_h:
+                        h += 1
+                    else:
+                        h = max(2, h - 1)
+
+                max_w = frame_w - x
+                max_h = frame_h - y
+                w = max(2, min(w, max_w))
+                h = max(2, min(h, max_h))
+
+                clipped.append({"x": int(x), "y": int(y), "w": int(w), "h": int(h)})
 
             return clipped
 
@@ -4625,10 +4677,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 x, y, w, h = detected
                 return [
                     {
-                        "x": max(0, int(x)),
-                        "y": max(0, int(y)),
-                        "w": max(1, int(w)),
-                        "h": max(1, int(h)),
+                        "x": max(0, _round_to_even(x, minimum=0, default=0)),
+                        "y": max(0, _round_to_even(y, minimum=0, default=0)),
+                        "w": max(2, _round_to_even(w, minimum=2, default=2)),
+                        "h": max(2, _round_to_even(h, minimum=2, default=2)),
                     }
                 ]
 
@@ -4655,10 +4707,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 offset_x = base_x - int(ref.get("x", 0))
                 offset_y = base_y - int(ref.get("y", 0))
 
-                new_w = max(1, int(round(base_w * scale_x)))
-                new_h = max(1, int(round(base_h * scale_y)))
-                new_x = int(round(det_x + offset_x * scale_x))
-                new_y = int(round(det_y + offset_y * scale_y))
+                new_w = max(2, _round_to_even(base_w * scale_x, minimum=2, default=base_w))
+                new_h = max(2, _round_to_even(base_h * scale_y, minimum=2, default=base_h))
+                new_x = max(0, _round_to_even(det_x + offset_x * scale_x, minimum=0, default=det_x))
+                new_y = max(0, _round_to_even(det_y + offset_y * scale_y, minimum=0, default=det_y))
 
                 projected.append({"x": new_x, "y": new_y, "w": new_w, "h": new_h})
 
