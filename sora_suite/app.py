@@ -819,48 +819,92 @@ class ProcRunner(QtCore.QObject):
 
 
 # ---------- отдельное окно сессии ----------
-class SessionWorkspaceWindow(QtWidgets.QWidget):
+class SessionWorkspaceWindow(QtWidgets.QDialog):
+    """Компактное отдельное окно для управления конкретной сессией."""
+
     def __init__(self, main: "MainWindow", session_id: str):
         super().__init__(parent=main)
         self._main = main
         self.session_id = session_id
         self.setWindowTitle("Рабочее пространство Sora")
+        self.setObjectName("sessionWorkspaceWindow")
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose, True)
-        self.resize(520, 620)
+        self.setModal(False)
+        self.setWindowFlag(QtCore.Qt.WindowType.Window, True)
+        self.setMinimumSize(540, 520)
 
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(10)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(14)
 
+        header = QtWidgets.QFrame()
+        header_layout = QtWidgets.QVBoxLayout(header)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(4)
         self.lbl_title = QtWidgets.QLabel("Сессия")
-        self.lbl_title.setStyleSheet("QLabel{font-size:18px;font-weight:600;color:#f8fafc;}")
-        layout.addWidget(self.lbl_title)
-
+        self.lbl_title.setObjectName("sessionWindowTitle")
         self.lbl_details = QtWidgets.QLabel("—")
+        self.lbl_details.setObjectName("sessionWindowDetails")
         self.lbl_details.setWordWrap(True)
-        self.lbl_details.setStyleSheet("QLabel{color:#94a3b8;}")
-        layout.addWidget(self.lbl_details)
+        header_layout.addWidget(self.lbl_title)
+        header_layout.addWidget(self.lbl_details)
+        layout.addWidget(header)
 
-        btn_row = QtWidgets.QHBoxLayout()
-        btn_row.setSpacing(8)
-        self.btn_launch_chrome = QtWidgets.QPushButton("Chrome")
-        self.btn_run_prompts = QtWidgets.QPushButton("Autogen")
-        self.btn_run_images = QtWidgets.QPushButton("Картинки")
-        self.btn_stop = QtWidgets.QPushButton("Стоп")
-        for btn in (self.btn_launch_chrome, self.btn_run_prompts, self.btn_run_images, self.btn_stop):
+        actions_card = QtWidgets.QFrame()
+        actions_card.setObjectName("sessionWindowActions")
+        actions_layout = QtWidgets.QHBoxLayout(actions_card)
+        actions_layout.setContentsMargins(12, 12, 12, 12)
+        actions_layout.setSpacing(8)
+        self.btn_launch_chrome = QtWidgets.QPushButton("Открыть Chrome")
+        self.btn_run_prompts = QtWidgets.QPushButton("Промпты Sora")
+        self.btn_run_images = QtWidgets.QPushButton("Генерация")
+        self.btn_stop = QtWidgets.QPushButton("Остановить")
+        for btn in (
+            self.btn_launch_chrome,
+            self.btn_run_prompts,
+            self.btn_run_images,
+            self.btn_stop,
+        ):
             btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
-            btn_row.addWidget(btn)
-        layout.addLayout(btn_row)
+            btn.setMinimumHeight(32)
+            actions_layout.addWidget(btn)
+        actions_layout.addStretch(1)
+        layout.addWidget(actions_card)
 
+        status_card = QtWidgets.QFrame()
+        status_card.setObjectName("sessionWindowStatus")
+        status_layout = QtWidgets.QVBoxLayout(status_card)
+        status_layout.setContentsMargins(12, 12, 12, 12)
+        status_layout.setSpacing(6)
         self.lbl_status = QtWidgets.QLabel("Статус: —")
-        self.lbl_status.setStyleSheet("QLabel{color:#cbd5f5;}")
-        layout.addWidget(self.lbl_status)
+        self.lbl_status.setObjectName("sessionWindowStatusLabel")
+        self.lbl_status.setWordWrap(True)
+        status_layout.addWidget(self.lbl_status)
+        self.lbl_status_hint = QtWidgets.QLabel(
+            "История запуска и лог выполнения обновляются автоматически при действиях в этой сессии."
+        )
+        self.lbl_status_hint.setObjectName("sessionWindowHint")
+        self.lbl_status_hint.setWordWrap(True)
+        status_layout.addWidget(self.lbl_status_hint)
+        layout.addWidget(status_card)
 
+        log_frame = QtWidgets.QFrame()
+        log_frame.setObjectName("sessionWindowLog")
+        log_layout = QtWidgets.QVBoxLayout(log_frame)
+        log_layout.setContentsMargins(12, 12, 12, 12)
+        log_layout.setSpacing(6)
+        lbl_log = QtWidgets.QLabel("Журнал выполнения")
+        lbl_log.setObjectName("sessionWindowLogTitle")
+        log_layout.addWidget(lbl_log)
         self.log_view = QtWidgets.QPlainTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumBlockCount(500)
-        self.log_view.setPlaceholderText("Лог выполнения появится здесь…")
-        layout.addWidget(self.log_view, 1)
+        self.log_view.setPlaceholderText("Здесь появятся логи процессов выбранной сессии…")
+        font = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.SystemFont.FixedFont)
+        font.setPointSize(max(font.pointSize() - 1, 9))
+        self.log_view.setFont(font)
+        log_layout.addWidget(self.log_view, 1)
+        layout.addWidget(log_frame, 1)
 
         self.btn_launch_chrome.clicked.connect(lambda: self._main._launch_session_chrome(self.session_id))
         self.btn_run_prompts.clicked.connect(lambda: self._main._run_session_autogen(self.session_id))
@@ -893,6 +937,7 @@ class SessionWorkspaceWindow(QtWidgets.QWidget):
         self.log_view.clear()
         for line in lines:
             self.log_view.appendPlainText(line)
+        self.log_view.moveCursor(QtGui.QTextCursor.MoveOperation.End)
         self.log_view.blockSignals(False)
 
     def closeEvent(self, event: QtGui.QCloseEvent):
@@ -1653,48 +1698,53 @@ class MainWindow(QtWidgets.QMainWindow):
 
         app.setStyleSheet(
             """
-            QWidget { background-color: #0f172a; color: #f1f5f9; }
-            QGroupBox { border: 1px solid #22314d; border-radius: 12px; margin-top: 14px; background-color: #101a2f; }
-            QGroupBox::title { subcontrol-origin: margin; left: 16px; padding: 0 6px; background-color: #101a2f; }
-            QPushButton { background-color: #1f2d4a; border: 1px solid #2f4368; border-radius: 8px; padding: 6px 14px; color: #f8fafc; }
-            QPushButton:disabled { background-color: #1b2640; border-color: #2a3654; color: #66738a; }
-            QPushButton:hover { background-color: #2b3c5d; }
-            QPushButton:pressed { background-color: #1a2540; }
+            QWidget { background-color: #0d1425; color: #e2e8f0; }
+            QLabel { background: transparent; }
+            QGroupBox { border: 1px solid #1f2a40; border-radius: 12px; margin-top: 16px; padding-top: 12px; background: transparent; }
+            QGroupBox::title { subcontrol-origin: margin; left: 16px; padding: 0 6px; background: #0d1425; color: #94a3b8; }
+            QPushButton { background-color: #1e2a3f; border: 1px solid #2c3d5a; border-radius: 8px; padding: 6px 14px; color: #f8fafc; }
+            QPushButton:disabled { background-color: #131a2a; border-color: #1f2a3f; color: #475569; }
+            QPushButton:hover { background-color: #273754; }
+            QPushButton:pressed { background-color: #17233a; }
             QLineEdit, QSpinBox, QDoubleSpinBox, QDateTimeEdit, QComboBox, QTextEdit, QPlainTextEdit {
-                background-color: #0b1528; border: 1px solid #22314d; border-radius: 8px; padding: 4px 8px;
-                selection-background-color: #4c6ef5; selection-color: #f8fafc;
+                background-color: #0a1324; border: 1px solid #1f2a40; border-radius: 8px; padding: 4px 8px;
+                selection-background-color: #6366f1; selection-color: #f8fafc;
             }
             QPlainTextEdit { padding: 8px; }
-            QCheckBox { color: #f8fafc; spacing: 8px; }
+            QCheckBox { color: #e2e8f0; spacing: 8px; }
             QCheckBox::indicator {
                 width: 18px; height: 18px; border-radius: 5px;
-                border: 1px solid #334155; background: #0b1528;
+                border: 1px solid #334155; background: #0a1324;
             }
             QCheckBox::indicator:unchecked { image: none; }
             QCheckBox::indicator:checked {
-                background: #4c6ef5; border: 1px solid #93c5fd; image: none;
+                background: #6366f1; border: 1px solid #a5b4fc; image: none;
             }
             QCheckBox::indicator:disabled { background: #1e293b; border-color: #27364d; }
-            QListWidget { border: 1px solid #22314d; border-radius: 12px; background-color: #0b1528; color: #f1f5f9; }
-            QListWidget#sectionNav { background: rgba(15,23,42,0.9); border: 1px solid #1f2a40; border-radius: 18px; padding: 12px 8px; }
-            QListWidget#sectionNav::item { margin: 4px 6px; padding: 10px 14px; border-radius: 12px; color: #e2e8f0; }
-            QListWidget#sectionNav::item:selected { background: qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #4c6ef5, stop:1 #4338ca); color: #f8fafc; }
-            QListWidget#sectionNav::item:hover { background: rgba(148,163,184,0.14); }
-            QTabWidget::pane { border: 1px solid #22314d; border-radius: 12px; margin-top: -4px; background: #0f172a; }
-            QTabBar::tab { background: #101a2f; border: 1px solid #22314d; padding: 6px 12px; margin-right: 4px;
+            QListWidget { border: none; background: transparent; color: #f1f5f9; }
+            QListWidget#sectionNav { background: transparent; border: none; padding: 6px 4px; }
+            QListWidget#sectionNav::item { margin: 4px 8px; padding: 10px 14px; border-radius: 12px; color: #cbd5f5; }
+            QListWidget#sectionNav::item:selected { background: rgba(99,102,241,0.36); color: #ffffff; }
+            QListWidget#sectionNav::item:hover { background: rgba(148,163,184,0.18); }
+            QTabWidget::pane { border: 1px solid #1f2a40; border-radius: 12px; margin-top: -4px; background: rgba(13,20,37,0.6); }
+            QTabBar::tab { background: rgba(15,23,42,0.6); border: 1px solid #1f2a40; padding: 6px 12px; margin-right: 4px;
                            border-top-left-radius: 6px; border-top-right-radius: 6px; }
-            QTabBar::tab:selected { background: #4c6ef5; color: #f8fafc; }
-            QTabBar::tab:hover { background: #374968; }
-            QLabel#statusBanner { font-size: 15px; }
-            QFrame#dashboardHeader { background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #1d4ed8, stop:1 #4c1d95); border-radius: 18px; border: 1px solid #1e3a8a; }
+            QTabBar::tab:selected { background: rgba(99,102,241,0.35); color: #f8fafc; }
+            QTabBar::tab:hover { background: rgba(99,102,241,0.25); }
+            QLabel#statusBanner { padding: 12px 18px; border-radius: 12px; border: 1px solid #1f2a40; background: rgba(148,163,184,0.1); }
             QLabel#dashboardTitle { font-size: 22px; font-weight: 700; color: #f8fafc; }
             QLabel#dashboardSubtitle { color: #cbd5f5; font-size: 13px; }
-            QFrame#dashboardQuickActions { background: rgba(15,23,42,0.92); border: 1px solid #1f2a40; border-radius: 16px; }
-            QFrame#dashboardStats { background: rgba(15,23,42,0.92); border: 1px solid #1f2a40; border-radius: 16px; }
             QLabel#dashboardSectionTitle { font-size: 13px; font-weight: 600; letter-spacing: 0.4px; text-transform: uppercase; color: #9fb7ff; }
-            QFrame#dashboardActivity { background: rgba(15,23,42,0.92); border: 1px solid #1f2a40; border-radius: 16px; }
-            QTextBrowser { background-color: #0b1528; border: 1px solid #22314d; border-radius: 10px; padding: 12px; }
+            QFrame#dashboardHeader { background: transparent; border: 1px solid #1f2a40; border-radius: 18px; }
+            QFrame#dashboardQuickActions, QFrame#dashboardStats, QFrame#dashboardActivity { background: rgba(15,23,42,0.55); border: 1px solid #1f2a40; border-radius: 16px; }
+            QTextBrowser { background-color: #081120; border: 1px solid #1f2a40; border-radius: 10px; padding: 12px; }
             QScrollArea { border: none; }
+            QFrame#sessionWindowActions, QFrame#sessionWindowStatus, QFrame#sessionWindowLog { background: rgba(15,23,42,0.45); border: 1px solid #1d2840; border-radius: 12px; }
+            QLabel#sessionWindowTitle { font-size: 20px; font-weight: 600; }
+            QLabel#sessionWindowDetails { color: #94a3b8; }
+            QLabel#sessionWindowStatusLabel { font-size: 13px; font-weight: 600; color: #e2e8f0; }
+            QLabel#sessionWindowHint { color: #94a3b8; font-size: 11px; }
+            QLabel#sessionWindowLogTitle { font-size: 12px; font-weight: 600; color: #cbd5f5; }
             """
         )
 
@@ -1829,8 +1879,7 @@ class MainWindow(QtWidgets.QMainWindow):
         banner.setWordWrap(True)
         banner.setStyleSheet(
             "QLabel#statusBanner{padding:12px 18px;border-radius:12px;"
-            "background:qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #4c6ef5,stop:1 #1d4ed8);"
-            "color:#f8fafc;font-weight:600;letter-spacing:0.3px;border:1px solid #1a1f4a;}"
+            "background:transparent;color:#f1f5f9;font-weight:600;letter-spacing:0.3px;border:1px solid #1a1f4a;}"
         )
         v.addWidget(banner)
 
@@ -2155,7 +2204,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.current_event_card.setStyleSheet(
             "QFrame#currentEventCard{background:transparent;border:1px solid #27364d;border-radius:14px;padding:0;}"
             "QLabel#currentEventTitle{color:#9fb7ff;font-size:11px;letter-spacing:1px;text-transform:uppercase;}"
-            "QFrame#currentEventBodyFrame{background:rgba(76,110,245,0.2);border:1px solid #3b4cc0;border-radius:10px;}"
+            "QFrame#currentEventBodyFrame{background:transparent;border:1px solid #1f2a40;border-radius:10px;}"
             "QLabel#currentEventBody{color:#f8fafc;font-size:15px;font-weight:600;background:transparent;}"
         )
         card_layout = QtWidgets.QVBoxLayout(self.current_event_card)
@@ -2997,7 +3046,7 @@ class MainWindow(QtWidgets.QMainWindow):
         settings_body = QtWidgets.QWidget()
         settings_layout = QtWidgets.QVBoxLayout(settings_body)
         settings_layout.setContentsMargins(16, 16, 16, 16)
-        settings_intro = QtWidgets.QLabel("Настройки сгруппированы по вкладкам: каталоги, Chrome, FFmpeg, YouTube, Telegram и обслуживание.")
+        settings_intro = QtWidgets.QLabel("Настройки сгруппированы по вкладкам: каталоги, Chrome, FFmpeg, YouTube и обслуживание. Раздел Telegram вынесен отдельно слева.")
         settings_intro.setWordWrap(True)
         settings_intro.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
         settings_layout.addWidget(settings_intro)
@@ -3069,6 +3118,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.autopost_tabs.addTab(self.tab_youtube, "YouTube")
         self.autopost_tabs.addTab(self.tab_tiktok, "TikTok")
         autopost_layout.addWidget(self.autopost_tabs)
+
+        self.telegram_panel = self._build_telegram_panel()
+        add_section(
+            "telegram",
+            "Telegram",
+            self.telegram_panel,
+            icon=self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MessageBoxInformation),
+            scrollable=True,
+        )
+        self._refresh_telegram_history()
         add_section(
             "autopost",
             "Автопостинг",
@@ -3102,6 +3161,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.section_stack.setCurrentIndex(row)
         if 0 <= row < len(getattr(self, "_section_order", [])):
             self._current_section_key = self._section_order[row]
+            if self._current_section_key == "telegram":
+                self._refresh_telegram_history()
 
     def _select_section(self, key: str):
         if not getattr(self, "section_nav", None):
@@ -3605,29 +3666,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.settings_tabs.addTab(page_maint, "Обслуживание")
 
-        # --- Telegram ---
-        tg_cfg = self.cfg.get("telegram", {}) or {}
-        page_tg = QtWidgets.QWidget()
-        tg_form = QtWidgets.QFormLayout(page_tg)
-        self.cb_tg_enabled = QtWidgets.QCheckBox("Включить уведомления")
-        self.cb_tg_enabled.setChecked(bool(tg_cfg.get("enabled", False)))
-        tg_form.addRow(self.cb_tg_enabled)
-        self.ed_tg_token = QtWidgets.QLineEdit(tg_cfg.get("bot_token", ""))
-        self.ed_tg_token.setPlaceholderText("123456:ABCDEF...")
-        tg_form.addRow("Bot token:", self.ed_tg_token)
-        self.ed_tg_chat = QtWidgets.QLineEdit(tg_cfg.get("chat_id", ""))
-        self.ed_tg_chat.setPlaceholderText("@channel или chat id")
-        tg_form.addRow("Chat ID:", self.ed_tg_chat)
-        btn_row = QtWidgets.QHBoxLayout()
-        self.btn_tg_test = QtWidgets.QPushButton("Отправить тест")
-        btn_row.addWidget(self.btn_tg_test)
-        btn_row.addStretch(1)
-        tg_form.addRow(btn_row)
-        hint = QtWidgets.QLabel("Уведомления отправляются после завершения шагов сценария.")
-        hint.setWordWrap(True)
-        tg_form.addRow(hint)
-        self.settings_tabs.addTab(page_tg, "Telegram")
-
         # --- Автоген ---
         page_auto = QtWidgets.QWidget()
         auto_layout = QtWidgets.QVBoxLayout(page_auto)
@@ -3874,7 +3912,6 @@ class MainWindow(QtWidgets.QMainWindow):
             ("Chrome", page_chrome),
             ("YouTube", page_yt),
             ("TikTok", page_tt),
-            ("Telegram", page_tg),
             ("Интерфейс", page_ui),
             ("Обслуживание", page_maint),
             ("Ошибки", self.tab_errors),
@@ -4255,6 +4292,92 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self, "lst_activity"):
             self._append_activity("README.md не найден", kind="error")
         self._readme_loaded = True
+
+    def _build_telegram_panel(self) -> QtWidgets.QWidget:
+        tg_cfg = self.cfg.get("telegram", {}) or {}
+        root = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(root)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
+
+        intro = QtWidgets.QLabel(
+            "Настрой уведомления и контролируй отправку сообщений в Telegram прямо из Sora Suite."
+        )
+        intro.setWordWrap(True)
+        intro.setStyleSheet("QLabel{color:#94a3b8;font-size:12px;}")
+        layout.addWidget(intro)
+
+        cfg_box = QtWidgets.QGroupBox("Параметры уведомлений")
+        cfg_form = QtWidgets.QFormLayout(cfg_box)
+        cfg_form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        self.cb_tg_enabled = QtWidgets.QCheckBox("Включить уведомления")
+        self.cb_tg_enabled.setChecked(bool(tg_cfg.get("enabled", False)))
+        cfg_form.addRow(self.cb_tg_enabled)
+        self.ed_tg_token = QtWidgets.QLineEdit(tg_cfg.get("bot_token", ""))
+        self.ed_tg_token.setPlaceholderText("123456:ABCDEF...")
+        cfg_form.addRow("Bot token:", self.ed_tg_token)
+        self.ed_tg_chat = QtWidgets.QLineEdit(tg_cfg.get("chat_id", ""))
+        self.ed_tg_chat.setPlaceholderText("@channel или chat id")
+        cfg_form.addRow("Chat ID:", self.ed_tg_chat)
+        btn_row = QtWidgets.QHBoxLayout()
+        self.btn_tg_test = QtWidgets.QPushButton("Отправить тест")
+        btn_row.addWidget(self.btn_tg_test)
+        btn_row.addStretch(1)
+        cfg_form.addRow(btn_row)
+        hint = QtWidgets.QLabel("Уведомления отправляются после ключевых шагов сценария и сервисных операций.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
+        cfg_form.addRow(hint)
+        layout.addWidget(cfg_box)
+
+        quick_box = QtWidgets.QGroupBox("Быстрая отправка")
+        quick_layout = QtWidgets.QVBoxLayout(quick_box)
+        quick_layout.setSpacing(8)
+        self.ed_tg_quick_message = QtWidgets.QPlainTextEdit()
+        self.ed_tg_quick_message.setPlaceholderText("Напиши сообщение для команды или канала…")
+        self.ed_tg_quick_message.setMaximumBlockCount(200)
+        quick_layout.addWidget(self.ed_tg_quick_message)
+        quick_buttons = QtWidgets.QHBoxLayout()
+        self.btn_tg_quick_send = QtWidgets.QPushButton("Отправить сейчас")
+        self.btn_tg_quick_clear = QtWidgets.QPushButton("Очистить")
+        quick_buttons.addWidget(self.btn_tg_quick_send)
+        quick_buttons.addWidget(self.btn_tg_quick_clear)
+        quick_buttons.addStretch(1)
+        quick_layout.addLayout(quick_buttons)
+        self.lbl_tg_status = QtWidgets.QLabel("Готово к отправке")
+        self.lbl_tg_status.setStyleSheet("QLabel{color:#94a3b8;}")
+        quick_layout.addWidget(self.lbl_tg_status)
+        layout.addWidget(quick_box)
+
+        history_box = QtWidgets.QGroupBox("Недавние сообщения")
+        history_layout = QtWidgets.QVBoxLayout(history_box)
+        history_layout.setSpacing(8)
+        self.lst_tg_history = QtWidgets.QListWidget()
+        self.lst_tg_history.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
+        self.lst_tg_history.setWordWrap(True)
+        self.lst_tg_history.setAlternatingRowColors(False)
+        history_layout.addWidget(self.lst_tg_history, 1)
+        history_buttons = QtWidgets.QHBoxLayout()
+        self.btn_tg_history_refresh = QtWidgets.QPushButton("Обновить")
+        self.btn_tg_history_clear = QtWidgets.QPushButton("Очистить журнал")
+        history_buttons.addWidget(self.btn_tg_history_refresh)
+        history_buttons.addWidget(self.btn_tg_history_clear)
+        history_buttons.addStretch(1)
+        history_layout.addLayout(history_buttons)
+        layout.addWidget(history_box, 1)
+
+        layout.addStretch(1)
+
+        cache = getattr(self, "_telegram_activity_cache", None)
+        if cache is None:
+            self._telegram_activity_cache = deque(maxlen=200)
+
+        self.btn_tg_quick_send.clicked.connect(self._send_quick_telegram)
+        self.btn_tg_quick_clear.clicked.connect(self._clear_quick_telegram_message)
+        self.btn_tg_history_refresh.clicked.connect(self._refresh_telegram_history)
+        self.btn_tg_history_clear.clicked.connect(self._clear_telegram_history)
+
+        return root
 
     def _build_sessions_tab(self) -> QtWidgets.QWidget:
         tab = QtWidgets.QWidget()
@@ -4968,6 +5091,75 @@ class MainWindow(QtWidgets.QMainWindow):
             self.lst_activity.takeItem(0)
         self.lst_activity.scrollToBottom()
         self._apply_activity_filter()
+
+        if "telegram" in text.lower():
+            self._record_telegram_activity(display_text, kind)
+
+    def _ensure_telegram_cache(self) -> deque:
+        cache = getattr(self, "_telegram_activity_cache", None)
+        if cache is None:
+            cache = deque(maxlen=200)
+            self._telegram_activity_cache = cache
+        return cache
+
+    def _append_telegram_history_item(self, display: str, kind: str):
+        if not hasattr(self, "lst_tg_history") or self.lst_tg_history is None:
+            return
+        palette = {
+            "info": "#93c5fd",
+            "running": "#facc15",
+            "success": "#34d399",
+            "error": "#f87171",
+            "warn": "#facc15",
+        }
+        item = QtWidgets.QListWidgetItem(display)
+        item.setForeground(QtGui.QColor(palette.get(kind, palette["info"])))
+        item.setTextAlignment(int(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter))
+        self.lst_tg_history.addItem(item)
+        while self.lst_tg_history.count() > 120:
+            self.lst_tg_history.takeItem(0)
+        self.lst_tg_history.scrollToBottom()
+
+    def _record_telegram_activity(self, display: str, kind: str):
+        cache = self._ensure_telegram_cache()
+        cache.append((display, kind))
+        self._append_telegram_history_item(display, kind)
+
+    def _refresh_telegram_history(self):
+        if not hasattr(self, "lst_tg_history") or self.lst_tg_history is None:
+            return
+        cache = self._ensure_telegram_cache()
+        self.lst_tg_history.blockSignals(True)
+        self.lst_tg_history.clear()
+        for display, kind in list(cache)[-120:]:
+            self._append_telegram_history_item(display, kind)
+        self.lst_tg_history.blockSignals(False)
+
+    def _clear_telegram_history(self):
+        cache = self._ensure_telegram_cache()
+        cache.clear()
+        if hasattr(self, "lst_tg_history") and self.lst_tg_history is not None:
+            self.lst_tg_history.clear()
+
+    def _send_quick_telegram(self):
+        message = self.ed_tg_quick_message.toPlainText().strip()
+        if not message:
+            self.lbl_tg_status.setText("Введите текст сообщения перед отправкой")
+            self.lbl_tg_status.setStyleSheet("QLabel{color:#facc15;}")
+            return
+        ok = self._send_tg(message)
+        if ok:
+            self.lbl_tg_status.setText("Сообщение отправлено")
+            self.lbl_tg_status.setStyleSheet("QLabel{color:#34d399;}")
+            self.ed_tg_quick_message.clear()
+        else:
+            self.lbl_tg_status.setText("Не удалось отправить сообщение")
+            self.lbl_tg_status.setStyleSheet("QLabel{color:#f87171;}")
+
+    def _clear_quick_telegram_message(self):
+        self.ed_tg_quick_message.clear()
+        self.lbl_tg_status.setText("Готово к отправке")
+        self.lbl_tg_status.setStyleSheet("QLabel{color:#94a3b8;}")
 
     @QtCore.pyqtSlot(str)
     def _slot_log(self, text: str):
