@@ -12,6 +12,19 @@ autogen:
   failed_log: ./workers/autogen/failed.log
   instances: []
   active_prompts_profile: __general__
+  sessions:
+    - id: default
+      name: "Сессия 1"
+      prompt_profile: __general__
+      chrome_profile: ""
+      cdp_port: null
+      prompts_file: ""
+      image_prompts_file: ""
+      submitted_log: ""
+      failed_log: ""
+      notes: ""
+      auto_launch_chrome: false
+      auto_launch_autogen: idle
 google_genai:
   enabled: false
   api_key: ""

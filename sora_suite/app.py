@@ -5,6 +5,7 @@ import re  # FIX: используется в _slot_log, _natural_key
 import math
 import sys
 import json
+import uuid
 try:
     import yaml
 except ModuleNotFoundError as exc:
@@ -23,7 +24,7 @@ from pathlib import Path
 from functools import partial
 from urllib.request import urlopen, Request
 from collections import deque
-from typing import Optional, List, Union, Tuple, Dict, Callable, Any, Set
+from typing import Optional, List, Union, Tuple, Dict, Callable, Any, Set, Iterable
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 
@@ -180,6 +181,12 @@ def load_cfg() -> dict:
     autogen.setdefault("submitted_log", str(WORKERS_DIR / "autogen" / "submitted.log"))
     autogen.setdefault("failed_log", str(WORKERS_DIR / "autogen" / "failed.log"))
     autogen.setdefault("instances", [])
+    sessions = autogen.setdefault("sessions", [])
+    if isinstance(sessions, dict):
+        # старый формат, где сессии хранились как отображение
+        autogen["sessions"] = list(sessions.values())
+    elif not isinstance(sessions, list):
+        autogen["sessions"] = []
     autogen.setdefault("active_prompts_profile", PROMPTS_DEFAULT_KEY)
     autogen.setdefault("image_prompts_file", str(WORKERS_DIR / "autogen" / "image_prompts.txt"))
 
@@ -364,6 +371,45 @@ def slugify(value: str) -> str:
     value = re.sub(r"[^a-zA-Z0-9]+", "-", value.strip().lower())
     value = re.sub(r"-+", "-", value).strip("-")
     return value or "instance"
+
+
+def normalize_session_list(raw_sessions: object) -> List[Dict[str, Any]]:
+    normalized: List[Dict[str, Any]] = []
+    if not isinstance(raw_sessions, list):
+        return normalized
+
+    seen_ids: Set[str] = set()
+    for idx, item in enumerate(raw_sessions, start=1):
+        if not isinstance(item, dict):
+            continue
+        session = dict(item)
+        sid = str(session.get("id") or "").strip()
+        if not sid:
+            sid = uuid.uuid4().hex[:8]
+        while sid in seen_ids:
+            sid = uuid.uuid4().hex[:8]
+        session["id"] = sid
+        seen_ids.add(sid)
+
+        name = str(session.get("name") or session.get("title") or "").strip()
+        if not name:
+            name = f"Сессия {idx}"
+        session["name"] = name
+
+        session.setdefault("chrome_profile", "")
+        session.setdefault("prompt_profile", PROMPTS_DEFAULT_KEY)
+        session.setdefault("cdp_port", None)
+        session.setdefault("prompts_file", "")
+        session.setdefault("image_prompts_file", "")
+        session.setdefault("submitted_log", "")
+        session.setdefault("failed_log", "")
+        session.setdefault("notes", "")
+        session.setdefault("auto_launch_chrome", False)
+        session.setdefault("auto_launch_autogen", "idle")
+
+        normalized.append(session)
+
+    return normalized
 
 
 ERROR_GUIDE: List[Tuple[str, str, str]] = [
@@ -772,6 +818,91 @@ class ProcRunner(QtCore.QObject):
             self.finished.emit(1, self.tag)
 
 
+# ---------- отдельное окно сессии ----------
+class SessionWorkspaceWindow(QtWidgets.QWidget):
+    def __init__(self, main: "MainWindow", session_id: str):
+        super().__init__(parent=main)
+        self._main = main
+        self.session_id = session_id
+        self.setWindowTitle("Рабочее пространство Sora")
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self.resize(520, 620)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+
+        self.lbl_title = QtWidgets.QLabel("Сессия")
+        self.lbl_title.setStyleSheet("QLabel{font-size:18px;font-weight:600;color:#f8fafc;}")
+        layout.addWidget(self.lbl_title)
+
+        self.lbl_details = QtWidgets.QLabel("—")
+        self.lbl_details.setWordWrap(True)
+        self.lbl_details.setStyleSheet("QLabel{color:#94a3b8;}")
+        layout.addWidget(self.lbl_details)
+
+        btn_row = QtWidgets.QHBoxLayout()
+        btn_row.setSpacing(8)
+        self.btn_launch_chrome = QtWidgets.QPushButton("Chrome")
+        self.btn_run_prompts = QtWidgets.QPushButton("Autogen")
+        self.btn_run_images = QtWidgets.QPushButton("Картинки")
+        self.btn_stop = QtWidgets.QPushButton("Стоп")
+        for btn in (self.btn_launch_chrome, self.btn_run_prompts, self.btn_run_images, self.btn_stop):
+            btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+            btn_row.addWidget(btn)
+        layout.addLayout(btn_row)
+
+        self.lbl_status = QtWidgets.QLabel("Статус: —")
+        self.lbl_status.setStyleSheet("QLabel{color:#cbd5f5;}")
+        layout.addWidget(self.lbl_status)
+
+        self.log_view = QtWidgets.QPlainTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.setMaximumBlockCount(500)
+        self.log_view.setPlaceholderText("Лог выполнения появится здесь…")
+        layout.addWidget(self.log_view, 1)
+
+        self.btn_launch_chrome.clicked.connect(lambda: self._main._launch_session_chrome(self.session_id))
+        self.btn_run_prompts.clicked.connect(lambda: self._main._run_session_autogen(self.session_id))
+        self.btn_run_images.clicked.connect(lambda: self._main._run_session_images(self.session_id))
+        self.btn_stop.clicked.connect(lambda: self._main._stop_session_runner(self.session_id))
+
+    def update_session(self, session: Dict[str, Any]):
+        name = session.get("name", self.session_id)
+        profile = session.get("prompt_profile") or PROMPTS_DEFAULT_KEY
+        chrome = session.get("chrome_profile") or "—"
+        port = _coerce_int(session.get("cdp_port")) or self._main._session_chrome_port(session)
+        self.setWindowTitle(f"Sora — {name}")
+        prompt_label = self._main._prompt_profile_label(profile)
+        self.lbl_title.setText(name)
+        self.lbl_details.setText(
+            f"Промпты: <b>{prompt_label}</b> · Chrome: <b>{chrome or 'по умолчанию'}</b> · CDP: <b>{port}</b>"
+        )
+
+    def update_status(self, status: str, message: str, rc: Optional[int]):
+        icon = self._main._session_status_icon(status)
+        extra = f" (rc={rc})" if rc is not None else ""
+        text = message or f"Статус: {status}"
+        self.lbl_status.setText(f"{icon} {text}{extra}")
+
+    def append_log(self, line: str):
+        self.log_view.appendPlainText(line)
+
+    def set_log(self, lines: Iterable[str]):
+        self.log_view.blockSignals(True)
+        self.log_view.clear()
+        for line in lines:
+            self.log_view.appendPlainText(line)
+        self.log_view.blockSignals(False)
+
+    def closeEvent(self, event: QtGui.QCloseEvent):
+        try:
+            if self.session_id in self._main._session_windows:
+                self._main._session_windows.pop(self.session_id, None)
+        finally:
+            super().closeEvent(event)
+
+
 # ---------- главное окно ----------
 class MainWindow(QtWidgets.QMainWindow):
     # сигналы для безопасных UI-апдейтов из потоков
@@ -787,6 +918,32 @@ class MainWindow(QtWidgets.QMainWindow):
         key = auto_cfg.get("active_prompts_profile", PROMPTS_DEFAULT_KEY) or PROMPTS_DEFAULT_KEY
         self._current_prompt_profile_key = key
         self._ensure_all_profile_prompts()
+
+        sessions_list = normalize_session_list(auto_cfg.get("sessions"))
+        if not sessions_list:
+            sessions_list.append(
+                {
+                    "id": uuid.uuid4().hex[:8],
+                    "name": "Сессия 1",
+                    "prompt_profile": PROMPTS_DEFAULT_KEY,
+                    "chrome_profile": "",
+                    "cdp_port": None,
+                    "prompts_file": "",
+                    "image_prompts_file": "",
+                    "submitted_log": "",
+                    "failed_log": "",
+                    "notes": "",
+                    "auto_launch_chrome": False,
+                    "auto_launch_autogen": "idle",
+                }
+            )
+        auto_cfg["sessions"] = sessions_list
+        self._session_cache: Dict[str, Dict[str, Any]] = {session["id"]: session for session in sessions_list}
+        self._session_order: List[str] = [session["id"] for session in sessions_list]
+        self._session_runners: Dict[str, ProcRunner] = {}
+        self._session_state: Dict[str, Dict[str, Any]] = {}
+        self._session_windows: Dict[str, "SessionWorkspaceWindow"] = {}
+        self._current_session_id: str = self._session_order[0] if self._session_order else ""
 
         self._apply_theme()
 
@@ -840,6 +997,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._settings_autosave_timer.timeout.connect(self._autosave_settings)
         self._register_settings_autosave_sources()
 
+        for session_id in list(self._session_order):
+            self._ensure_session_state(session_id)
+
     # ----- helpers -----
     def _ensure_path_exists(self, raw: Union[str, Path]) -> Path:
         """Create file/dir for path within project if missing and return Path."""
@@ -884,6 +1044,7 @@ class MainWindow(QtWidgets.QMainWindow):
         maint_cfg = self.cfg.get("maintenance", {}) or {}
         if maint_cfg.get("auto_cleanup_on_start"):
             QtCore.QTimer.singleShot(200, lambda: self._run_maintenance_cleanup(manual=False))
+        QtCore.QTimer.singleShot(400, self._apply_session_autolaunches)
 
     def _ensure_all_profile_prompts(self):
         try:
@@ -905,6 +1066,528 @@ class MainWindow(QtWidgets.QMainWindow):
             self._ensure_path_exists(str(self._default_profile_prompts(profile_name)))
         except Exception:
             pass
+
+    # ----- sessions helpers -----
+    def _ensure_session_state(self, session_id: str) -> Dict[str, Any]:
+        state = self._session_state.setdefault(
+            session_id,
+            {
+                "status": "idle",
+                "running": False,
+                "last_rc": None,
+                "last_message": "",
+                "log": deque(maxlen=500),
+            },
+        )
+        return state
+
+    def _append_session_log(self, session_id: str, line: str):
+        state = self._ensure_session_state(session_id)
+        state["log"].append(line)
+        if session_id in self._session_windows:
+            self._session_windows[session_id].append_log(line)
+        if getattr(self, "_current_session_id", "") == session_id and hasattr(self, "te_session_log"):
+            self.te_session_log.appendPlainText(line)
+
+    def _set_session_status(self, session_id: str, status: str, message: str = "", rc: Optional[int] = None):
+        state = self._ensure_session_state(session_id)
+        state["status"] = status
+        state["running"] = status == "running"
+        state["last_message"] = message
+        if rc is not None:
+            state["last_rc"] = rc
+        self._refresh_sessions_list()
+        if getattr(self, "_current_session_id", None) == session_id:
+            self._update_session_status_panel(session_id)
+        window = self._session_windows.get(session_id)
+        if window:
+            window.update_status(status, message, rc)
+
+    def _session_status_icon(self, status: str) -> str:
+        mapping = {
+            "running": "⏳",
+            "ok": "✅",
+            "error": "⚠️",
+            "idle": "🟦",
+        }
+        return mapping.get(status, "🟦")
+
+    def _session_display_label(self, session_id: str) -> str:
+        session = self._session_cache.get(session_id)
+        if not session:
+            return session_id
+        state = self._ensure_session_state(session_id)
+        icon = self._session_status_icon(state.get("status", "idle"))
+        return f"{icon} {session.get('name', session_id)}"
+
+    def _refresh_sessions_list(self):
+        if not hasattr(self, "lst_sessions"):
+            return
+        current_id = getattr(self, "_current_session_id", "")
+        self.lst_sessions.blockSignals(True)
+        self.lst_sessions.clear()
+        target_row = 0
+        for idx, session_id in enumerate(self._session_order):
+            session = self._session_cache.get(session_id)
+            if not session:
+                continue
+            item = QtWidgets.QListWidgetItem(self._session_display_label(session_id))
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, session_id)
+            state = self._ensure_session_state(session_id)
+            tooltip = session.get("notes", "").strip()
+            if state.get("last_message"):
+                tooltip = f"{state['last_message']}\n{tooltip}" if tooltip else state["last_message"]
+            if tooltip:
+                item.setToolTip(tooltip)
+            self.lst_sessions.addItem(item)
+            if session_id == current_id:
+                target_row = idx
+        if self.lst_sessions.count():
+            self.lst_sessions.setCurrentRow(target_row)
+        self.lst_sessions.blockSignals(False)
+
+    def _session_config_snapshot(self) -> List[Dict[str, Any]]:
+        snapshot: List[Dict[str, Any]] = []
+        for session_id in self._session_order:
+            session = self._session_cache.get(session_id)
+            if not session:
+                continue
+            entry = {
+                "id": session_id,
+                "name": session.get("name", ""),
+                "chrome_profile": session.get("chrome_profile", ""),
+                "prompt_profile": session.get("prompt_profile", PROMPTS_DEFAULT_KEY),
+                "cdp_port": session.get("cdp_port"),
+                "prompts_file": session.get("prompts_file", ""),
+                "image_prompts_file": session.get("image_prompts_file", ""),
+                "submitted_log": session.get("submitted_log", ""),
+                "failed_log": session.get("failed_log", ""),
+                "notes": session.get("notes", ""),
+                "auto_launch_chrome": bool(session.get("auto_launch_chrome", False)),
+                "auto_launch_autogen": session.get("auto_launch_autogen", "idle"),
+            }
+            snapshot.append(entry)
+        return snapshot
+
+    def _persist_sessions(self):
+        auto_cfg = self.cfg.setdefault("autogen", {})
+        auto_cfg["sessions"] = self._session_config_snapshot()
+        self._mark_settings_dirty()
+
+    def _refresh_sessions_choices(self):
+        if not hasattr(self, "cmb_session_prompt_profile"):
+            return
+        profiles = [(PROMPTS_DEFAULT_KEY, self._prompt_profile_label(PROMPTS_DEFAULT_KEY))]
+        for profile in self.cfg.get("chrome", {}).get("profiles", []) or []:
+            name = profile.get("name") or profile.get("profile_directory") or ""
+            if name:
+                profiles.append((name, name))
+        self.cmb_session_prompt_profile.blockSignals(True)
+        self.cmb_session_prompt_profile.clear()
+        for key, label in profiles:
+            self.cmb_session_prompt_profile.addItem(label, key)
+        self.cmb_session_prompt_profile.blockSignals(False)
+
+        chrome_options = [("", "Активный из настроек")]
+        for profile in self.cfg.get("chrome", {}).get("profiles", []) or []:
+            label = profile.get("name") or profile.get("profile_directory") or ""
+            if label:
+                chrome_options.append((label, label))
+        self.cmb_session_chrome_profile.blockSignals(True)
+        self.cmb_session_chrome_profile.clear()
+        for key, label in chrome_options:
+            self.cmb_session_chrome_profile.addItem(label, key)
+        self.cmb_session_chrome_profile.blockSignals(False)
+
+    def _set_session_editor_enabled(self, enabled: bool):
+        for widget in getattr(self, "_session_detail_widgets", []):
+            if isinstance(widget, QtWidgets.QWidget):
+                widget.setEnabled(enabled)
+
+    def _clear_session_editor(self):
+        if not hasattr(self, "ed_session_name"):
+            return
+        self._set_session_editor_enabled(False)
+        for line in (
+            self.ed_session_name,
+            self.ed_session_prompts,
+            self.ed_session_image_prompts,
+            self.ed_session_submitted,
+            self.ed_session_failed,
+        ):
+            line.blockSignals(True)
+            line.setText("")
+            line.blockSignals(False)
+        self.te_session_notes.blockSignals(True)
+        self.te_session_notes.setPlainText("")
+        self.te_session_notes.blockSignals(False)
+        self.sb_session_port.blockSignals(True)
+        self.sb_session_port.setValue(0)
+        self.sb_session_port.blockSignals(False)
+        self.chk_session_auto_chrome.blockSignals(True)
+        self.chk_session_auto_chrome.setChecked(False)
+        self.chk_session_auto_chrome.blockSignals(False)
+        self.cmb_session_autogen_mode.blockSignals(True)
+        self.cmb_session_autogen_mode.setCurrentIndex(0)
+        self.cmb_session_autogen_mode.blockSignals(False)
+        self.te_session_log.clear()
+        self.lbl_session_status.setText("Выбери сессию слева, чтобы увидеть детали")
+
+    def _load_session_into_editor(self, session_id: str):
+        session = self._session_cache.get(session_id)
+        if not session:
+            self._clear_session_editor()
+            return
+        self._set_session_editor_enabled(True)
+        name = session.get("name", "")
+        self.ed_session_name.blockSignals(True)
+        self.ed_session_name.setText(name)
+        self.ed_session_name.blockSignals(False)
+
+        prompt_key = session.get("prompt_profile") or PROMPTS_DEFAULT_KEY
+        idx = self.cmb_session_prompt_profile.findData(prompt_key)
+        self.cmb_session_prompt_profile.blockSignals(True)
+        if idx >= 0:
+            self.cmb_session_prompt_profile.setCurrentIndex(idx)
+        else:
+            self.cmb_session_prompt_profile.setCurrentIndex(0)
+        self.cmb_session_prompt_profile.blockSignals(False)
+
+        chrome_key = session.get("chrome_profile") or ""
+        idx = self.cmb_session_chrome_profile.findData(chrome_key)
+        self.cmb_session_chrome_profile.blockSignals(True)
+        if idx >= 0:
+            self.cmb_session_chrome_profile.setCurrentIndex(idx)
+        else:
+            self.cmb_session_chrome_profile.setCurrentIndex(0)
+        self.cmb_session_chrome_profile.blockSignals(False)
+
+        port_val = _coerce_int(session.get("cdp_port")) or 0
+        self.sb_session_port.blockSignals(True)
+        self.sb_session_port.setValue(port_val if port_val > 0 else 0)
+        self.sb_session_port.blockSignals(False)
+
+        for field, line in [
+            ("prompts_file", self.ed_session_prompts),
+            ("image_prompts_file", self.ed_session_image_prompts),
+            ("submitted_log", self.ed_session_submitted),
+            ("failed_log", self.ed_session_failed),
+        ]:
+            value = str(session.get(field, "") or "")
+            line.blockSignals(True)
+            line.setText(value)
+            line.blockSignals(False)
+
+        self.te_session_notes.blockSignals(True)
+        self.te_session_notes.setPlainText(session.get("notes", ""))
+        self.te_session_notes.blockSignals(False)
+
+        self.chk_session_auto_chrome.blockSignals(True)
+        self.chk_session_auto_chrome.setChecked(bool(session.get("auto_launch_chrome")))
+        self.chk_session_auto_chrome.blockSignals(False)
+
+        mode = session.get("auto_launch_autogen", "idle")
+        idx = self.cmb_session_autogen_mode.findData(mode)
+        self.cmb_session_autogen_mode.blockSignals(True)
+        if idx >= 0:
+            self.cmb_session_autogen_mode.setCurrentIndex(idx)
+        else:
+            self.cmb_session_autogen_mode.setCurrentIndex(0)
+        self.cmb_session_autogen_mode.blockSignals(False)
+
+        state = self._ensure_session_state(session_id)
+        self.te_session_log.blockSignals(True)
+        self.te_session_log.clear()
+        for line in state.get("log", []):
+            self.te_session_log.appendPlainText(line)
+        self.te_session_log.blockSignals(False)
+        self._update_session_status_panel(session_id)
+
+    def _update_session_status_panel(self, session_id: str):
+        state = self._ensure_session_state(session_id)
+        status = state.get("status", "idle")
+        message = state.get("last_message", "")
+        icon = self._session_status_icon(status)
+        if message:
+            self.lbl_session_status.setText(f"{icon} {message}")
+        else:
+            self.lbl_session_status.setText(f"{icon} Статус: {status}")
+
+    def _on_session_selection_changed(self):
+        item = self.lst_sessions.currentItem() if hasattr(self, "lst_sessions") else None
+        if not item:
+            self._current_session_id = ""
+            self._clear_session_editor()
+            return
+        session_id = item.data(QtCore.Qt.ItemDataRole.UserRole)
+        if not session_id:
+            self._current_session_id = ""
+            self._clear_session_editor()
+            return
+        self._current_session_id = session_id
+        self._load_session_into_editor(session_id)
+
+    def _create_session(self, name: Optional[str] = None) -> Dict[str, Any]:
+        session_id = uuid.uuid4().hex[:8]
+        session = {
+            "id": session_id,
+            "name": name or f"Сессия {len(self._session_order) + 1}",
+            "prompt_profile": PROMPTS_DEFAULT_KEY,
+            "chrome_profile": "",
+            "cdp_port": None,
+            "prompts_file": "",
+            "image_prompts_file": "",
+            "submitted_log": "",
+            "failed_log": "",
+            "notes": "",
+            "auto_launch_chrome": False,
+            "auto_launch_autogen": "idle",
+        }
+        self._session_cache[session_id] = session
+        self._session_order.append(session_id)
+        self._ensure_session_state(session_id)
+        return session
+
+    def _on_session_add(self):
+        session = self._create_session()
+        self._persist_sessions()
+        self._refresh_sessions_list()
+        self._select_session(session["id"])
+
+    def _select_session(self, session_id: str):
+        if not hasattr(self, "lst_sessions"):
+            return
+        for row in range(self.lst_sessions.count()):
+            item = self.lst_sessions.item(row)
+            if item.data(QtCore.Qt.ItemDataRole.UserRole) == session_id:
+                self.lst_sessions.setCurrentRow(row)
+                break
+
+    def _on_session_duplicate(self):
+        current = getattr(self, "_current_session_id", "")
+        if not current or current not in self._session_cache:
+            return
+        base = dict(self._session_cache[current])
+        session = self._create_session(name=f"{base.get('name', 'Сессия')} (копия)")
+        for key in (
+            "prompt_profile",
+            "chrome_profile",
+            "cdp_port",
+            "prompts_file",
+            "image_prompts_file",
+            "submitted_log",
+            "failed_log",
+            "notes",
+            "auto_launch_chrome",
+            "auto_launch_autogen",
+        ):
+            session[key] = base.get(key)
+        self._persist_sessions()
+        self._refresh_sessions_list()
+        self._select_session(session["id"])
+
+    def _on_session_remove(self):
+        current = getattr(self, "_current_session_id", "")
+        if not current:
+            return
+        if len(self._session_order) <= 1:
+            QtWidgets.QMessageBox.information(self, "Рабочие пространства", "Нельзя удалить последнюю сессию.")
+            return
+        if QtWidgets.QMessageBox.question(
+            self,
+            "Удалить сессию",
+            "Удалить выбранную сессию?",
+        ) != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        self._session_order = [sid for sid in self._session_order if sid != current]
+        self._session_cache.pop(current, None)
+        self._session_state.pop(current, None)
+        window = self._session_windows.pop(current, None)
+        if window:
+            window.close()
+        self._persist_sessions()
+        self._refresh_sessions_list()
+        if self._session_order:
+            self._select_session(self._session_order[0])
+        else:
+            self._clear_session_editor()
+
+    def _on_session_launch_chrome(self):
+        session_id = getattr(self, "_current_session_id", "")
+        if session_id:
+            self._launch_session_chrome(session_id)
+
+    def _on_session_run_prompts(self):
+        session_id = getattr(self, "_current_session_id", "")
+        if session_id:
+            self._run_session_autogen(session_id)
+
+    def _on_session_run_images(self):
+        session_id = getattr(self, "_current_session_id", "")
+        if session_id:
+            self._run_session_images(session_id)
+
+    def _on_session_stop(self):
+        session_id = getattr(self, "_current_session_id", "")
+        if session_id:
+            self._stop_session_runner(session_id)
+
+    def _on_session_open_window(self):
+        session_id = getattr(self, "_current_session_id", "")
+        if not session_id:
+            return
+        window = self._session_windows.get(session_id)
+        if window is None:
+            window = SessionWorkspaceWindow(self, session_id)
+            self._session_windows[session_id] = window
+        window.update_session(self._session_cache.get(session_id, {}))
+        state = self._ensure_session_state(session_id)
+        window.set_log(state.get("log", []))
+        window.update_status(state.get("status", "idle"), state.get("last_message", ""), state.get("last_rc"))
+        window.show()
+        window.raise_()
+        window.activateWindow()
+
+    def _on_session_name_changed(self, text: str):
+        session_id = getattr(self, "_current_session_id", "")
+        if not session_id or session_id not in self._session_cache:
+            return
+        self._session_cache[session_id]["name"] = text.strip()
+        self._persist_sessions()
+        self._refresh_sessions_list()
+        window = self._session_windows.get(session_id)
+        if window:
+            window.update_session(self._session_cache[session_id])
+
+    def _on_session_prompt_profile_changed(self):
+        session_id = getattr(self, "_current_session_id", "")
+        if not session_id or session_id not in self._session_cache:
+            return
+        key = self.cmb_session_prompt_profile.currentData()
+        self._session_cache[session_id]["prompt_profile"] = key or PROMPTS_DEFAULT_KEY
+        self._persist_sessions()
+        self._update_session_status_panel(session_id)
+
+    def _on_session_chrome_profile_changed(self):
+        session_id = getattr(self, "_current_session_id", "")
+        if not session_id or session_id not in self._session_cache:
+            return
+        key = self.cmb_session_chrome_profile.currentData()
+        self._session_cache[session_id]["chrome_profile"] = key or ""
+        self._persist_sessions()
+
+    def _on_session_port_changed(self, value: int):
+        session_id = getattr(self, "_current_session_id", "")
+        if not session_id or session_id not in self._session_cache:
+            return
+        self._session_cache[session_id]["cdp_port"] = int(value) if int(value) > 0 else None
+        self._persist_sessions()
+
+    def _on_session_path_changed(self, key: str, line: QtWidgets.QLineEdit):
+        session_id = getattr(self, "_current_session_id", "")
+        if not session_id or session_id not in self._session_cache:
+            return
+        self._session_cache[session_id][key] = line.text().strip()
+        self._persist_sessions()
+
+    def _on_session_notes_changed(self):
+        session_id = getattr(self, "_current_session_id", "")
+        if not session_id or session_id not in self._session_cache:
+            return
+        self._session_cache[session_id]["notes"] = self.te_session_notes.toPlainText().strip()
+        self._persist_sessions()
+
+    def _on_session_auto_chrome_changed(self, checked: bool):
+        session_id = getattr(self, "_current_session_id", "")
+        if not session_id or session_id not in self._session_cache:
+            return
+        self._session_cache[session_id]["auto_launch_chrome"] = bool(checked)
+        self._persist_sessions()
+
+    def _on_session_autogen_mode_changed(self):
+        session_id = getattr(self, "_current_session_id", "")
+        if not session_id or session_id not in self._session_cache:
+            return
+        mode = self.cmb_session_autogen_mode.currentData() or "idle"
+        self._session_cache[session_id]["auto_launch_autogen"] = mode
+        self._persist_sessions()
+
+    def _ensure_session_runner(self, session_id: str) -> ProcRunner:
+        runner = self._session_runners.get(session_id)
+        if runner:
+            return runner
+        tag = f"SESSION-{session_id}"
+        runner = ProcRunner(tag, self)
+        runner.line.connect(lambda text, sid=session_id: self._on_session_runner_line(sid, text))
+        runner.finished.connect(lambda rc, _tag, sid=session_id: self._on_session_runner_finished(sid, rc))
+        runner.notify.connect(lambda title, message, sid=session_id: self._on_session_runner_notify(sid, title, message))
+        self._session_runners[session_id] = runner
+        return runner
+
+    def _on_session_runner_line(self, session_id: str, text: str):
+        clean = text.rstrip("\n")
+        self._append_session_log(session_id, clean)
+        self.sig_log.emit(clean)
+
+    def _on_session_runner_notify(self, session_id: str, title: str, message: str):
+        session = self._session_cache.get(session_id) or {"name": session_id}
+        label = session.get("name") or session_id
+        self._notify(f"{title} — {label}", message)
+
+    def _on_session_runner_finished(self, session_id: str, rc: int):
+        session = self._session_cache.get(session_id)
+        label = session.get("name") if session else session_id
+        status = "ok" if rc == 0 else "error"
+        message = "Завершено успешно" if rc == 0 else "Завершено с ошибкой"
+        self._append_activity(f"Сессия {label}: {message} (rc={rc})", kind="success" if rc == 0 else "error", card_text=False)
+        self._set_session_status(session_id, status, message, rc)
+
+    def _stop_session_runner(self, session_id: str):
+        runner = self._session_runners.get(session_id)
+        if not runner:
+            return
+        runner.stop()
+        self._set_session_status(session_id, "idle", "Остановлено пользователем")
+
+    def _run_session_autogen(self, session_id: str, *, force_images: Optional[bool] = None, images_only: bool = False):
+        session = self._session_cache.get(session_id)
+        if not session:
+            return
+        runner = self._ensure_session_runner(session_id)
+        if runner.proc and runner.proc.poll() is None:
+            self._append_session_log(session_id, "[!] Уже выполняется задача")
+            return
+        workdir = self.cfg.get("autogen", {}).get("workdir", str(WORKERS_DIR / "autogen"))
+        entry = self.cfg.get("autogen", {}).get("entry", "main.py")
+        env = self._session_env(session_id, force_images=force_images, images_only=images_only)
+        mode = "images" if images_only else ("images+prompts" if force_images else "prompts")
+        label = session.get("name") or session_id
+        self._append_activity(f"Сессия {label}: запуск autogen ({mode})", kind="running", card_text=False)
+        self._append_session_log(session_id, f"[SESSION] Запуск autogen ({mode})")
+        self._set_session_status(session_id, "running", "Выполняется autogen")
+        runner.run([sys.executable, entry], cwd=workdir, env=env)
+
+    def _run_session_images(self, session_id: str):
+        self._run_session_autogen(session_id, force_images=True, images_only=True)
+
+    def _launch_session_chrome(self, session_id: str):
+        session = self._session_cache.get(session_id)
+        if not session:
+            return
+        self._open_chrome(session=session)
+
+    def _apply_session_autolaunches(self):
+        for session_id in self._session_order:
+            session = self._session_cache.get(session_id)
+            if not session:
+                continue
+            if session.get("auto_launch_chrome"):
+                QtCore.QTimer.singleShot(0, lambda sid=session_id: self._launch_session_chrome(sid))
+            mode = session.get("auto_launch_autogen", "idle")
+            if mode == "prompts":
+                QtCore.QTimer.singleShot(0, lambda sid=session_id: self._run_session_autogen(sid))
+            elif mode == "images":
+                QtCore.QTimer.singleShot(0, lambda sid=session_id: self._run_session_images(sid))
 
     def _refresh_update_buttons(self):
         available = bool(shutil.which("git")) and (PROJECT_ROOT / ".git").exists()
@@ -1369,6 +2052,9 @@ class MainWindow(QtWidgets.QMainWindow):
             layout.setSpacing(spacing)
             area.setWidget(body)
             return area, layout
+
+        self.tab_sessions = self._build_sessions_tab()
+        self.tabs.insertTab(0, self.tab_sessions, "Рабочие пространства")
 
         self.tab_tasks, lt = make_scroll_tab(margins=(0, 0, 0, 0))
         tasks_intro = QtWidgets.QLabel(
@@ -3352,6 +4038,237 @@ class MainWindow(QtWidgets.QMainWindow):
             self._append_activity("README.md не найден", kind="error")
         self._readme_loaded = True
 
+    def _build_sessions_tab(self) -> QtWidgets.QWidget:
+        tab = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(tab)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
+
+        header = QtWidgets.QLabel(
+            "Создавай отдельные рабочие пространства для параллельных окон Chrome: каждое хранит свои промпты, логи и порт."
+        )
+        header.setWordWrap(True)
+        header.setStyleSheet("QLabel{color:#94a3b8;font-size:12px;}")
+        layout.addWidget(header)
+
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+        layout.addWidget(splitter, 1)
+
+        left_panel = QtWidgets.QWidget()
+        left_layout = QtWidgets.QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(6)
+
+        self.lst_sessions = QtWidgets.QListWidget()
+        self.lst_sessions.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        self.lst_sessions.setAlternatingRowColors(True)
+        self.lst_sessions.setUniformItemSizes(True)
+        self.lst_sessions.setStyleSheet("QListWidget{border-radius:10px;border:1px solid #22314d;padding:6px;}")
+        left_layout.addWidget(self.lst_sessions, 1)
+
+        controls_row = QtWidgets.QHBoxLayout()
+        self.btn_session_add = QtWidgets.QPushButton("Добавить")
+        self.btn_session_duplicate = QtWidgets.QPushButton("Дублировать")
+        self.btn_session_remove = QtWidgets.QPushButton("Удалить")
+        for button in (self.btn_session_add, self.btn_session_duplicate, self.btn_session_remove):
+            button.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+            controls_row.addWidget(button)
+        left_layout.addLayout(controls_row)
+
+        splitter.addWidget(left_panel)
+
+        detail_area = QtWidgets.QScrollArea()
+        detail_area.setWidgetResizable(True)
+        detail_area.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        splitter.addWidget(detail_area)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 2)
+
+        detail_widget = QtWidgets.QWidget()
+        detail_area.setWidget(detail_widget)
+        detail_layout = QtWidgets.QVBoxLayout(detail_widget)
+        detail_layout.setContentsMargins(0, 0, 0, 0)
+        detail_layout.setSpacing(10)
+
+        form = QtWidgets.QFormLayout()
+        form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(10)
+
+        self.ed_session_name = QtWidgets.QLineEdit()
+        self.ed_session_name.setPlaceholderText("Например: Профиль #1")
+        form.addRow("Название:", self.ed_session_name)
+
+        self.cmb_session_prompt_profile = QtWidgets.QComboBox()
+        self.cmb_session_prompt_profile.setEditable(False)
+        form.addRow("Промпты:", self.cmb_session_prompt_profile)
+
+        self.cmb_session_chrome_profile = QtWidgets.QComboBox()
+        self.cmb_session_chrome_profile.setEditable(False)
+        form.addRow("Профиль Chrome:", self.cmb_session_chrome_profile)
+
+        self.sb_session_port = QtWidgets.QSpinBox()
+        self.sb_session_port.setRange(0, 65535)
+        self.sb_session_port.setSpecialValueText("Авто")
+        self.sb_session_port.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft)
+        form.addRow("CDP порт:", self.sb_session_port)
+
+        def make_path_field() -> Tuple[QtWidgets.QLineEdit, QtWidgets.QToolButton, QtWidgets.QWidget]:
+            container = QtWidgets.QWidget()
+            hl = QtWidgets.QHBoxLayout(container)
+            hl.setContentsMargins(0, 0, 0, 0)
+            hl.setSpacing(6)
+            line = QtWidgets.QLineEdit()
+            line.setClearButtonEnabled(True)
+            btn = QtWidgets.QToolButton()
+            btn.setText("…")
+            btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+            hl.addWidget(line, 1)
+            hl.addWidget(btn, 0)
+            return line, btn, container
+
+        self.ed_session_prompts, self.btn_session_prompts_browse, prompts_widget = make_path_field()
+        self.ed_session_prompts.setPlaceholderText("По умолчанию берётся из профиля")
+        form.addRow("Файл промптов:", prompts_widget)
+
+        self.ed_session_image_prompts, self.btn_session_image_prompts_browse, img_widget = make_path_field()
+        self.ed_session_image_prompts.setPlaceholderText("Наследуется из общих настроек")
+        form.addRow("Image-промпты:", img_widget)
+
+        self.ed_session_submitted, self.btn_session_submitted_browse, submitted_widget = make_path_field()
+        form.addRow("submitted.log:", submitted_widget)
+
+        self.ed_session_failed, self.btn_session_failed_browse, failed_widget = make_path_field()
+        form.addRow("failed.log:", failed_widget)
+
+        detail_layout.addLayout(form)
+
+        self.chk_session_auto_chrome = QtWidgets.QCheckBox("Автоматически запускать Chrome при старте")
+        detail_layout.addWidget(self.chk_session_auto_chrome)
+
+        auto_row = QtWidgets.QHBoxLayout()
+        auto_row.setSpacing(10)
+        lbl_auto = QtWidgets.QLabel("Автозапуск автогена:")
+        self.cmb_session_autogen_mode = QtWidgets.QComboBox()
+        self.cmb_session_autogen_mode.addItem("Не запускать", "idle")
+        self.cmb_session_autogen_mode.addItem("Вставка промптов", "prompts")
+        self.cmb_session_autogen_mode.addItem("Только картинки", "images")
+        auto_row.addWidget(lbl_auto)
+        auto_row.addWidget(self.cmb_session_autogen_mode, 1)
+        detail_layout.addLayout(auto_row)
+
+        self.te_session_notes = QtWidgets.QPlainTextEdit()
+        self.te_session_notes.setPlaceholderText("Свободные заметки, чтобы не перепутать сессию…")
+        self.te_session_notes.setMaximumBlockCount(400)
+        detail_layout.addWidget(self.te_session_notes)
+
+        status_row = QtWidgets.QHBoxLayout()
+        status_row.setSpacing(12)
+        self.lbl_session_status = QtWidgets.QLabel("Выбери сессию слева, чтобы увидеть детали")
+        self.lbl_session_status.setObjectName("sessionStatusLabel")
+        status_row.addWidget(self.lbl_session_status, 1)
+        self.btn_session_open_window = QtWidgets.QPushButton("Отдельное окно")
+        self.btn_session_open_window.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        status_row.addWidget(self.btn_session_open_window)
+        detail_layout.addLayout(status_row)
+
+        actions_row = QtWidgets.QHBoxLayout()
+        actions_row.setSpacing(10)
+        self.btn_session_launch_chrome = QtWidgets.QPushButton("Запустить Chrome")
+        self.btn_session_run_prompts = QtWidgets.QPushButton("Autogen промптов")
+        self.btn_session_run_images = QtWidgets.QPushButton("Только картинки")
+        self.btn_session_stop_runner = QtWidgets.QPushButton("Остановить")
+        for btn in (
+            self.btn_session_launch_chrome,
+            self.btn_session_run_prompts,
+            self.btn_session_run_images,
+            self.btn_session_stop_runner,
+        ):
+            btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+            actions_row.addWidget(btn)
+        detail_layout.addLayout(actions_row)
+
+        self.te_session_log = QtWidgets.QPlainTextEdit()
+        self.te_session_log.setReadOnly(True)
+        self.te_session_log.setMaximumBlockCount(500)
+        self.te_session_log.setPlaceholderText("Лог сессии появится здесь…")
+        detail_layout.addWidget(self.te_session_log, 1)
+
+        self._session_detail_widgets = [
+            self.ed_session_name,
+            self.cmb_session_prompt_profile,
+            self.cmb_session_chrome_profile,
+            self.sb_session_port,
+            self.ed_session_prompts,
+            self.btn_session_prompts_browse,
+            self.ed_session_image_prompts,
+            self.btn_session_image_prompts_browse,
+            self.ed_session_submitted,
+            self.btn_session_submitted_browse,
+            self.ed_session_failed,
+            self.btn_session_failed_browse,
+            self.chk_session_auto_chrome,
+            self.cmb_session_autogen_mode,
+            self.te_session_notes,
+            self.btn_session_open_window,
+            self.btn_session_launch_chrome,
+            self.btn_session_run_prompts,
+            self.btn_session_run_images,
+            self.btn_session_stop_runner,
+            self.te_session_log,
+        ]
+
+        self.lst_sessions.itemSelectionChanged.connect(self._on_session_selection_changed)
+        self.btn_session_add.clicked.connect(self._on_session_add)
+        self.btn_session_duplicate.clicked.connect(self._on_session_duplicate)
+        self.btn_session_remove.clicked.connect(self._on_session_remove)
+        self.btn_session_prompts_browse.clicked.connect(lambda: self._browse_file(self.ed_session_prompts, "Выбери файл промптов"))
+        self.btn_session_image_prompts_browse.clicked.connect(
+            lambda: self._browse_file(self.ed_session_image_prompts, "Выбери файл image-промптов")
+        )
+        self.btn_session_submitted_browse.clicked.connect(
+            lambda: self._browse_file(
+                self.ed_session_submitted,
+                "Выбери файл submitted.log",
+                "Логи (*.log *.txt);;Все файлы (*.*)",
+            )
+        )
+        self.btn_session_failed_browse.clicked.connect(
+            lambda: self._browse_file(
+                self.ed_session_failed,
+                "Выбери файл failed.log",
+                "Логи (*.log *.txt);;Все файлы (*.*)",
+            )
+        )
+        self.btn_session_launch_chrome.clicked.connect(self._on_session_launch_chrome)
+        self.btn_session_run_prompts.clicked.connect(self._on_session_run_prompts)
+        self.btn_session_run_images.clicked.connect(self._on_session_run_images)
+        self.btn_session_stop_runner.clicked.connect(self._on_session_stop)
+        self.btn_session_open_window.clicked.connect(self._on_session_open_window)
+        self.ed_session_name.textEdited.connect(self._on_session_name_changed)
+        self.cmb_session_prompt_profile.currentIndexChanged.connect(self._on_session_prompt_profile_changed)
+        self.cmb_session_chrome_profile.currentIndexChanged.connect(self._on_session_chrome_profile_changed)
+        self.sb_session_port.valueChanged.connect(self._on_session_port_changed)
+        self.ed_session_prompts.textEdited.connect(lambda: self._on_session_path_changed("prompts_file", self.ed_session_prompts))
+        self.ed_session_image_prompts.textEdited.connect(
+            lambda: self._on_session_path_changed("image_prompts_file", self.ed_session_image_prompts)
+        )
+        self.ed_session_submitted.textEdited.connect(
+            lambda: self._on_session_path_changed("submitted_log", self.ed_session_submitted)
+        )
+        self.ed_session_failed.textEdited.connect(
+            lambda: self._on_session_path_changed("failed_log", self.ed_session_failed)
+        )
+        self.te_session_notes.textChanged.connect(self._on_session_notes_changed)
+        self.chk_session_auto_chrome.toggled.connect(self._on_session_auto_chrome_changed)
+        self.cmb_session_autogen_mode.currentIndexChanged.connect(self._on_session_autogen_mode_changed)
+
+        self._refresh_sessions_choices()
+        self._refresh_sessions_list()
+        self._on_session_selection_changed()
+
+        return tab
+
     def _wire(self):
         # статусы/лог — безопасные слоты GUI-потока
         self.sig_set_status.connect(self._slot_set_status)
@@ -4095,12 +5012,20 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._scenario_waiters[tag].set()
 
     # ----- Chrome (через тень профиля) -----
-    def _open_chrome(self):
+    def _open_chrome(self, *, session: Optional[Dict[str, Any]] = None):
         ch = self.cfg.get("chrome", {})
-        try:
-            port = int(self._resolve_chrome_port(ch.get("active_profile", "")))
-        except Exception:
-            port = 9222
+        if session:
+            try:
+                port = int(self._session_chrome_port(session))
+            except Exception:
+                port = 9222
+            override_profile = session.get("chrome_profile") or session.get("prompt_profile") or ""
+        else:
+            override_profile = None
+            try:
+                port = int(self._resolve_chrome_port(ch.get("active_profile", "")))
+            except Exception:
+                port = 9222
         if sys.platform == "darwin":
             default_chrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
         elif sys.platform.startswith("win"):
@@ -4109,7 +5034,7 @@ class MainWindow(QtWidgets.QMainWindow):
             default_chrome = "google-chrome"
         chrome_bin = os.path.expandvars(ch.get("binary") or default_chrome)
         profiles = ch.get("profiles", [])
-        active_name = ch.get("active_profile", "")
+        active_name = override_profile if session else ch.get("active_profile", "")
         fallback_userdir = os.path.expandvars(ch.get("user_data_dir", "") or "")
 
         # уже поднят CDP?
@@ -4119,7 +5044,18 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # активный профиль
         active = None
-        if active_name:
+        if session and active_name:
+            for p in profiles:
+                if p.get("name") == active_name:
+                    active = p
+                    break
+            if not active:
+                # если имя указано напрямую, пробуем искать по директории профиля
+                for p in profiles:
+                    if p.get("profile_directory") == active_name:
+                        active = p
+                        break
+        elif active_name:
             for p in profiles:
                 if p.get("name") == active_name:
                     active = p
@@ -4167,8 +5103,18 @@ class MainWindow(QtWidgets.QMainWindow):
             t0 = time.time()
             while time.time() - t0 < 10:
                 if cdp_ready(port):
-                    self._post_status(f"Chrome c CDP {port} (профиль: {active_name or 'shadow'})", state="ok")
-                    append_history(self.cfg, {"event": "chrome_launch", "port": port, "profile": active_name, "shadow": str(shadow_root)})
+                    profile_label = active_name or (session.get("name") if session else "shadow")
+                    self._post_status(f"Chrome c CDP {port} (профиль: {profile_label})", state="ok")
+                    append_history(
+                        self.cfg,
+                        {
+                            "event": "chrome_launch",
+                            "port": port,
+                            "profile": active_name,
+                            "session": session.get("id") if session else None,
+                            "shadow": str(shadow_root),
+                        },
+                    )
                     return
                 time.sleep(0.25)
 
@@ -4188,6 +5134,73 @@ class MainWindow(QtWidgets.QMainWindow):
         auto_cfg = self.cfg.get("autogen", {}) or {}
         raw = auto_cfg.get("image_prompts_file") or str(WORKERS_DIR / "autogen" / "image_prompts.txt")
         return _project_path(raw)
+
+    def _session_prompts_path(self, session: Dict[str, Any]) -> Path:
+        custom = session.get("prompts_file")
+        if custom:
+            return _project_path(custom)
+        profile_key = session.get("prompt_profile") or PROMPTS_DEFAULT_KEY
+        return self._prompts_path(profile_key)
+
+    def _session_image_prompts_path(self, session: Dict[str, Any]) -> Path:
+        custom = session.get("image_prompts_file")
+        if custom:
+            return _project_path(custom)
+        return self._image_prompts_path()
+
+    def _session_submitted_log_path(self, session: Dict[str, Any]) -> Path:
+        custom = session.get("submitted_log")
+        if custom:
+            return _project_path(custom)
+        profile_key = session.get("prompt_profile") or PROMPTS_DEFAULT_KEY
+        return self._profile_submitted_log_path(profile_key)
+
+    def _session_failed_log_path(self, session: Dict[str, Any]) -> Path:
+        custom = session.get("failed_log")
+        if custom:
+            return _project_path(custom)
+        profile_key = session.get("prompt_profile") or PROMPTS_DEFAULT_KEY
+        return self._profile_failed_log_path(profile_key)
+
+    def _session_chrome_port(self, session: Dict[str, Any]) -> int:
+        port = _coerce_int(session.get("cdp_port"))
+        profile_key = session.get("prompt_profile") or PROMPTS_DEFAULT_KEY
+        if port and port > 0:
+            return port
+        return self._resolve_chrome_port(profile_key)
+
+    def _session_instance_label(self, session: Dict[str, Any]) -> str:
+        name = str(session.get("name") or "").strip()
+        if name:
+            return name
+        profile_key = session.get("prompt_profile") or PROMPTS_DEFAULT_KEY
+        return self._prompt_profile_label(profile_key)
+
+    def _session_env(self, session_id: str, *, force_images: Optional[bool] = None, images_only: bool = False) -> dict:
+        session = self._session_cache.get(session_id)
+        if not session:
+            return self._autogen_env(force_images=force_images, images_only=images_only)
+
+        profile_key = session.get("prompt_profile") or PROMPTS_DEFAULT_KEY
+        prompts_path = self._session_prompts_path(session)
+        submitted_log = self._session_submitted_log_path(session)
+        failed_log = self._session_failed_log_path(session)
+        image_prompts = self._session_image_prompts_path(session)
+        port = self._session_chrome_port(session)
+        label = self._session_instance_label(session)
+        env = self._autogen_env(
+            force_images=force_images,
+            images_only=images_only,
+            profile_key=profile_key,
+            prompts_path=prompts_path,
+            chrome_port=port,
+            submitted_log=submitted_log,
+            failed_log=failed_log,
+            image_prompts_path=image_prompts,
+            instance_name=label,
+        )
+        env["SORA_SESSION_ID"] = session_id
+        return env
 
     def _chrome_profile_by_name(self, name: Optional[str]) -> Optional[Dict[str, Any]]:
         if not name:
@@ -4275,23 +5288,37 @@ class MainWindow(QtWidgets.QMainWindow):
         if path:
             open_in_finder(path)
 
-    def _autogen_env(self, force_images: Optional[bool] = None, *, images_only: bool = False) -> dict:
+    def _autogen_env(
+        self,
+        force_images: Optional[bool] = None,
+        *,
+        images_only: bool = False,
+        profile_key: Optional[str] = None,
+        prompts_path: Optional[Union[str, Path]] = None,
+        chrome_port: Optional[int] = None,
+        submitted_log: Optional[Union[str, Path]] = None,
+        failed_log: Optional[Union[str, Path]] = None,
+        image_prompts_path: Optional[Union[str, Path]] = None,
+        instance_name: Optional[str] = None,
+    ) -> dict:
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
-        env["SORA_PROMPTS_FILE"] = str(self._prompts_path())
-        profile_key = getattr(self, "_current_prompt_profile_key", PROMPTS_DEFAULT_KEY) or PROMPTS_DEFAULT_KEY
-        instance_label = self._prompt_profile_label(profile_key)
+        if profile_key is None:
+            profile_key = getattr(self, "_current_prompt_profile_key", PROMPTS_DEFAULT_KEY) or PROMPTS_DEFAULT_KEY
+        prompts_file = prompts_path or self._prompts_path(profile_key)
+        env["SORA_PROMPTS_FILE"] = str(_project_path(prompts_file))
+        instance_label = instance_name or self._prompt_profile_label(profile_key)
         env["SORA_INSTANCE_NAME"] = instance_label
-        submitted_log = self._profile_submitted_log_path(profile_key)
-        failed_log = self._profile_failed_log_path(profile_key)
+        submitted_path = submitted_log or self._profile_submitted_log_path(profile_key)
+        failed_path = failed_log or self._profile_failed_log_path(profile_key)
         try:
-            submitted_log.parent.mkdir(parents=True, exist_ok=True)
-            failed_log.parent.mkdir(parents=True, exist_ok=True)
+            Path(submitted_path).parent.mkdir(parents=True, exist_ok=True)
+            Path(failed_path).parent.mkdir(parents=True, exist_ok=True)
         except Exception:
             pass
-        env["SORA_SUBMITTED_LOG"] = str(submitted_log)
-        env["SORA_FAILED_LOG"] = str(failed_log)
-        port = self._resolve_chrome_port(profile_key)
+        env["SORA_SUBMITTED_LOG"] = str(_project_path(submitted_path))
+        env["SORA_FAILED_LOG"] = str(_project_path(failed_path))
+        port = chrome_port or self._resolve_chrome_port(profile_key)
         env["SORA_CDP_ENDPOINT"] = f"http://127.0.0.1:{int(port)}"
         genai_cfg = self.cfg.get("google_genai", {}) or {}
         genai_enabled = bool(genai_cfg.get("enabled"))
@@ -4313,8 +5340,9 @@ class MainWindow(QtWidgets.QMainWindow):
         env["GENAI_MAX_RETRIES"] = str(int(genai_cfg.get("max_retries", 3) or 0))
         env["GENAI_OUTPUT_DIR"] = str(_project_path(genai_cfg.get("output_dir", str(IMAGES_DIR))))
         env["GENAI_BASE_DIR"] = str(_project_path(self.cfg.get("project_root", PROJECT_ROOT)))
-        env["GENAI_PROMPTS_DIR"] = str(self._prompts_path().parent.resolve())
-        env["GENAI_IMAGE_PROMPTS_FILE"] = str(self._image_prompts_path())
+        env["GENAI_PROMPTS_DIR"] = str(Path(env["SORA_PROMPTS_FILE"]).parent.resolve())
+        image_prompts = image_prompts_path or self._image_prompts_path()
+        env["GENAI_IMAGE_PROMPTS_FILE"] = str(_project_path(image_prompts))
         env["GENAI_ATTACH_TO_SORA"] = "1" if bool(genai_cfg.get("attach_to_sora", True)) else "0"
         manifest_raw = genai_cfg.get("manifest_file") or (Path(genai_cfg.get("output_dir", str(IMAGES_DIR))) / "manifest.json")
         env["GENAI_MANIFEST_FILE"] = str(_project_path(manifest_raw))
@@ -6125,6 +7153,8 @@ class MainWindow(QtWidgets.QMainWindow):
         retention["blurred"] = int(self.sb_maint_blurred.value())
         retention["merged"] = int(self.sb_maint_merged.value())
 
+        self.cfg.setdefault("autogen", {})["sessions"] = self._session_config_snapshot()
+
         save_cfg(self.cfg)
         ensure_dirs(self.cfg)
         self._refresh_path_fields()
@@ -6568,6 +7598,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.lst_prompt_profiles.blockSignals(False)
 
         self._set_active_prompt_profile(target_key, persist=False, reload=True)
+        self._refresh_sessions_choices()
 
     def _on_prompt_profile_selection(self):
         if not hasattr(self, "lst_prompt_profiles"):
