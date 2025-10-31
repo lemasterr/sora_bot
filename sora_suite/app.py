@@ -23,7 +23,7 @@ from pathlib import Path
 from functools import partial
 from urllib.request import urlopen, Request
 from collections import deque
-from typing import Optional, List, Union, Tuple, Dict, Callable, Any
+from typing import Optional, List, Union, Tuple, Dict, Callable, Any, Set
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 
@@ -284,6 +284,14 @@ def load_cfg() -> dict:
     else:
         ch["binary"] = os.path.expandvars(ch["binary"])  # поддержка Windows %LOCALAPPDATA%
     ch.setdefault("profiles", [])
+    for prof in ch.get("profiles", []) or []:
+        if not isinstance(prof, dict):
+            continue
+        port = _coerce_int(prof.get("cdp_port"))
+        if port and port > 0:
+            prof["cdp_port"] = int(port)
+        else:
+            prof.pop("cdp_port", None)
     ch.setdefault("active_profile", "")
 
     # Fallback: если профилей нет, но задан старый user_data_dir — поднимем Imported
@@ -2386,11 +2394,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ed_prof_name = QtWidgets.QLineEdit()
         self.ed_prof_userdir = QtWidgets.QLineEdit()
         self.ed_prof_directory = QtWidgets.QLineEdit()
+        self.sb_prof_port = QtWidgets.QSpinBox()
+        self.sb_prof_port.setRange(0, 65535)
+        self.sb_prof_port.setSpecialValueText("По умолчанию")
+        self.sb_prof_port.setToolTip("0 — использовать общий порт CDP из настроек Chrome")
         self.ed_prof_root = self.ed_prof_userdir
         self.ed_prof_dir = self.ed_prof_directory
         form.addRow("Название:", self.ed_prof_name)
         form.addRow("user_data_dir:", self.ed_prof_userdir)
         form.addRow("profile_directory:", self.ed_prof_directory)
+        form.addRow("CDP порт:", self.sb_prof_port)
         btns = QtWidgets.QHBoxLayout()
         self.btn_prof_add = QtWidgets.QPushButton("Добавить/обновить")
         self.btn_prof_del = QtWidgets.QPushButton("Удалить")
@@ -3679,7 +3692,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _gather_used_prompts(self) -> List[Tuple[str, str, str]]:
         rows: List[Tuple[str, str, str]] = []
-        seen: set[Path] = set()
+        seen: Set[Path] = set()
 
         def collect(path_str: Optional[str], instance_name: str):
             if not path_str:
@@ -3698,9 +3711,22 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._append_activity(f"Не удалось прочитать {path}: {exc}", kind="error", card_text=False)
 
         auto_cfg = self.cfg.get("autogen", {}) or {}
-        collect(auto_cfg.get("submitted_log"), "Основной")
         for inst in auto_cfg.get("instances", []) or []:
             collect(inst.get("submitted_log"), inst.get("name") or "Instance")
+
+        profile_keys: List[str] = [PROMPTS_DEFAULT_KEY]
+        chrome_profiles = self.cfg.get("chrome", {}).get("profiles", []) or []
+        for prof in chrome_profiles:
+            if not isinstance(prof, dict):
+                continue
+            name = prof.get("name")
+            if name:
+                profile_keys.append(name)
+
+        for key in profile_keys:
+            label = self._prompt_profile_label(key)
+            log_path = self._profile_submitted_log_path(key)
+            collect(str(log_path), label)
 
         def _sort_key(row: Tuple[str, str, str]):
             ts, _, prompt = row
@@ -3731,13 +3757,23 @@ class MainWindow(QtWidgets.QMainWindow):
     def _clear_used_prompts(self):
         if not hasattr(self, "tbl_used_prompts"):
             return
-        paths = set()
+        paths: Set[Path] = set()
         auto_cfg = self.cfg.get("autogen", {}) or {}
-        if auto_cfg.get("submitted_log"):
-            paths.add(_project_path(auto_cfg.get("submitted_log")))
         for inst in auto_cfg.get("instances", []) or []:
             if inst.get("submitted_log"):
                 paths.add(_project_path(inst.get("submitted_log")))
+
+        profile_keys: List[str] = [PROMPTS_DEFAULT_KEY]
+        chrome_profiles = self.cfg.get("chrome", {}).get("profiles", []) or []
+        for prof in chrome_profiles:
+            if not isinstance(prof, dict):
+                continue
+            name = prof.get("name")
+            if name:
+                profile_keys.append(name)
+
+        for key in profile_keys:
+            paths.add(self._profile_submitted_log_path(key))
         if not paths:
             self._post_status("Журналов нет", state="idle")
             return
@@ -4060,12 +4096,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ----- Chrome (через тень профиля) -----
     def _open_chrome(self):
+        ch = self.cfg.get("chrome", {})
         try:
-            port = int(self.cfg.get("chrome", {}).get("cdp_port", 9222))
+            port = int(self._resolve_chrome_port(ch.get("active_profile", "")))
         except Exception:
             port = 9222
-
-        ch = self.cfg.get("chrome", {})
         if sys.platform == "darwin":
             default_chrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
         elif sys.platform.startswith("win"):
@@ -4154,6 +4189,49 @@ class MainWindow(QtWidgets.QMainWindow):
         raw = auto_cfg.get("image_prompts_file") or str(WORKERS_DIR / "autogen" / "image_prompts.txt")
         return _project_path(raw)
 
+    def _chrome_profile_by_name(self, name: Optional[str]) -> Optional[Dict[str, Any]]:
+        if not name:
+            return None
+        chrome_cfg = self.cfg.get("chrome", {}) or {}
+        for prof in chrome_cfg.get("profiles", []) or []:
+            if not isinstance(prof, dict):
+                continue
+            if prof.get("name") == name:
+                return prof
+        return None
+
+    def _resolve_chrome_port(self, profile_name: Optional[str] = None) -> int:
+        chrome_cfg = self.cfg.get("chrome", {}) or {}
+        fallback = _coerce_int(chrome_cfg.get("cdp_port")) or 9222
+        target = profile_name
+        if not target or target == PROMPTS_DEFAULT_KEY:
+            target = chrome_cfg.get("active_profile", "") or ""
+        if target and target != PROMPTS_DEFAULT_KEY:
+            prof = self._chrome_profile_by_name(target)
+            if prof:
+                port = _coerce_int(prof.get("cdp_port"))
+                if port and port > 0:
+                    return port
+        return fallback
+
+    def _profile_log_path(self, base_value: Optional[str], profile_key: Optional[str], default_filename: str) -> Path:
+        base_raw = base_value or str(WORKERS_DIR / "autogen" / default_filename)
+        base_path = _project_path(base_raw)
+        if not profile_key or profile_key == PROMPTS_DEFAULT_KEY:
+            return base_path
+        slug = slugify(str(profile_key)) or "profile"
+        suffix = base_path.suffix or Path(default_filename).suffix or ".log"
+        stem = base_path.stem or Path(default_filename).stem or "log"
+        return base_path.with_name(f"{stem}_{slug}{suffix}")
+
+    def _profile_submitted_log_path(self, profile_key: Optional[str]) -> Path:
+        auto_cfg = self.cfg.get("autogen", {}) or {}
+        return self._profile_log_path(auto_cfg.get("submitted_log"), profile_key, "submitted.log")
+
+    def _profile_failed_log_path(self, profile_key: Optional[str]) -> Path:
+        auto_cfg = self.cfg.get("autogen", {}) or {}
+        return self._profile_log_path(auto_cfg.get("failed_log"), profile_key, "failed.log")
+
     def _load_prompts(self):
         path = self._prompts_path()
         self._ensure_path_exists(str(path))
@@ -4201,6 +4279,20 @@ class MainWindow(QtWidgets.QMainWindow):
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
         env["SORA_PROMPTS_FILE"] = str(self._prompts_path())
+        profile_key = getattr(self, "_current_prompt_profile_key", PROMPTS_DEFAULT_KEY) or PROMPTS_DEFAULT_KEY
+        instance_label = self._prompt_profile_label(profile_key)
+        env["SORA_INSTANCE_NAME"] = instance_label
+        submitted_log = self._profile_submitted_log_path(profile_key)
+        failed_log = self._profile_failed_log_path(profile_key)
+        try:
+            submitted_log.parent.mkdir(parents=True, exist_ok=True)
+            failed_log.parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        env["SORA_SUBMITTED_LOG"] = str(submitted_log)
+        env["SORA_FAILED_LOG"] = str(failed_log)
+        port = self._resolve_chrome_port(profile_key)
+        env["SORA_CDP_ENDPOINT"] = f"http://127.0.0.1:{int(port)}"
         genai_cfg = self.cfg.get("google_genai", {}) or {}
         genai_enabled = bool(genai_cfg.get("enabled"))
         if force_images is True:
@@ -6497,6 +6589,19 @@ class MainWindow(QtWidgets.QMainWindow):
             item = QtWidgets.QListWidgetItem(p.get("name", ""))
             self.lst_profiles.addItem(item)
         self.lbl_prof_active.setText(active if active else "—")
+        if active:
+            for row in range(self.lst_profiles.count()):
+                item = self.lst_profiles.item(row)
+                if item and item.text() == active:
+                    self.lst_profiles.blockSignals(True)
+                    self.lst_profiles.setCurrentRow(row)
+                    self.lst_profiles.blockSignals(False)
+                    break
+        else:
+            self.lst_profiles.blockSignals(True)
+            self.lst_profiles.clearSelection()
+            self.lst_profiles.blockSignals(False)
+        self._on_profile_selected()
         self._refresh_prompt_profiles_ui()
 
         if hasattr(self, "cmb_chrome_profile_top"):
@@ -6521,6 +6626,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ed_prof_name.clear()
             self.ed_prof_root.clear()
             self.ed_prof_dir.clear()
+            if hasattr(self, "sb_prof_port"):
+                self.sb_prof_port.blockSignals(True)
+                self.sb_prof_port.setValue(0)
+                self.sb_prof_port.blockSignals(False)
             return
         name = items[0].text()
         for p in self.cfg.get("chrome", {}).get("profiles", []):
@@ -6528,6 +6637,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.ed_prof_name.setText(p.get("name", ""))
                 self.ed_prof_root.setText(p.get("user_data_dir", ""))
                 self.ed_prof_dir.setText(p.get("profile_directory", ""))
+                port = _coerce_int(p.get("cdp_port"))
+                if hasattr(self, "sb_prof_port"):
+                    self.sb_prof_port.blockSignals(True)
+                    self.sb_prof_port.setValue(int(port) if port and port > 0 else 0)
+                    self.sb_prof_port.blockSignals(False)
                 break
 
     def _on_profile_add_update(self):
@@ -6544,9 +6658,18 @@ class MainWindow(QtWidgets.QMainWindow):
             if p.get("name") == name:
                 p["user_data_dir"] = root
                 p["profile_directory"] = prof
+                port_val = int(self.sb_prof_port.value()) if hasattr(self, "sb_prof_port") else 0
+                if port_val > 0:
+                    p["cdp_port"] = port_val
+                else:
+                    p.pop("cdp_port", None)
                 break
         else:
-            profiles.append({"name": name, "user_data_dir": root, "profile_directory": prof})
+            entry = {"name": name, "user_data_dir": root, "profile_directory": prof}
+            port_val = int(self.sb_prof_port.value()) if hasattr(self, "sb_prof_port") else 0
+            if port_val > 0:
+                entry["cdp_port"] = port_val
+            profiles.append(entry)
 
         self._ensure_profile_prompt_files(name)
         save_cfg(self.cfg)
@@ -6580,7 +6703,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_profiles_ui()
         if notify:
             label = name or "—"
-            self._post_status(f"Активный профиль: {label}", state="ok")
+            port = self._resolve_chrome_port(name or None)
+            port_hint = f" (CDP {port})" if port else ""
+            self._post_status(f"Активный профиль: {label}{port_hint}", state="ok")
 
     def _on_profile_set_active(self):
         items = self.lst_profiles.selectedItems()
