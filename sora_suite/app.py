@@ -980,6 +980,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._preset_cache: Dict[str, List[Dict[str, int]]] = {}
         self._preset_tables: Dict[str, QtWidgets.QTableWidget] = {}
 
+        self._section_index: Dict[str, int] = {}
+        self._section_order: List[str] = []
+        self._current_section_key: str = ""
+
         self._build_ui()
         self._wire()
         self._init_state()
@@ -1672,12 +1676,23 @@ class MainWindow(QtWidgets.QMainWindow):
             }
             QCheckBox::indicator:disabled { background: #1e293b; border-color: #27364d; }
             QListWidget { border: 1px solid #22314d; border-radius: 12px; background-color: #0b1528; color: #f1f5f9; }
+            QListWidget#sectionNav { background: rgba(15,23,42,0.9); border: 1px solid #1f2a40; border-radius: 18px; padding: 12px 8px; }
+            QListWidget#sectionNav::item { margin: 4px 6px; padding: 10px 14px; border-radius: 12px; color: #e2e8f0; }
+            QListWidget#sectionNav::item:selected { background: qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #4c6ef5, stop:1 #4338ca); color: #f8fafc; }
+            QListWidget#sectionNav::item:hover { background: rgba(148,163,184,0.14); }
             QTabWidget::pane { border: 1px solid #22314d; border-radius: 12px; margin-top: -4px; background: #0f172a; }
             QTabBar::tab { background: #101a2f; border: 1px solid #22314d; padding: 6px 12px; margin-right: 4px;
                            border-top-left-radius: 6px; border-top-right-radius: 6px; }
             QTabBar::tab:selected { background: #4c6ef5; color: #f8fafc; }
             QTabBar::tab:hover { background: #374968; }
             QLabel#statusBanner { font-size: 15px; }
+            QFrame#dashboardHeader { background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #1d4ed8, stop:1 #4c1d95); border-radius: 18px; border: 1px solid #1e3a8a; }
+            QLabel#dashboardTitle { font-size: 22px; font-weight: 700; color: #f8fafc; }
+            QLabel#dashboardSubtitle { color: #cbd5f5; font-size: 13px; }
+            QFrame#dashboardQuickActions { background: rgba(15,23,42,0.92); border: 1px solid #1f2a40; border-radius: 16px; }
+            QFrame#dashboardStats { background: rgba(15,23,42,0.92); border: 1px solid #1f2a40; border-radius: 16px; }
+            QLabel#dashboardSectionTitle { font-size: 13px; font-weight: 600; letter-spacing: 0.4px; text-transform: uppercase; color: #9fb7ff; }
+            QFrame#dashboardActivity { background: rgba(15,23,42,0.92); border: 1px solid #1f2a40; border-radius: 16px; }
             QTextBrowser { background-color: #0b1528; border: 1px solid #22314d; border-radius: 10px; padding: 12px; }
             QScrollArea { border: none; }
             """
@@ -1921,33 +1936,220 @@ class MainWindow(QtWidgets.QMainWindow):
 
         v.addWidget(toolbar)
 
-        split = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
-        split.setChildrenCollapsible(False)
-        split.setHandleWidth(8)
-        v.addWidget(split, 1)
+        body = QtWidgets.QFrame()
+        body.setObjectName("mainBody")
+        body_layout = QtWidgets.QHBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(16)
 
-        # слева — информационная панель
-        self.panel_activity = QtWidgets.QFrame()
-        act_layout = QtWidgets.QVBoxLayout(self.panel_activity)
-        act_layout.setContentsMargins(8, 8, 8, 8)
-        act_layout.setSpacing(6)
+        self.section_nav = QtWidgets.QListWidget()
+        self.section_nav.setObjectName("sectionNav")
+        self.section_nav.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.section_nav.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.section_nav.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        self.section_nav.setSpacing(4)
+        self.section_nav.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        self.section_nav.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
+        self.section_nav.setMinimumWidth(220)
+        self.section_nav.setMaximumWidth(260)
+        body_layout.addWidget(self.section_nav)
+
+        self.section_stack = QtWidgets.QStackedWidget()
+        self.section_stack.setObjectName("sectionStack")
+        body_layout.addWidget(self.section_stack, 1)
+
+        v.addWidget(body, 1)
+
+        self._section_index = {}
+        self._section_order = []
+
+        def add_section(
+            key: str,
+            title: str,
+            widget: QtWidgets.QWidget,
+            *,
+            icon: Optional[QtGui.QIcon] = None,
+            scrollable: bool = False,
+        ) -> QtWidgets.QWidget:
+            container = widget
+            if scrollable:
+                area = QtWidgets.QScrollArea()
+                area.setWidgetResizable(True)
+                area.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+                area.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+                area.setWidget(widget)
+                container = area
+            idx = self.section_stack.addWidget(container)
+            self._section_index[key] = idx
+            self._section_order.append(key)
+            item = QtWidgets.QListWidgetItem(icon, title) if icon else QtWidgets.QListWidgetItem(title)
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, key)
+            item.setSizeHint(QtCore.QSize(220, 48))
+            self.section_nav.addItem(item)
+            return container
+
+        def make_scroll_tab(margins=(12, 12, 12, 12), spacing=10):
+            area = QtWidgets.QScrollArea()
+            area.setWidgetResizable(True)
+            area.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+            area.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            area.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            body_widget = QtWidgets.QWidget()
+            layout = QtWidgets.QVBoxLayout(body_widget)
+            layout.setContentsMargins(*margins)
+            layout.setSpacing(spacing)
+            area.setWidget(body_widget)
+            return area, layout
+
+        overview_root = QtWidgets.QWidget()
+        overview_layout = QtWidgets.QVBoxLayout(overview_root)
+        overview_layout.setContentsMargins(12, 12, 12, 12)
+        overview_layout.setSpacing(16)
+
+        overview_header = QtWidgets.QFrame()
+        overview_header.setObjectName("dashboardHeader")
+        header_layout = QtWidgets.QVBoxLayout(overview_header)
+        header_layout.setContentsMargins(18, 18, 18, 18)
+        header_layout.setSpacing(6)
+        lbl_dash_title = QtWidgets.QLabel("Центр управления")
+        lbl_dash_title.setObjectName("dashboardTitle")
+        lbl_dash_sub = QtWidgets.QLabel(
+            "Следи за прогрессом процессов, журналом событий и статистикой рабочих папок в одном месте."
+        )
+        lbl_dash_sub.setObjectName("dashboardSubtitle")
+        lbl_dash_sub.setWordWrap(True)
+        header_layout.addWidget(lbl_dash_title)
+        header_layout.addWidget(lbl_dash_sub)
+        overview_layout.addWidget(overview_header)
+
+        quick_panel = QtWidgets.QFrame()
+        quick_panel.setObjectName("dashboardQuickActions")
+        quick_layout = QtWidgets.QHBoxLayout(quick_panel)
+        quick_layout.setContentsMargins(16, 14, 16, 14)
+        quick_layout.setSpacing(12)
+        btn_quick_run = QtWidgets.QPushButton("Старт сценария")
+        btn_quick_run.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MediaPlay))
+        btn_quick_run.clicked.connect(self._run_scenario)
+        btn_quick_images = QtWidgets.QPushButton("Генерация картинок")
+        btn_quick_images.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_FileDialogContentsView))
+        btn_quick_images.clicked.connect(self._save_and_run_autogen_images)
+        btn_quick_chrome = QtWidgets.QPushButton("Запустить Chrome")
+        btn_quick_chrome.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DesktopIcon))
+        btn_quick_chrome.clicked.connect(self._open_chrome)
+        btn_quick_sessions = QtWidgets.QPushButton("Рабочие пространства")
+        btn_quick_sessions.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_ComputerIcon))
+        btn_quick_sessions.clicked.connect(lambda: self._select_section("workspaces"))
+        btn_quick_settings = QtWidgets.QPushButton("Настройки")
+        btn_quick_settings.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_FileDialogDetailedView))
+        btn_quick_settings.clicked.connect(lambda: self._select_section("settings"))
+        for btn in (
+            btn_quick_run,
+            btn_quick_images,
+            btn_quick_chrome,
+            btn_quick_sessions,
+            btn_quick_settings,
+        ):
+            btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+            btn.setMinimumHeight(38)
+        quick_layout.addWidget(btn_quick_run)
+        quick_layout.addWidget(btn_quick_images)
+        quick_layout.addWidget(btn_quick_chrome)
+        quick_layout.addWidget(btn_quick_sessions)
+        quick_layout.addWidget(btn_quick_settings)
+        quick_layout.addStretch(1)
+        overview_layout.addWidget(quick_panel)
+
+        stats_panel = QtWidgets.QFrame()
+        stats_panel.setObjectName("dashboardStats")
+        stats_layout = QtWidgets.QVBoxLayout(stats_panel)
+        stats_layout.setContentsMargins(16, 16, 16, 16)
+        stats_layout.setSpacing(12)
+        stats_header = QtWidgets.QHBoxLayout()
+        lbl_stats_title = QtWidgets.QLabel("Мониторинг папок")
+        lbl_stats_title.setObjectName("dashboardSectionTitle")
+        stats_header.addWidget(lbl_stats_title)
+        stats_header.addStretch(1)
+        stats_layout.addLayout(stats_header)
+        stats_grid = QtWidgets.QGridLayout()
+        stats_grid.setHorizontalSpacing(16)
+        stats_grid.setVerticalSpacing(12)
+        stats_layout.addLayout(stats_grid)
+        self._dashboard_stat_values = {}
+        self._dashboard_stat_desc = {}
+
+        def add_dashboard_card(row: int, col: int, key: str, title: str, tooltip: str, accent: str):
+            card = QtWidgets.QFrame()
+            card.setObjectName(f"dashStat_{key}")
+            card.setStyleSheet(
+                (
+                    "QFrame#dashStat_{key}{background:rgba(15,23,42,0.92);border-radius:16px;"
+                    "border:1px solid rgba(148,163,184,0.22);}"
+                    "QLabel#dashStatTitle_{key}{color:#cbd5f5;font-size:11px;text-transform:uppercase;letter-spacing:0.6px;}"
+                    "QLabel#dashStatDesc_{key}{color:#94a3b8;font-size:11px;}"
+                ).replace("{key}", key)
+            )
+            layout = QtWidgets.QVBoxLayout(card)
+            layout.setContentsMargins(16, 14, 16, 14)
+            layout.setSpacing(6)
+            accent_bar = QtWidgets.QFrame()
+            accent_bar.setFixedHeight(4)
+            accent_bar.setStyleSheet(f"QFrame{{background:{accent};border-radius:2px;}}")
+            layout.addWidget(accent_bar)
+            title_lbl = QtWidgets.QLabel(title)
+            title_lbl.setObjectName(f"dashStatTitle_{key}")
+            value_lbl = QtWidgets.QLabel("0")
+            value_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            value_lbl.setStyleSheet(
+                f"QLabel{{font:700 26px 'JetBrains Mono','Menlo','Consolas';color:{accent};padding-top:4px;}}"
+            )
+            desc_lbl = QtWidgets.QLabel("—")
+            desc_lbl.setObjectName(f"dashStatDesc_{key}")
+            desc_lbl.setWordWrap(True)
+            desc_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            layout.addWidget(title_lbl, 0, QtCore.Qt.AlignmentFlag.AlignCenter)
+            layout.addWidget(value_lbl)
+            layout.addWidget(desc_lbl)
+            card.setToolTip(tooltip)
+            stats_grid.addWidget(card, row, col)
+            self._dashboard_stat_values[key] = value_lbl
+            self._dashboard_stat_desc[key] = desc_lbl
+
+        add_dashboard_card(0, 0, "raw", "RAW", "Количество файлов в каталоге RAW", "#38bdf8")
+        add_dashboard_card(0, 1, "blur", "BLURRED", "Готовые для блюра клипы", "#a855f7")
+        add_dashboard_card(0, 2, "merge", "MERGED", "Склеенные ролики", "#f97316")
+        add_dashboard_card(1, 0, "youtube", "YOUTUBE", "Очередь загрузки YouTube", "#4ade80")
+        add_dashboard_card(1, 1, "tiktok", "TIKTOK", "Очередь загрузки TikTok", "#f472b6")
+        add_dashboard_card(1, 2, "images", "IMAGES", "Сгенерированные изображения", "#60a5fa")
+        overview_layout.addWidget(stats_panel)
+
+        activity_panel = QtWidgets.QFrame()
+        activity_panel.setObjectName("dashboardActivity")
+        activity_layout = QtWidgets.QVBoxLayout(activity_panel)
+        activity_layout.setContentsMargins(16, 16, 16, 16)
+        activity_layout.setSpacing(12)
+        activity_header = QtWidgets.QHBoxLayout()
+        self.lbl_activity = QtWidgets.QLabel("Журнал процессов")
+        activity_header.addWidget(self.lbl_activity)
+        activity_header.addStretch(1)
+        self.chk_activity_visible = QtWidgets.QCheckBox("Показывать журнал")
+        self.chk_activity_visible.setChecked(bool(self.cfg.get("ui", {}).get("show_activity", True)))
+        self.chk_activity_visible.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        self.btn_activity_clear = QtWidgets.QPushButton("Очистить")
+        self.btn_activity_clear.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DialogResetButton))
+        activity_header.addWidget(self.chk_activity_visible)
+        activity_header.addWidget(self.btn_activity_clear)
+        activity_layout.addLayout(activity_header)
 
         self.activity_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
         self.activity_splitter.setChildrenCollapsible(False)
         self.activity_splitter.setHandleWidth(8)
         self._activity_sizes_cache = []
-        act_layout.addWidget(self.activity_splitter, 1)
 
         current_wrap = QtWidgets.QWidget()
         current_wrap.setObjectName("currentEventWrapper")
-        current_wrap.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Preferred,
-            QtWidgets.QSizePolicy.Policy.Maximum,
-        )
         current_layout = QtWidgets.QVBoxLayout(current_wrap)
         current_layout.setContentsMargins(0, 0, 0, 0)
         current_layout.setSpacing(6)
-
         self.current_event_card = QtWidgets.QFrame()
         self.current_event_card.setObjectName("currentEventCard")
         self.current_event_card.setStyleSheet(
@@ -1983,20 +2185,6 @@ class MainWindow(QtWidgets.QMainWindow):
         history_layout = QtWidgets.QVBoxLayout(self.history_panel)
         history_layout.setContentsMargins(0, 0, 0, 0)
         history_layout.setSpacing(6)
-
-        act_header = QtWidgets.QHBoxLayout()
-        self.lbl_activity = QtWidgets.QLabel("<b>История событий</b>")
-        self.chk_activity_visible = QtWidgets.QCheckBox("Показывать")
-        self.chk_activity_visible.setChecked(bool(self.cfg.get("ui", {}).get("show_activity", True)))
-        self.chk_activity_visible.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
-        self.btn_activity_clear = QtWidgets.QPushButton("Очистить")
-        self.btn_activity_clear.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DialogResetButton))
-        act_header.addWidget(self.lbl_activity)
-        act_header.addStretch(1)
-        act_header.addWidget(self.chk_activity_visible)
-        act_header.addWidget(self.btn_activity_clear)
-        history_layout.addLayout(act_header)
-
         filter_row = QtWidgets.QHBoxLayout()
         self.ed_activity_filter = QtWidgets.QLineEdit()
         self.ed_activity_filter.setPlaceholderText("Фильтр по тексту или тегу…")
@@ -2005,7 +2193,6 @@ class MainWindow(QtWidgets.QMainWindow):
         filter_row.addWidget(self.ed_activity_filter, 1)
         filter_row.addWidget(self.btn_activity_export)
         history_layout.addLayout(filter_row)
-
         self.lst_activity = QtWidgets.QListWidget()
         self.lst_activity.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
         self.lst_activity.setUniformItemSizes(False)
@@ -2014,47 +2201,34 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lst_activity.setSpacing(2)
         self._apply_activity_density(persist=False)
         history_layout.addWidget(self.lst_activity, 1)
-
-        self.lbl_activity_hint = QtWidgets.QLabel("Здесь можно посмотреть детальный лог процессов: скачка, блюр, склейка, загрузка.")
+        self.lbl_activity_hint = QtWidgets.QLabel(
+            "Журнал объединяет статусы скачки, блюра, склейки, загрузки и автогена."
+        )
         self.lbl_activity_hint.setWordWrap(True)
         self.lbl_activity_hint.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
         history_layout.addWidget(self.lbl_activity_hint)
-
         self.activity_splitter.addWidget(self.history_panel)
         self.activity_splitter.setStretchFactor(0, 0)
         self.activity_splitter.setStretchFactor(1, 1)
+        activity_layout.addWidget(self.activity_splitter, 1)
+        overview_layout.addWidget(activity_panel)
 
-        split.addWidget(self.panel_activity)
-
-        # справа — вкладки
-        self.tabs = QtWidgets.QTabWidget()
-        self.tabs.setTabPosition(QtWidgets.QTabWidget.TabPosition.North)
-        self.tabs.setDocumentMode(True)
-        self.tabs.setMovable(False)
-        split.addWidget(self.tabs)
-        split.setStretchFactor(0, 1)
-        split.setStretchFactor(1, 3)
-
-        # применяем настройки отображения после создания виджетов
-        self._update_current_event("—", self.cfg.get("ui", {}).get("accent_kind", "info"), persist=False)
-        self._apply_activity_visibility(self.chk_activity_visible.isChecked(), persist=False)
-
-        # TAB: Задачи
-        def make_scroll_tab(margins=(12, 12, 12, 12), spacing=10):
-            area = QtWidgets.QScrollArea()
-            area.setWidgetResizable(True)
-            area.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
-            area.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-            area.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-            body = QtWidgets.QWidget()
-            layout = QtWidgets.QVBoxLayout(body)
-            layout.setContentsMargins(*margins)
-            layout.setSpacing(spacing)
-            area.setWidget(body)
-            return area, layout
+        add_section(
+            "overview",
+            "Обзор",
+            overview_root,
+            icon=self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DialogHelpButton),
+            scrollable=True,
+        )
 
         self.tab_sessions = self._build_sessions_tab()
-        self.tabs.insertTab(0, self.tab_sessions, "Рабочие пространства")
+        add_section(
+            "workspaces",
+            "Рабочие пространства",
+            self.tab_sessions,
+            icon=self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_FileDialogStart),
+            scrollable=True,
+        )
 
         self.tab_tasks, lt = make_scroll_tab(margins=(0, 0, 0, 0))
         tasks_intro = QtWidgets.QLabel(
@@ -2304,6 +2478,13 @@ class MainWindow(QtWidgets.QMainWindow):
         merge_layout.addWidget(grp_merge)
         merge_layout.addStretch(1)
         self.task_tabs.addTab(merge_tab, "Склейка")
+
+        add_section(
+            "automation",
+            "Автоматизация",
+            self.tab_tasks,
+            icon=self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_ArrowForward),
+        )
 
         # TAB: YouTube uploader
         yt_cfg = self.cfg.get("youtube", {}) or {}
@@ -2864,12 +3045,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.tab_settings.setWidget(settings_body)
 
-        overview_host = QtWidgets.QWidget()
-        overview_layout = QtWidgets.QVBoxLayout(overview_host)
-        overview_layout.setContentsMargins(0, 0, 0, 0)
-        overview_layout.addWidget(self.tab_tasks, 1)
-        self.tabs.addTab(overview_host, "Обзор")
-
         content_host = QtWidgets.QWidget()
         content_layout = QtWidgets.QVBoxLayout(content_host)
         content_layout.setContentsMargins(0, 0, 0, 0)
@@ -2879,7 +3054,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.content_tabs.addTab(self.tab_image_prompts, "Промпты картинок")
         self.content_tabs.addTab(self.tab_titles, "Названия")
         content_layout.addWidget(self.content_tabs)
-        self.tabs.addTab(content_host, "Контент")
+        add_section(
+            "content",
+            "Контент",
+            content_host,
+            icon=self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_FileDialogListView),
+        )
 
         autopost_host = QtWidgets.QWidget()
         autopost_layout = QtWidgets.QVBoxLayout(autopost_host)
@@ -2889,12 +3069,50 @@ class MainWindow(QtWidgets.QMainWindow):
         self.autopost_tabs.addTab(self.tab_youtube, "YouTube")
         self.autopost_tabs.addTab(self.tab_tiktok, "TikTok")
         autopost_layout.addWidget(self.autopost_tabs)
-        self.tabs.addTab(autopost_host, "Автопостинг")
+        add_section(
+            "autopost",
+            "Автопостинг",
+            autopost_host,
+            icon=self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MediaPlay),
+        )
 
-        self.tabs.addTab(self.tab_settings, "Настройки")
+        add_section(
+            "settings",
+            "Настройки",
+            self.tab_settings,
+            icon=self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_FileDialogDetailedView),
+        )
 
         self._load_zones_into_ui()
         self._toggle_youtube_schedule()
+
+        self.section_nav.currentRowChanged.connect(self._on_section_nav_changed)
+        if self.section_nav.count():
+            self.section_nav.setCurrentRow(0)
+        else:
+            self._current_section_key = "overview"
+        self._update_current_event("—", self.cfg.get("ui", {}).get("accent_kind", "info"), persist=False)
+        self._apply_activity_visibility(self.chk_activity_visible.isChecked(), persist=False)
+
+    def _on_section_nav_changed(self, row: int):
+        if row < 0:
+            self.section_stack.setCurrentIndex(-1)
+            self._current_section_key = ""
+            return
+        self.section_stack.setCurrentIndex(row)
+        if 0 <= row < len(getattr(self, "_section_order", [])):
+            self._current_section_key = self._section_order[row]
+
+    def _select_section(self, key: str):
+        if not getattr(self, "section_nav", None):
+            return
+        idx = getattr(self, "_section_index", {}).get(key)
+        if idx is None:
+            return
+        self.section_nav.blockSignals(True)
+        self.section_nav.setCurrentRow(idx)
+        self.section_nav.blockSignals(False)
+        self._on_section_nav_changed(idx)
 
     def _build_settings_pages(self):
         ch = self.cfg.get("chrome", {})
@@ -7507,20 +7725,43 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"[STAT] RAW={raw} BLURRED={blur} MERGED={merg} YT={upload_src} TT={tiktok_src} IMG={images_count}"
             )
 
+            dash_values = getattr(self, "_dashboard_stat_values", {})
+            dash_desc = getattr(self, "_dashboard_stat_desc", {})
+
             fmt = lambda value: format(value, ",").replace(",", " ")
-            self.lbl_stat_raw.setText(fmt(raw))
-            self.lbl_stat_blur.setText(fmt(blur))
-            self.lbl_stat_merge.setText(fmt(merg))
-            self.lbl_stat_upload.setText(fmt(upload_src))
-            if hasattr(self, "lbl_stat_tiktok"):
-                self.lbl_stat_tiktok.setText(fmt(tiktok_src))
-            if hasattr(self, "lbl_stat_images"):
-                self.lbl_stat_images.setText(fmt(images_count))
+
+            stat_widgets = {
+                "raw": getattr(self, "lbl_stat_raw", None),
+                "blur": getattr(self, "lbl_stat_blur", None),
+                "merge": getattr(self, "lbl_stat_merge", None),
+                "youtube": getattr(self, "lbl_stat_upload", None),
+                "tiktok": getattr(self, "lbl_stat_tiktok", None),
+                "images": getattr(self, "lbl_stat_images", None),
+            }
+            stat_values = {
+                "raw": raw,
+                "blur": blur,
+                "merge": merg,
+                "youtube": upload_src,
+                "tiktok": tiktok_src,
+                "images": images_count,
+            }
+            for key, value in stat_values.items():
+                text_value = fmt(value)
+                widget = stat_widgets.get(key)
+                if widget:
+                    widget.setText(text_value)
+                dash_label = dash_values.get(key)
+                if dash_label:
+                    dash_label.setText(text_value)
 
             def _set_desc(key: str, text: str):
                 label = self._stat_desc_labels.get(key)
                 if label:
                     label.setText(text)
+                dash_label = dash_desc.get(key)
+                if dash_label:
+                    dash_label.setText(text)
 
             _set_desc("raw", f"{_human_size(raw_size)} · {raw_path.name or raw_path}")
             _set_desc("blur", f"{_human_size(blur_size)} · {blur_path.name or blur_path}")
