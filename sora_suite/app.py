@@ -351,6 +351,9 @@ def load_cfg() -> dict:
     telegram.setdefault("enabled", False)
     telegram.setdefault("bot_token", "")
     telegram.setdefault("chat_id", "")
+    telegram.setdefault("templates", [])
+    telegram.setdefault("last_template", "")
+    telegram.setdefault("quick_delay_minutes", 0)
 
     maintenance = data.setdefault("maintenance", {})
     maintenance.setdefault("auto_cleanup_on_start", False)
@@ -948,6 +951,148 @@ class SessionWorkspaceWindow(QtWidgets.QDialog):
             super().closeEvent(event)
 
 
+# ---------- командная палитра ----------
+class CommandPaletteDialog(QtWidgets.QDialog):
+    def __init__(self, parent: QtWidgets.QWidget, commands: List[Dict[str, Any]]):
+        super().__init__(parent)
+        self.setWindowTitle("Командная палитра")
+        self.setObjectName("commandPalette")
+        self.setModal(True)
+        self.setWindowFlag(QtCore.Qt.WindowType.Tool, True)
+        self.setWindowFlag(QtCore.Qt.WindowType.FramelessWindowHint, True)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.resize(520, 440)
+
+        wrapper = QtWidgets.QFrame()
+        wrapper.setObjectName("commandPaletteFrame")
+        wrapper_layout = QtWidgets.QVBoxLayout(wrapper)
+        wrapper_layout.setContentsMargins(16, 16, 16, 16)
+        wrapper_layout.setSpacing(12)
+
+        self.search = QtWidgets.QLineEdit()
+        self.search.setObjectName("commandPaletteSearch")
+        self.search.setPlaceholderText("Найди действие или раздел…")
+        wrapper_layout.addWidget(self.search)
+
+        self.list = QtWidgets.QListWidget()
+        self.list.setObjectName("commandPaletteList")
+        self.list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        self.list.setAlternatingRowColors(False)
+        self.list.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        wrapper_layout.addWidget(self.list, 1)
+
+        hint = QtWidgets.QLabel("↵ — выполнить · Esc — закрыть · Tab — переключить разделы")
+        hint.setObjectName("commandPaletteHint")
+        hint.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        wrapper_layout.addWidget(hint)
+
+        base_layout = QtWidgets.QVBoxLayout(self)
+        base_layout.setContentsMargins(0, 0, 0, 0)
+        base_layout.addWidget(wrapper)
+
+        self._commands = list(commands)
+        self._filtered: List[Dict[str, Any]] = []
+        self._selected_id: Optional[str] = None
+
+        self.search.textChanged.connect(self._apply_filter)
+        self.list.itemActivated.connect(self._choose_current)
+        self.list.itemSelectionChanged.connect(self._sync_focus_label)
+
+        self._apply_filter()
+        self.search.setFocus(QtCore.Qt.FocusReason.PopupFocusReason)
+
+    def keyPressEvent(self, event: QtGui.QKeyEvent):
+        if event.key() in {QtCore.Qt.Key.Key_Return, QtCore.Qt.Key.Key_Enter}:
+            self._choose_current(self.list.currentItem())
+            event.accept()
+            return
+        if event.key() == QtCore.Qt.Key.Key_Tab:
+            self._jump_to_next_category()
+            event.accept()
+            return
+        if event.key() == QtCore.Qt.Key.Key_Escape:
+            self.reject()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def _jump_to_next_category(self):
+        if not self._filtered:
+            return
+        current = self.list.currentRow()
+        current_category = None
+        if 0 <= current < self.list.count():
+            item = self.list.item(current)
+            current_category = item.data(QtCore.Qt.ItemDataRole.UserRole + 1)
+        for idx in range(current + 1, self.list.count()):
+            item = self.list.item(idx)
+            if item and item.data(QtCore.Qt.ItemDataRole.UserRole + 1) != current_category:
+                self.list.setCurrentRow(idx)
+                return
+        # если не нашли впереди — крутимся
+        for idx in range(0, self.list.count()):
+            item = self.list.item(idx)
+            if item and item.data(QtCore.Qt.ItemDataRole.UserRole + 1) != current_category:
+                self.list.setCurrentRow(idx)
+                return
+
+    def _apply_filter(self):
+        query = self.search.text().strip().lower()
+        tokens = [token for token in re.split(r"\s+", query) if token]
+        self.list.blockSignals(True)
+        self.list.clear()
+        self._filtered.clear()
+
+        for command in self._commands:
+            haystack = " ".join(
+                [
+                    command.get("title", ""),
+                    command.get("subtitle", ""),
+                    command.get("category", ""),
+                    " ".join(command.get("keywords", [])),
+                ]
+            ).lower()
+            if all(token in haystack for token in tokens):
+                item = QtWidgets.QListWidgetItem()
+                title = command.get("title", "")
+                subtitle = command.get("subtitle", "")
+                if subtitle:
+                    item.setText(f"{title}\n<small>{subtitle}</small>")
+                else:
+                    item.setText(title)
+                item.setData(QtCore.Qt.ItemDataRole.UserRole, command.get("id"))
+                item.setData(QtCore.Qt.ItemDataRole.UserRole + 1, command.get("category", ""))
+                item.setToolTip(subtitle or title)
+                self.list.addItem(item)
+                self._filtered.append(command)
+
+        self.list.blockSignals(False)
+        if self.list.count():
+            self.list.setCurrentRow(0)
+
+    def _choose_current(self, item: Optional[QtWidgets.QListWidgetItem]):
+        if not item:
+            return
+        command_id = item.data(QtCore.Qt.ItemDataRole.UserRole)
+        if not command_id:
+            return
+        self._selected_id = str(command_id)
+        self.accept()
+
+    def _sync_focus_label(self):
+        # Вставка HTML-меток требует обновления флагов отображения
+        for idx in range(self.list.count()):
+            item = self.list.item(idx)
+            if not item:
+                continue
+            text = item.text()
+            if "<small>" in text:
+                item.setData(QtCore.Qt.ItemDataRole.DisplayRole, QtCore.QVariant())
+                item.setData(QtCore.Qt.ItemDataRole.DisplayRole, text)
+
+    def selected_command(self) -> Optional[str]:
+        return self._selected_id
+
 # ---------- главное окно ----------
 class MainWindow(QtWidgets.QMainWindow):
     # сигналы для безопасных UI-апдейтов из потоков
@@ -989,6 +1134,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_state: Dict[str, Dict[str, Any]] = {}
         self._session_windows: Dict[str, "SessionWorkspaceWindow"] = {}
         self._current_session_id: str = self._session_order[0] if self._session_order else ""
+
+        self._command_registry: Dict[str, Dict[str, Any]] = {}
+        self._command_actions: Dict[str, QtGui.QAction] = {}
+        self._pending_tg_jobs: List[Tuple[QtCore.QTimer, str]] = []
+        self._telegram_templates: List[Dict[str, str]] = []
 
         self._apply_theme()
 
@@ -1085,11 +1235,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self._reload_history()
         self._auto_scan_profiles_at_start()
         self._refresh_prompt_profiles_ui()
+        self._refresh_content_context()
         self._load_image_prompts()
         self._refresh_youtube_ui()
         self._refresh_tiktok_ui()
+        self._refresh_autopost_context()
         self._load_autogen_cfg_ui()
         self._reload_used_prompts()
+        self._refresh_telegram_context()
+        self._refresh_overview_context()
         maint_cfg = self.cfg.get("maintenance", {}) or {}
         if maint_cfg.get("auto_cleanup_on_start"):
             QtCore.QTimer.singleShot(200, lambda: self._run_maintenance_cleanup(manual=False))
@@ -1148,6 +1302,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_sessions_list()
         if getattr(self, "_current_session_id", None) == session_id:
             self._update_session_status_panel(session_id)
+        self._refresh_workspace_context()
         window = self._session_windows.get(session_id)
         if window:
             window.update_status(status, message, rc)
@@ -1194,6 +1349,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.lst_sessions.count():
             self.lst_sessions.setCurrentRow(target_row)
         self.lst_sessions.blockSignals(False)
+        self._refresh_command_palette_sessions()
+        self._refresh_workspace_context()
 
     def _session_config_snapshot(self) -> List[Dict[str, Any]]:
         snapshot: List[Dict[str, Any]] = []
@@ -1375,6 +1532,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._current_session_id = session_id
         self._load_session_into_editor(session_id)
+        self._refresh_workspace_context()
 
     def _create_session(self, name: Optional[str] = None) -> Dict[str, Any]:
         session_id = uuid.uuid4().hex[:8]
@@ -1724,6 +1882,7 @@ class MainWindow(QtWidgets.QMainWindow):
             QListWidget { border: none; background: transparent; color: #f1f5f9; }
             QListWidget#sectionNav { background: transparent; border: none; padding: 6px 4px; }
             QListWidget#sectionNav::item { margin: 4px 8px; padding: 10px 14px; border-radius: 12px; color: #cbd5f5; }
+            QListWidget#sectionNav::item:!enabled { margin: 16px 8px 6px 8px; padding: 4px 14px; color: #64748b; font-weight:600; background: transparent; }
             QListWidget#sectionNav::item:selected { background: rgba(99,102,241,0.36); color: #ffffff; }
             QListWidget#sectionNav::item:hover { background: rgba(148,163,184,0.18); }
             QTabWidget::pane { border: 1px solid #1f2a40; border-radius: 12px; margin-top: -4px; background: rgba(13,20,37,0.6); }
@@ -1736,7 +1895,7 @@ class MainWindow(QtWidgets.QMainWindow):
             QLabel#dashboardSubtitle { color: #cbd5f5; font-size: 13px; }
             QLabel#dashboardSectionTitle { font-size: 13px; font-weight: 600; letter-spacing: 0.4px; text-transform: uppercase; color: #9fb7ff; }
             QFrame#dashboardHeader { background: transparent; border: 1px solid #1f2a40; border-radius: 18px; }
-            QFrame#dashboardQuickActions, QFrame#dashboardStats, QFrame#dashboardActivity { background: rgba(15,23,42,0.55); border: 1px solid #1f2a40; border-radius: 16px; }
+            QFrame#dashboardQuickActions, QFrame#dashboardStats, QFrame#dashboardActivity, QFrame#dashboardQuickSettings { background: rgba(15,23,42,0.55); border: 1px solid #1f2a40; border-radius: 16px; }
             QTextBrowser { background-color: #081120; border: 1px solid #1f2a40; border-radius: 10px; padding: 12px; }
             QScrollArea { border: none; }
             QFrame#sessionWindowActions, QFrame#sessionWindowStatus, QFrame#sessionWindowLog { background: rgba(15,23,42,0.45); border: 1px solid #1d2840; border-radius: 12px; }
@@ -1745,6 +1904,16 @@ class MainWindow(QtWidgets.QMainWindow):
             QLabel#sessionWindowStatusLabel { font-size: 13px; font-weight: 600; color: #e2e8f0; }
             QLabel#sessionWindowHint { color: #94a3b8; font-size: 11px; }
             QLabel#sessionWindowLogTitle { font-size: 12px; font-weight: 600; color: #cbd5f5; }
+            QFrame#contextCard { background: rgba(15,23,42,0.6); border:1px solid rgba(148,163,184,0.24); border-radius:16px; }
+            QLabel#contextTitle { font-size:14px; font-weight:600; color:#cbd5f5; }
+            QLabel#contextSubtitle { color:#94a3b8; font-size:12px; }
+            QDialog#commandPalette { background: transparent; }
+            QFrame#commandPaletteFrame { background: rgba(9,13,25,0.96); border-radius:18px; border:1px solid rgba(99,102,241,0.35); }
+            QLineEdit#commandPaletteSearch { background:#070d1a; border-radius:12px; border:1px solid #27364d; padding:10px 14px; font-size:14px; }
+            QListWidget#commandPaletteList { background: transparent; border:none; }
+            QListWidget#commandPaletteList::item { margin:4px 0; padding:10px 12px; border-radius:10px; color:#e2e8f0; }
+            QListWidget#commandPaletteList::item:selected { background: rgba(99,102,241,0.35); }
+            QLabel#commandPaletteHint { color:#64748b; font-size:11px; }
             """
         )
 
@@ -1972,6 +2141,13 @@ class MainWindow(QtWidgets.QMainWindow):
             folders_block.addWidget(btn)
         tb.addWidget(folders_frame)
 
+        self.btn_command_palette_toolbar = QtWidgets.QToolButton()
+        self.btn_command_palette_toolbar.setText("Команды")
+        self.btn_command_palette_toolbar.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.btn_command_palette_toolbar.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_FileDialogContentsView))
+        self.btn_command_palette_toolbar.clicked.connect(self._open_command_palette)
+        tb.addWidget(self.btn_command_palette_toolbar)
+
         tb.addStretch(1)
 
         self.btn_start_selected = QtWidgets.QPushButton("Старт выбранного")
@@ -2007,10 +2183,30 @@ class MainWindow(QtWidgets.QMainWindow):
         self.section_stack.setObjectName("sectionStack")
         body_layout.addWidget(self.section_stack, 1)
 
+        self.context_stack = QtWidgets.QStackedWidget()
+        self.context_stack.setObjectName("contextStack")
+        self.context_stack.setMinimumWidth(260)
+        self.context_stack.setMaximumWidth(320)
+        body_layout.addWidget(self.context_stack)
+
+        body_layout.setStretch(0, 0)
+        body_layout.setStretch(1, 1)
+        body_layout.setStretch(2, 0)
+
         v.addWidget(body, 1)
 
         self._section_index = {}
         self._section_order = []
+        self._section_nav_items: Dict[str, QtWidgets.QListWidgetItem] = {}
+        self._section_meta: Dict[str, Dict[str, Any]] = {}
+        self._nav_group_rows: Dict[str, QtWidgets.QListWidgetItem] = {}
+
+        context_placeholder = QtWidgets.QWidget()
+        placeholder_layout = QtWidgets.QVBoxLayout(context_placeholder)
+        placeholder_layout.setContentsMargins(24, 24, 24, 24)
+        placeholder_layout.addStretch(1)
+        self._context_default_idx = self.context_stack.addWidget(context_placeholder)
+        self._context_index: Dict[str, int] = {}
 
         def add_section(
             key: str,
@@ -2019,6 +2215,8 @@ class MainWindow(QtWidgets.QMainWindow):
             *,
             icon: Optional[QtGui.QIcon] = None,
             scrollable: bool = False,
+            category: str = "Приложение",
+            description: str = "",
         ) -> QtWidgets.QWidget:
             container = widget
             if scrollable:
@@ -2031,10 +2229,40 @@ class MainWindow(QtWidgets.QMainWindow):
             idx = self.section_stack.addWidget(container)
             self._section_index[key] = idx
             self._section_order.append(key)
+            if category not in self._nav_group_rows:
+                group_item = QtWidgets.QListWidgetItem(category.upper())
+                group_item.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled)
+                font = QtGui.QFont(self.section_nav.font())
+                font.setBold(True)
+                font.setPointSize(max(font.pointSize() - 1, 9))
+                group_item.setFont(font)
+                group_item.setForeground(QtGui.QColor("#64748b"))
+                group_item.setSizeHint(QtCore.QSize(220, 30))
+                group_item.setData(QtCore.Qt.ItemDataRole.UserRole, None)
+                group_item.setData(QtCore.Qt.ItemDataRole.UserRole + 1, "header")
+                self.section_nav.addItem(group_item)
+                self._nav_group_rows[category] = group_item
             item = QtWidgets.QListWidgetItem(icon, title) if icon else QtWidgets.QListWidgetItem(title)
             item.setData(QtCore.Qt.ItemDataRole.UserRole, key)
+            item.setData(QtCore.Qt.ItemDataRole.UserRole + 1, category)
             item.setSizeHint(QtCore.QSize(220, 48))
+            if description:
+                item.setToolTip(description)
             self.section_nav.addItem(item)
+            self._section_nav_items[key] = item
+            self._section_meta[key] = {
+                "title": title,
+                "category": category,
+                "description": description,
+            }
+            self._register_command(
+                f"section:{key}",
+                f"Раздел — {title}",
+                lambda k=key: self._focus_section_from_command(k),
+                category="Навигация",
+                subtitle=description or f"Перейти к разделу «{title}»",
+                keywords=[title, category],
+            )
             return container
 
         def make_scroll_tab(margins=(12, 12, 12, 12), spacing=10):
@@ -2049,6 +2277,26 @@ class MainWindow(QtWidgets.QMainWindow):
             layout.setSpacing(spacing)
             area.setWidget(body_widget)
             return area, layout
+
+        def register_context(key: str, widget: QtWidgets.QWidget) -> None:
+            idx = self.context_stack.addWidget(widget)
+            self._context_index[key] = idx
+
+        def make_context_card(title: str, subtitle: str = "") -> Tuple[QtWidgets.QWidget, QtWidgets.QVBoxLayout]:
+            card = QtWidgets.QFrame()
+            card.setObjectName("contextCard")
+            layout = QtWidgets.QVBoxLayout(card)
+            layout.setContentsMargins(18, 18, 18, 18)
+            layout.setSpacing(12)
+            lbl_title = QtWidgets.QLabel(title)
+            lbl_title.setObjectName("contextTitle")
+            layout.addWidget(lbl_title)
+            if subtitle:
+                lbl_sub = QtWidgets.QLabel(subtitle)
+                lbl_sub.setObjectName("contextSubtitle")
+                lbl_sub.setWordWrap(True)
+                layout.addWidget(lbl_sub)
+            return card, layout
 
         overview_root = QtWidgets.QWidget()
         overview_layout = QtWidgets.QVBoxLayout(overview_root)
@@ -2107,6 +2355,73 @@ class MainWindow(QtWidgets.QMainWindow):
         quick_layout.addWidget(btn_quick_settings)
         quick_layout.addStretch(1)
         overview_layout.addWidget(quick_panel)
+
+        self._register_command(
+            "app:command_palette",
+            "Командная палитра",
+            self._open_command_palette,
+            category="Приложение",
+            subtitle="Быстрый поиск действий и разделов",
+            shortcut="Ctrl+K",
+            keywords=["поиск", "palette"],
+        )
+        self._register_command(
+            "action:run_scenario",
+            "Запустить сценарий",
+            self._run_scenario,
+            category="Автоматизация",
+            subtitle="Старт сценария по выбранным шагам",
+            keywords=["start", "automation"],
+        )
+        self._register_command(
+            "action:run_images",
+            "Генерация картинок",
+            self._save_and_run_autogen_images,
+            category="Автоматизация",
+            subtitle="Запустить генерацию в Google AI Studio",
+            keywords=["images", "google"],
+        )
+        self._register_command(
+            "action:open_chrome",
+            "Запустить Chrome",
+            self._open_chrome,
+            category="Рабочие пространства",
+            subtitle="Открыть активный профиль Chrome",
+            keywords=["browser", "cdp"],
+        )
+
+        quick_settings = QtWidgets.QFrame()
+        quick_settings.setObjectName("dashboardQuickSettings")
+        quick_settings_layout = QtWidgets.QHBoxLayout(quick_settings)
+        quick_settings_layout.setContentsMargins(16, 12, 16, 12)
+        quick_settings_layout.setSpacing(12)
+        self.cb_quick_activity = QtWidgets.QCheckBox("Журнал на обзоре")
+        self.cb_quick_activity.setChecked(bool(self.cfg.get("ui", {}).get("show_activity", True)))
+        quick_settings_layout.addWidget(self.cb_quick_activity)
+        lbl_density = QtWidgets.QLabel("Вид списка:")
+        quick_settings_layout.addWidget(lbl_density)
+        self.cmb_quick_density = QtWidgets.QComboBox()
+        self.cmb_quick_density.addItem("Компактная", "compact")
+        self.cmb_quick_density.addItem("Стандартная", "cozy")
+        density_pref = self.cfg.get("ui", {}).get("activity_density", "compact")
+        idx_density = self.cmb_quick_density.findData(density_pref)
+        if idx_density < 0:
+            idx_density = 0
+        self.cmb_quick_density.setCurrentIndex(idx_density)
+        quick_settings_layout.addWidget(self.cmb_quick_density)
+        quick_settings_layout.addStretch(1)
+
+        def open_ui_settings():
+            self._focus_section_from_command("settings")
+            if hasattr(self, "settings_tabs") and hasattr(self, "page_ui_settings"):
+                idx = self.settings_tabs.indexOf(self.page_ui_settings)
+                if idx >= 0:
+                    self.settings_tabs.setCurrentIndex(idx)
+
+        btn_open_ui_settings = QtWidgets.QPushButton("Настройки интерфейса…")
+        btn_open_ui_settings.clicked.connect(open_ui_settings)
+        quick_settings_layout.addWidget(btn_open_ui_settings)
+        overview_layout.addWidget(quick_settings)
 
         stats_panel = QtWidgets.QFrame()
         stats_panel.setObjectName("dashboardStats")
@@ -2262,21 +2577,71 @@ class MainWindow(QtWidgets.QMainWindow):
         activity_layout.addWidget(self.activity_splitter, 1)
         overview_layout.addWidget(activity_panel)
 
+        overview_context, overview_ctx_layout = make_context_card(
+            "Обзор",
+            "Быстрая настройка панели активности и доступ к глобальным действиям.",
+        )
+        stats_form = QtWidgets.QFormLayout()
+        stats_form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignLeft)
+        stats_form.setHorizontalSpacing(8)
+        stats_form.setVerticalSpacing(6)
+        self.lbl_context_overview_activity = QtWidgets.QLabel("—")
+        self.lbl_context_overview_density = QtWidgets.QLabel("—")
+        stats_form.addRow("Журнал:", self.lbl_context_overview_activity)
+        stats_form.addRow("Формат списка:", self.lbl_context_overview_density)
+        overview_ctx_layout.addLayout(stats_form)
+
+        btn_palette = QtWidgets.QPushButton("Командная палитра…")
+        btn_palette.setObjectName("contextPaletteButton")
+        btn_palette.clicked.connect(self._open_command_palette)
+        overview_ctx_layout.addWidget(btn_palette)
+        overview_ctx_layout.addStretch(1)
+        register_context("overview", overview_context)
+
         add_section(
             "overview",
             "Обзор",
             overview_root,
             icon=self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DialogHelpButton),
             scrollable=True,
+            category="Главная",
+            description="Центр управления и статистики приложения",
         )
 
         self.tab_sessions = self._build_sessions_tab()
+        workspace_context, workspace_ctx_layout = make_context_card(
+            "Рабочее пространство",
+            "Следи за активной сессией и управляй действиями без перехода в раздел.",
+        )
+        session_form = QtWidgets.QFormLayout()
+        session_form.setHorizontalSpacing(8)
+        session_form.setVerticalSpacing(6)
+        self.lbl_context_session_name = QtWidgets.QLabel("—")
+        self.lbl_context_session_profiles = QtWidgets.QLabel("—")
+        self.lbl_context_session_status = QtWidgets.QLabel("—")
+        session_form.addRow("Сессия:", self.lbl_context_session_name)
+        session_form.addRow("Профили:", self.lbl_context_session_profiles)
+        session_form.addRow("Статус:", self.lbl_context_session_status)
+        workspace_ctx_layout.addLayout(session_form)
+
+        session_buttons = QtWidgets.QHBoxLayout()
+        self.btn_context_session_window = QtWidgets.QPushButton("Окно")
+        self.btn_context_session_prompts = QtWidgets.QPushButton("Автоген")
+        self.btn_context_session_images = QtWidgets.QPushButton("Картинки")
+        session_buttons.addWidget(self.btn_context_session_window)
+        session_buttons.addWidget(self.btn_context_session_prompts)
+        session_buttons.addWidget(self.btn_context_session_images)
+        workspace_ctx_layout.addLayout(session_buttons)
+        workspace_ctx_layout.addStretch(1)
+        register_context("workspaces", workspace_context)
         add_section(
             "workspaces",
             "Рабочие пространства",
             self.tab_sessions,
             icon=self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_FileDialogStart),
             scrollable=True,
+            category="Рабочие процессы",
+            description="Настройка параллельных профилей Chrome и промптов",
         )
 
         self.tab_tasks, lt = make_scroll_tab(margins=(0, 0, 0, 0))
@@ -2528,11 +2893,33 @@ class MainWindow(QtWidgets.QMainWindow):
         merge_layout.addStretch(1)
         self.task_tabs.addTab(merge_tab, "Склейка")
 
+        automation_context, automation_ctx_layout = make_context_card(
+            "Пресеты запуска",
+            "Готовые сценарии отмечают нужные этапы и помогают переключаться между режимами работы.",
+        )
+        preset_hint = QtWidgets.QLabel("Выбери набор шагов или собери свой вручную в разделе «Автоматизация».")
+        preset_hint.setWordWrap(True)
+        automation_ctx_layout.addWidget(preset_hint)
+        preset_buttons = QtWidgets.QVBoxLayout()
+        self.btn_preset_full_cycle = QtWidgets.QPushButton("Полный цикл")
+        self.btn_preset_generate = QtWidgets.QPushButton("Генерация + постинг")
+        self.btn_preset_prompts_only = QtWidgets.QPushButton("Только промпты")
+        self.btn_preset_clear = QtWidgets.QPushButton("Сбросить выбор")
+        preset_buttons.addWidget(self.btn_preset_full_cycle)
+        preset_buttons.addWidget(self.btn_preset_generate)
+        preset_buttons.addWidget(self.btn_preset_prompts_only)
+        preset_buttons.addWidget(self.btn_preset_clear)
+        automation_ctx_layout.addLayout(preset_buttons)
+        automation_ctx_layout.addStretch(1)
+        register_context("automation", automation_context)
+
         add_section(
             "automation",
             "Автоматизация",
             self.tab_tasks,
             icon=self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_ArrowForward),
+            category="Рабочие процессы",
+            description="Пошаговый запуск: генерация, скачивание, блюр, склейка и загрузка",
         )
 
         # TAB: YouTube uploader
@@ -3093,6 +3480,23 @@ class MainWindow(QtWidgets.QMainWindow):
         settings_layout.addLayout(controls_row)
 
         self.tab_settings.setWidget(settings_body)
+        settings_context, settings_ctx_layout = make_context_card(
+            "Конфигурация",
+            "Следи за статусом сохранения и быстро открывай каталог проекта.",
+        )
+        settings_form = QtWidgets.QFormLayout()
+        settings_form.setHorizontalSpacing(8)
+        settings_form.setVerticalSpacing(6)
+        self.lbl_context_settings_status = QtWidgets.QLabel("—")
+        self.lbl_context_project_root = QtWidgets.QLabel(self.cfg.get("project_root", str(PROJECT_ROOT)))
+        self.lbl_context_project_root.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        settings_form.addRow("Сохранение:", self.lbl_context_settings_status)
+        settings_form.addRow("Проект:", self.lbl_context_project_root)
+        settings_ctx_layout.addLayout(settings_form)
+        self.btn_context_open_project = QtWidgets.QPushButton("Открыть папку проекта")
+        settings_ctx_layout.addWidget(self.btn_context_open_project)
+        settings_ctx_layout.addStretch(1)
+        register_context("settings", settings_context)
 
         content_host = QtWidgets.QWidget()
         content_layout = QtWidgets.QVBoxLayout(content_host)
@@ -3103,11 +3507,45 @@ class MainWindow(QtWidgets.QMainWindow):
         self.content_tabs.addTab(self.tab_image_prompts, "Промпты картинок")
         self.content_tabs.addTab(self.tab_titles, "Названия")
         content_layout.addWidget(self.content_tabs)
+        content_context, content_ctx_layout = make_context_card(
+            "Материалы",
+            "Текущие файлы с промптами, шаблонами изображений и названиями.",
+        )
+        content_form = QtWidgets.QFormLayout()
+        content_form.setHorizontalSpacing(8)
+        content_form.setVerticalSpacing(6)
+        self.lbl_context_content_profile = QtWidgets.QLabel("—")
+        self.lbl_context_prompts_path = QtWidgets.QLabel("—")
+        self.lbl_context_image_prompts_path = QtWidgets.QLabel("—")
+        self.lbl_context_titles_path = QtWidgets.QLabel("—")
+        for label in (
+            self.lbl_context_prompts_path,
+            self.lbl_context_image_prompts_path,
+            self.lbl_context_titles_path,
+        ):
+            label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        content_form.addRow("Профиль:", self.lbl_context_content_profile)
+        content_form.addRow("Sora:", self.lbl_context_prompts_path)
+        content_form.addRow("Картинки:", self.lbl_context_image_prompts_path)
+        content_form.addRow("Названия:", self.lbl_context_titles_path)
+        content_ctx_layout.addLayout(content_form)
+        btn_row = QtWidgets.QHBoxLayout()
+        self.btn_context_open_prompts = QtWidgets.QPushButton("Открыть промпты")
+        self.btn_context_open_image_prompts = QtWidgets.QPushButton("Открыть картинки")
+        self.btn_context_open_titles = QtWidgets.QPushButton("Открыть названия")
+        btn_row.addWidget(self.btn_context_open_prompts)
+        btn_row.addWidget(self.btn_context_open_image_prompts)
+        btn_row.addWidget(self.btn_context_open_titles)
+        content_ctx_layout.addLayout(btn_row)
+        content_ctx_layout.addStretch(1)
+        register_context("content", content_context)
         add_section(
             "content",
             "Контент",
             content_host,
             icon=self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_FileDialogListView),
+            category="Контент",
+            description="Редакторы промптов, изображений и заголовков",
         )
 
         autopost_host = QtWidgets.QWidget()
@@ -3118,14 +3556,52 @@ class MainWindow(QtWidgets.QMainWindow):
         self.autopost_tabs.addTab(self.tab_youtube, "YouTube")
         self.autopost_tabs.addTab(self.tab_tiktok, "TikTok")
         autopost_layout.addWidget(self.autopost_tabs)
+        autopost_context, autopost_ctx_layout = make_context_card(
+            "Очереди",
+            "Контролируй количество роликов в очереди публикаций и обновляй данные перед стартом.",
+        )
+        queue_form = QtWidgets.QFormLayout()
+        queue_form.setHorizontalSpacing(8)
+        queue_form.setVerticalSpacing(6)
+        self.lbl_context_youtube_queue = QtWidgets.QLabel("—")
+        self.lbl_context_tiktok_queue = QtWidgets.QLabel("—")
+        queue_form.addRow("YouTube:", self.lbl_context_youtube_queue)
+        queue_form.addRow("TikTok:", self.lbl_context_tiktok_queue)
+        autopost_ctx_layout.addLayout(queue_form)
+        self.btn_context_refresh_queues = QtWidgets.QPushButton("Обновить очереди")
+        autopost_ctx_layout.addWidget(self.btn_context_refresh_queues)
+        autopost_ctx_layout.addStretch(1)
+        register_context("autopost", autopost_context)
 
         self.telegram_panel = self._build_telegram_panel()
+        telegram_context, telegram_ctx_layout = make_context_card(
+            "Telegram",
+            "Статус подключения и быстрые проверки рассылки.",
+        )
+        tg_form = QtWidgets.QFormLayout()
+        tg_form.setHorizontalSpacing(8)
+        tg_form.setVerticalSpacing(6)
+        self.lbl_context_tg_enabled = QtWidgets.QLabel("—")
+        self.lbl_context_tg_template = QtWidgets.QLabel("—")
+        tg_form.addRow("Уведомления:", self.lbl_context_tg_enabled)
+        tg_form.addRow("Шаблон:", self.lbl_context_tg_template)
+        telegram_ctx_layout.addLayout(tg_form)
+        tg_btns = QtWidgets.QHBoxLayout()
+        self.btn_context_tg_test = QtWidgets.QPushButton("Тест")
+        self.btn_context_tg_open = QtWidgets.QPushButton("Открыть раздел")
+        tg_btns.addWidget(self.btn_context_tg_test)
+        tg_btns.addWidget(self.btn_context_tg_open)
+        telegram_ctx_layout.addLayout(tg_btns)
+        telegram_ctx_layout.addStretch(1)
+        register_context("telegram", telegram_context)
         add_section(
             "telegram",
             "Telegram",
             self.telegram_panel,
             icon=self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MessageBoxInformation),
             scrollable=True,
+            category="Интеграции",
+            description="Уведомления, шаблоны и моментальные сообщения в Telegram",
         )
         self._refresh_telegram_history()
         add_section(
@@ -3133,6 +3609,8 @@ class MainWindow(QtWidgets.QMainWindow):
             "Автопостинг",
             autopost_host,
             icon=self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MediaPlay),
+            category="Публикации",
+            description="YouTube и TikTok: очереди, расписания и архивы",
         )
 
         add_section(
@@ -3140,40 +3618,404 @@ class MainWindow(QtWidgets.QMainWindow):
             "Настройки",
             self.tab_settings,
             icon=self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_FileDialogDetailedView),
+            category="Система",
+            description="Каталоги, Chrome, ffmpeg, история и обслуживание",
         )
 
         self._load_zones_into_ui()
         self._toggle_youtube_schedule()
+        self._refresh_settings_context()
 
         self.section_nav.currentRowChanged.connect(self._on_section_nav_changed)
         if self.section_nav.count():
-            self.section_nav.setCurrentRow(0)
+            for row in range(self.section_nav.count()):
+                item = self.section_nav.item(row)
+                if item and item.data(QtCore.Qt.ItemDataRole.UserRole):
+                    self.section_nav.setCurrentRow(row)
+                    break
         else:
             self._current_section_key = "overview"
         self._update_current_event("—", self.cfg.get("ui", {}).get("accent_kind", "info"), persist=False)
         self._apply_activity_visibility(self.chk_activity_visible.isChecked(), persist=False)
 
-    def _on_section_nav_changed(self, row: int):
-        if row < 0:
-            self.section_stack.setCurrentIndex(-1)
-            self._current_section_key = ""
+    # ----- command palette -----
+    def _register_command(
+        self,
+        command_id: str,
+        title: str,
+        callback: Callable[[], None],
+        *,
+        category: str = "Приложение",
+        subtitle: str = "",
+        shortcut: Optional[str] = None,
+        keywords: Optional[Iterable[str]] = None,
+    ) -> None:
+        if not callable(callback):
             return
-        self.section_stack.setCurrentIndex(row)
-        if 0 <= row < len(getattr(self, "_section_order", [])):
-            self._current_section_key = self._section_order[row]
-            if self._current_section_key == "telegram":
-                self._refresh_telegram_history()
+        keywords = list(keywords or [])
+        existing_action = self._command_actions.pop(command_id, None)
+        if existing_action is not None:
+            self.removeAction(existing_action)
+
+        action = None
+        if shortcut:
+            action = QtGui.QAction(title, self)
+            action.setShortcut(QtGui.QKeySequence(shortcut))
+            action.setShortcutContext(QtCore.Qt.ShortcutContext.ApplicationShortcut)
+            action.triggered.connect(callback)
+            self.addAction(action)
+            self._command_actions[command_id] = action
+
+        self._command_registry[command_id] = {
+            "id": command_id,
+            "title": title,
+            "subtitle": subtitle or "",
+            "category": category,
+            "keywords": keywords,
+            "callback": callback,
+            "shortcut": shortcut or "",
+        }
+
+    def _remove_command(self, command_id: str) -> None:
+        if command_id in self._command_registry:
+            self._command_registry.pop(command_id, None)
+        action = self._command_actions.pop(command_id, None)
+        if action:
+            self.removeAction(action)
+
+    def _prune_commands_with_prefix(self, prefix: str) -> None:
+        to_remove = [cid for cid in self._command_registry if cid.startswith(prefix)]
+        for cid in to_remove:
+            self._remove_command(cid)
+
+    def _open_command_palette(self) -> None:
+        items: List[Dict[str, Any]] = []
+        for meta in self._command_registry.values():
+            items.append(
+                {
+                    "id": meta.get("id"),
+                    "title": meta.get("title", ""),
+                    "subtitle": meta.get("subtitle", ""),
+                    "category": meta.get("category", ""),
+                    "keywords": list(meta.get("keywords", [])),
+                }
+            )
+        items.sort(key=lambda it: (it.get("category", ""), it.get("title", "")))
+        dialog = CommandPaletteDialog(self, items)
+        geo = self.geometry()
+        dlg_geo = dialog.frameGeometry()
+        dlg_geo.moveCenter(geo.center())
+        dialog.move(dlg_geo.topLeft())
+        if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            selected = dialog.selected_command()
+            if selected and selected in self._command_registry:
+                callback = self._command_registry[selected].get("callback")
+                if callable(callback):
+                    callback()
+
+    def _focus_section_from_command(self, key: str) -> None:
+        self._select_section(key)
+        self.raise_()
+        self.activateWindow()
+
+    def _focus_session_from_command(self, session_id: str) -> None:
+        self._focus_section_from_command("workspaces")
+        if not hasattr(self, "lst_sessions"):
+            return
+        for row in range(self.lst_sessions.count()):
+            item = self.lst_sessions.item(row)
+            if not item:
+                continue
+            if item.data(QtCore.Qt.ItemDataRole.UserRole) == session_id:
+                self.lst_sessions.setCurrentRow(row)
+                break
+
+    def _refresh_command_palette_sessions(self) -> None:
+        self._prune_commands_with_prefix("session:")
+        for session_id in self._session_order:
+            session = self._session_cache.get(session_id)
+            if not session:
+                continue
+            name = session.get("name", session_id)
+            chrome = session.get("chrome_profile", "") or "по умолчанию"
+            prompt = session.get("prompt_profile", PROMPTS_DEFAULT_KEY)
+            subtitle = f"Chrome: {chrome} · Промпты: {self._prompt_profile_label(prompt)}"
+            keywords = [name, chrome, prompt]
+            self._register_command(
+                f"session:{session_id}",
+                f"Рабочее пространство — {name}",
+                lambda sid=session_id: self._focus_session_from_command(sid),
+                category="Рабочие пространства",
+                subtitle=subtitle,
+                keywords=keywords,
+            )
+
+    def _update_context_panel_for_section(self, key: str) -> None:
+        if not hasattr(self, "context_stack"):
+            return
+        idx = self._context_index.get(key, getattr(self, "_context_default_idx", 0))
+        if self.context_stack.currentIndex() != idx:
+            self.context_stack.setCurrentIndex(idx)
+        refresher = {
+            "overview": self._refresh_overview_context,
+            "workspaces": self._refresh_workspace_context,
+            "automation": self._refresh_automation_context,
+            "content": self._refresh_content_context,
+            "telegram": self._refresh_telegram_context,
+            "autopost": self._refresh_autopost_context,
+            "settings": self._refresh_settings_context,
+        }.get(key)
+        if callable(refresher):
+            refresher()
+
+    def _refresh_overview_context(self) -> None:
+        visible = bool(self.cfg.get("ui", {}).get("show_activity", True))
+        density = self.cfg.get("ui", {}).get("activity_density", "compact")
+        if hasattr(self, "lbl_context_overview_activity"):
+            self.lbl_context_overview_activity.setText("включён" if visible else "скрыт")
+        if hasattr(self, "lbl_context_overview_density"):
+            mapping = {"compact": "компактная", "cozy": "стандартная"}
+            self.lbl_context_overview_density.setText(mapping.get(density, density))
+
+    def _refresh_workspace_context(self) -> None:
+        if not hasattr(self, "lbl_context_session_name"):
+            return
+        session = self._session_cache.get(self._current_session_id)
+        if not session:
+            self.lbl_context_session_name.setText("—")
+            self.lbl_context_session_profiles.setText("—")
+            self.lbl_context_session_status.setText("—")
+            return
+        name = session.get("name", self._current_session_id)
+        chrome = session.get("chrome_profile", "") or "по умолчанию"
+        prompt = session.get("prompt_profile", PROMPTS_DEFAULT_KEY)
+        self.lbl_context_session_name.setText(name)
+        self.lbl_context_session_profiles.setText(f"Chrome: {chrome} · Промпты: {self._prompt_profile_label(prompt)}")
+        state = self._ensure_session_state(self._current_session_id)
+        status = state.get("status", "idle")
+        message = state.get("last_message", "")
+        icon = self._session_status_icon(status)
+        self.lbl_context_session_status.setText(message or f"{icon} {status}")
+
+    def _refresh_automation_context(self) -> None:
+        # Контекстная панель основана на статических пресетах, динамических данных нет
+        return
+
+    def _refresh_content_context(self) -> None:
+        if not hasattr(self, "lbl_context_content_profile"):
+            return
+        profile_label = self._prompt_profile_label(self._current_prompt_profile_key)
+        self.lbl_context_content_profile.setText(profile_label)
+        try:
+            prompts_path = str(self._prompts_path())
+        except Exception:
+            prompts_path = "—"
+        try:
+            image_path = str(self._image_prompts_path())
+        except Exception:
+            image_path = "—"
+        titles_path = self.cfg.get("titles_file", str(TITLES_FILE))
+        self.lbl_context_prompts_path.setText(prompts_path)
+        self.lbl_context_image_prompts_path.setText(image_path)
+        self.lbl_context_titles_path.setText(str(titles_path))
+
+    def _refresh_telegram_context(self) -> None:
+        tg_cfg = self.cfg.get("telegram", {}) or {}
+        enabled = tg_cfg.get("enabled", False)
+        template = tg_cfg.get("last_template") or "—"
+        if hasattr(self, "lbl_context_tg_enabled"):
+            self.lbl_context_tg_enabled.setText("включены" if enabled else "выключены")
+        if hasattr(self, "lbl_context_tg_template"):
+            self.lbl_context_tg_template.setText(template)
+
+    def _refresh_autopost_context(self) -> None:
+        if hasattr(self, "lbl_context_youtube_queue") and hasattr(self, "lbl_youtube_queue"):
+            self.lbl_context_youtube_queue.setText(self.lbl_youtube_queue.text())
+        if hasattr(self, "lbl_context_tiktok_queue") and hasattr(self, "lbl_tiktok_queue"):
+            self.lbl_context_tiktok_queue.setText(self.lbl_tiktok_queue.text())
+
+    def _refresh_settings_context(self) -> None:
+        if hasattr(self, "lbl_context_settings_status") and hasattr(self, "lbl_settings_status"):
+            self.lbl_context_settings_status.setText(self.lbl_settings_status.text())
+        if hasattr(self, "lbl_context_project_root"):
+            self.lbl_context_project_root.setText(self.cfg.get("project_root", str(PROJECT_ROOT)))
+
+    def _refresh_telegram_templates(self) -> None:
+        if not hasattr(self, "cmb_tg_templates"):
+            return
+        self.cmb_tg_templates.blockSignals(True)
+        self.cmb_tg_templates.clear()
+        self.cmb_tg_templates.addItem("— Без шаблона —", None)
+        for idx, template in enumerate(self._telegram_templates):
+            name = template.get("name") or f"Шаблон {idx + 1}"
+            self.cmb_tg_templates.addItem(name, idx)
+        self.cmb_tg_templates.blockSignals(False)
+        last = self.cfg.get("telegram", {}).get("last_template", "") or ""
+        if last:
+            self._select_telegram_template_by_name(last, apply_text=True)
+        else:
+            self.cmb_tg_templates.setCurrentIndex(0)
+            if hasattr(self, "ed_tg_template_name"):
+                self.ed_tg_template_name.clear()
+
+    def _select_telegram_template_by_name(self, name: str, apply_text: bool = True) -> None:
+        if not hasattr(self, "cmb_tg_templates"):
+            return
+        target_idx = None
+        for idx, template in enumerate(self._telegram_templates):
+            if template.get("name") == name:
+                target_idx = idx
+                break
+        if target_idx is None:
+            self.cmb_tg_templates.blockSignals(True)
+            self.cmb_tg_templates.setCurrentIndex(0)
+            self.cmb_tg_templates.blockSignals(False)
+            if apply_text and hasattr(self, "ed_tg_template_name"):
+                self.ed_tg_template_name.setText(name or "")
+            return
+        for row in range(self.cmb_tg_templates.count()):
+            data = self.cmb_tg_templates.itemData(row)
+            if data == target_idx:
+                self.cmb_tg_templates.blockSignals(True)
+                self.cmb_tg_templates.setCurrentIndex(row)
+                self.cmb_tg_templates.blockSignals(False)
+                if apply_text and 0 <= target_idx < len(self._telegram_templates):
+                    template = self._telegram_templates[target_idx]
+                    if hasattr(self, "ed_tg_template_name"):
+                        self.ed_tg_template_name.setText(template.get("name", ""))
+                    if hasattr(self, "ed_tg_quick_message"):
+                        self.ed_tg_quick_message.setPlainText(template.get("text", ""))
+                break
+
+    def _on_tg_template_selected(self, index: int) -> None:
+        if not hasattr(self, "cmb_tg_templates"):
+            return
+        data = self.cmb_tg_templates.itemData(index)
+        if data is None:
+            if hasattr(self, "ed_tg_template_name"):
+                self.ed_tg_template_name.clear()
+            return
+        try:
+            template = self._telegram_templates[int(data)]
+        except (IndexError, ValueError, TypeError):
+            return
+        if hasattr(self, "ed_tg_template_name"):
+            self.ed_tg_template_name.setText(template.get("name", ""))
+        if hasattr(self, "ed_tg_quick_message"):
+            self.ed_tg_quick_message.setPlainText(template.get("text", ""))
+        tg_cfg = self.cfg.setdefault("telegram", {})
+        tg_cfg["last_template"] = template.get("name", "")
+        save_cfg(self.cfg)
+        self._refresh_telegram_context()
+
+    def _on_tg_template_save(self) -> None:
+        name = self.ed_tg_template_name.text().strip() if hasattr(self, "ed_tg_template_name") else ""
+        body = self.ed_tg_quick_message.toPlainText().strip() if hasattr(self, "ed_tg_quick_message") else ""
+        if not name or not body:
+            self.lbl_tg_status.setText("Укажи название и текст для шаблона")
+            self.lbl_tg_status.setStyleSheet("QLabel{color:#facc15;}")
+            return
+        updated = False
+        for template in self._telegram_templates:
+            if template.get("name") == name:
+                template["text"] = body
+                updated = True
+                break
+        if not updated:
+            self._telegram_templates.append({"name": name, "text": body})
+        tg_cfg = self.cfg.setdefault("telegram", {})
+        tg_cfg["templates"] = list(self._telegram_templates)
+        tg_cfg["last_template"] = name
+        save_cfg(self.cfg)
+        self._refresh_telegram_templates()
+        self._select_telegram_template_by_name(name, apply_text=False)
+        self.lbl_tg_status.setText("Шаблон сохранён")
+        self.lbl_tg_status.setStyleSheet("QLabel{color:#34d399;}")
+        self._refresh_telegram_context()
+
+    def _on_tg_template_delete(self) -> None:
+        name = self.ed_tg_template_name.text().strip() if hasattr(self, "ed_tg_template_name") else ""
+        if not name:
+            self.lbl_tg_status.setText("Выбери шаблон для удаления")
+            self.lbl_tg_status.setStyleSheet("QLabel{color:#facc15;}")
+            return
+        before = len(self._telegram_templates)
+        self._telegram_templates = [tpl for tpl in self._telegram_templates if tpl.get("name") != name]
+        if len(self._telegram_templates) == before:
+            self.lbl_tg_status.setText("Шаблон не найден")
+            self.lbl_tg_status.setStyleSheet("QLabel{color:#facc15;}")
+            return
+        tg_cfg = self.cfg.setdefault("telegram", {})
+        tg_cfg["templates"] = list(self._telegram_templates)
+        if tg_cfg.get("last_template") == name:
+            tg_cfg["last_template"] = ""
+        save_cfg(self.cfg)
+        self._refresh_telegram_templates()
+        self._select_telegram_template_by_name("", apply_text=False)
+        if hasattr(self, "ed_tg_template_name"):
+            self.ed_tg_template_name.clear()
+        self.lbl_tg_status.setText("Шаблон удалён")
+        self.lbl_tg_status.setStyleSheet("QLabel{color:#38bdf8;}")
+        self._refresh_telegram_context()
+
+    def _on_tg_delay_changed(self, value: int) -> None:
+        tg_cfg = self.cfg.setdefault("telegram", {})
+        tg_cfg["quick_delay_minutes"] = int(value)
+        self._mark_settings_dirty()
+
+    def _apply_task_preset(self, preset_name: str, steps: Iterable[str]) -> None:
+        mapping = {
+            "images": getattr(self, "cb_do_images", None),
+            "prompts": getattr(self, "cb_do_autogen", None),
+            "download": getattr(self, "cb_do_download", None),
+            "blur": getattr(self, "cb_do_blur", None),
+            "merge": getattr(self, "cb_do_merge", None),
+            "youtube": getattr(self, "cb_do_upload", None),
+            "tiktok": getattr(self, "cb_do_tiktok", None),
+        }
+        selected = {step for step in steps}
+        for key, checkbox in mapping.items():
+            if not checkbox:
+                continue
+            checkbox.blockSignals(True)
+            checkbox.setChecked(key in selected)
+            checkbox.blockSignals(False)
+        message = f"Пресет задач: {preset_name}"
+        self._append_activity(message, kind="info")
+        try:
+            self._post_status(message, state="info")
+        except Exception:
+            pass
+
+    def _on_section_nav_changed(self, row: int):
+        item = self.section_nav.item(row) if row >= 0 else None
+        if not item:
+            return
+        key = item.data(QtCore.Qt.ItemDataRole.UserRole)
+        if not key:
+            return
+        idx = self._section_index.get(key)
+        if idx is None:
+            return
+        self.section_stack.setCurrentIndex(idx)
+        self._current_section_key = key
+        if key == "telegram":
+            self._refresh_telegram_history()
+        self._update_context_panel_for_section(key)
 
     def _select_section(self, key: str):
         if not getattr(self, "section_nav", None):
             return
-        idx = getattr(self, "_section_index", {}).get(key)
-        if idx is None:
+        item = self._section_nav_items.get(key)
+        if not item:
+            return
+        row = self.section_nav.row(item)
+        if row < 0:
             return
         self.section_nav.blockSignals(True)
-        self.section_nav.setCurrentRow(idx)
+        self.section_nav.setCurrentRow(row)
         self.section_nav.blockSignals(False)
-        self._on_section_nav_changed(idx)
+        self._on_section_nav_changed(row)
 
     def _build_settings_pages(self):
         ch = self.cfg.get("chrome", {})
@@ -3955,6 +4797,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self, "_settings_autosave_timer"):
             self._settings_autosave_timer.stop()
             self._settings_autosave_timer.start()
+        self._refresh_settings_context()
 
     def _autosave_settings(self):
         if getattr(self, "_settings_dirty", False):
@@ -4295,6 +5138,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _build_telegram_panel(self) -> QtWidgets.QWidget:
         tg_cfg = self.cfg.get("telegram", {}) or {}
+        raw_templates = tg_cfg.get("templates") or []
+        self._telegram_templates = [
+            {"name": str(t.get("name", "")).strip(), "text": t.get("text", "")}
+            for t in raw_templates
+            if isinstance(t, dict)
+        ]
         root = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(root)
         layout.setContentsMargins(18, 18, 18, 18)
@@ -4337,6 +5186,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ed_tg_quick_message.setPlaceholderText("Напиши сообщение для команды или канала…")
         self.ed_tg_quick_message.setMaximumBlockCount(200)
         quick_layout.addWidget(self.ed_tg_quick_message)
+        schedule_row = QtWidgets.QHBoxLayout()
+        schedule_row.addWidget(QtWidgets.QLabel("Отправить через:"))
+        self.sb_tg_quick_delay = QtWidgets.QSpinBox()
+        self.sb_tg_quick_delay.setRange(0, 1440)
+        self.sb_tg_quick_delay.setSuffix(" мин")
+        self.sb_tg_quick_delay.setValue(int(tg_cfg.get("quick_delay_minutes", 0)))
+        schedule_row.addWidget(self.sb_tg_quick_delay)
+        schedule_row.addStretch(1)
+        quick_layout.addLayout(schedule_row)
         quick_buttons = QtWidgets.QHBoxLayout()
         self.btn_tg_quick_send = QtWidgets.QPushButton("Отправить сейчас")
         self.btn_tg_quick_clear = QtWidgets.QPushButton("Очистить")
@@ -4348,6 +5206,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lbl_tg_status.setStyleSheet("QLabel{color:#94a3b8;}")
         quick_layout.addWidget(self.lbl_tg_status)
         layout.addWidget(quick_box)
+
+        templates_box = QtWidgets.QGroupBox("Шаблоны сообщений")
+        templates_form = QtWidgets.QFormLayout(templates_box)
+        templates_form.setHorizontalSpacing(8)
+        templates_form.setVerticalSpacing(6)
+        self.cmb_tg_templates = QtWidgets.QComboBox()
+        templates_form.addRow("Выбрать:", self.cmb_tg_templates)
+        self.ed_tg_template_name = QtWidgets.QLineEdit()
+        templates_form.addRow("Название:", self.ed_tg_template_name)
+        template_buttons = QtWidgets.QHBoxLayout()
+        self.btn_tg_template_save = QtWidgets.QPushButton("Сохранить")
+        self.btn_tg_template_delete = QtWidgets.QPushButton("Удалить")
+        template_buttons.addWidget(self.btn_tg_template_save)
+        template_buttons.addWidget(self.btn_tg_template_delete)
+        template_buttons.addStretch(1)
+        templates_form.addRow(template_buttons)
+        layout.addWidget(templates_box)
 
         history_box = QtWidgets.QGroupBox("Недавние сообщения")
         history_layout = QtWidgets.QVBoxLayout(history_box)
@@ -4376,6 +5251,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_tg_quick_clear.clicked.connect(self._clear_quick_telegram_message)
         self.btn_tg_history_refresh.clicked.connect(self._refresh_telegram_history)
         self.btn_tg_history_clear.clicked.connect(self._clear_telegram_history)
+        self.cmb_tg_templates.currentIndexChanged.connect(self._on_tg_template_selected)
+        self.btn_tg_template_save.clicked.connect(self._on_tg_template_save)
+        self.btn_tg_template_delete.clicked.connect(self._on_tg_template_delete)
+        self.sb_tg_quick_delay.valueChanged.connect(self._on_tg_delay_changed)
+
+        self._refresh_telegram_templates()
+        self._refresh_telegram_context()
 
         return root
 
@@ -4629,6 +5511,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.chk_activity_visible.toggled.connect(self._on_activity_toggle)
         self.ed_activity_filter.textChanged.connect(self._on_activity_filter_changed)
         self.btn_activity_export.clicked.connect(self._export_activity_log)
+        if hasattr(self, "cb_quick_activity"):
+            self.cb_quick_activity.toggled.connect(lambda checked: self._apply_activity_visibility(bool(checked), persist=True))
+        if hasattr(self, "cmb_quick_density"):
+            self.cmb_quick_density.currentIndexChanged.connect(
+                lambda _: self._apply_activity_density(self.cmb_quick_density.currentData() or "compact", persist=True)
+            )
 
         self.btn_load_prompts.clicked.connect(self._load_prompts)
         self.btn_save_prompts.clicked.connect(self._save_prompts)
@@ -4698,6 +5586,57 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_tt_set_active.clicked.connect(self._on_tiktok_set_active)
         self.btn_tt_secret.clicked.connect(lambda: self._browse_file(self.ed_tt_secret, "Выбери файл секретов", "JSON (*.json);;YAML (*.yaml *.yml);;Все файлы (*.*)"))
         self.btn_tt_secret_load.clicked.connect(self._load_tiktok_secret_file)
+        if hasattr(self, "btn_context_session_window"):
+            self.btn_context_session_window.clicked.connect(self._on_session_open_window)
+        if hasattr(self, "btn_context_session_prompts"):
+            self.btn_context_session_prompts.clicked.connect(self._on_session_run_prompts)
+        if hasattr(self, "btn_context_session_images"):
+            self.btn_context_session_images.clicked.connect(self._on_session_run_images)
+        if hasattr(self, "btn_context_tg_test"):
+            self.btn_context_tg_test.clicked.connect(self._test_tg_settings)
+        if hasattr(self, "btn_context_tg_open"):
+            self.btn_context_tg_open.clicked.connect(lambda: self._select_section("telegram"))
+        if hasattr(self, "btn_context_refresh_queues"):
+            self.btn_context_refresh_queues.clicked.connect(self._update_youtube_queue_label)
+            self.btn_context_refresh_queues.clicked.connect(self._update_tiktok_queue_label)
+        if hasattr(self, "btn_context_open_project"):
+            self.btn_context_open_project.clicked.connect(
+                lambda: open_in_finder(self.cfg.get("project_root", str(PROJECT_ROOT)))
+            )
+        if hasattr(self, "btn_context_open_prompts"):
+            self.btn_context_open_prompts.clicked.connect(
+                lambda: open_in_finder(str(self._prompts_path()))
+            )
+        if hasattr(self, "btn_context_open_image_prompts"):
+            self.btn_context_open_image_prompts.clicked.connect(
+                lambda: open_in_finder(str(self._image_prompts_path()))
+            )
+        if hasattr(self, "btn_context_open_titles"):
+            self.btn_context_open_titles.clicked.connect(
+                lambda: open_in_finder(self.cfg.get("titles_file", str(TITLES_FILE)))
+            )
+        if hasattr(self, "cb_tg_enabled"):
+            self.cb_tg_enabled.toggled.connect(lambda _: self._refresh_telegram_context())
+        if hasattr(self, "btn_preset_full_cycle"):
+            self.btn_preset_full_cycle.clicked.connect(
+                lambda: self._apply_task_preset(
+                    "Полный цикл",
+                    ["images", "prompts", "download", "blur", "merge", "youtube", "tiktok"],
+                )
+            )
+        if hasattr(self, "btn_preset_generate"):
+            self.btn_preset_generate.clicked.connect(
+                lambda: self._apply_task_preset(
+                    "Генерация + постинг",
+                    ["images", "prompts", "youtube", "tiktok"],
+                )
+            )
+        if hasattr(self, "btn_preset_prompts_only"):
+            self.btn_preset_prompts_only.clicked.connect(
+                lambda: self._apply_task_preset("Только промпты", ["prompts"])
+            )
+        if hasattr(self, "btn_preset_clear"):
+            self.btn_preset_clear.clicked.connect(lambda: self._apply_task_preset("Сброс", []))
         self.cb_tiktok_schedule.toggled.connect(self._toggle_tiktok_schedule)
         self.cb_tiktok_schedule.toggled.connect(lambda _: self._update_tiktok_queue_label())
         self.cb_tiktok_draft.toggled.connect(lambda _: self._update_tiktok_queue_label())
@@ -5147,14 +6086,43 @@ class MainWindow(QtWidgets.QMainWindow):
             self.lbl_tg_status.setText("Введите текст сообщения перед отправкой")
             self.lbl_tg_status.setStyleSheet("QLabel{color:#facc15;}")
             return
+        delay = int(self.sb_tg_quick_delay.value()) if hasattr(self, "sb_tg_quick_delay") else 0
+        short = message if len(message) <= 60 else f"{message[:57]}…"
+        if delay > 0:
+            timer = QtCore.QTimer(self)
+            timer.setSingleShot(True)
+
+            def dispatch(msg: str = message, label: str = short, timer_ref: QtCore.QTimer = timer):
+                ok_inner = self._send_tg(msg)
+                color = "#34d399" if ok_inner else "#f87171"
+                status = "Сообщение отправлено" if ok_inner else "Не удалось отправить сообщение"
+                self.lbl_tg_status.setText(status)
+                self.lbl_tg_status.setStyleSheet(f"QLabel{{color:{color};}}")
+                entry = f"Telegram ⏱ {label}"
+                self._record_telegram_activity(entry, "success" if ok_inner else "error")
+                self._pending_tg_jobs = [job for job in self._pending_tg_jobs if job[0] is not timer_ref]
+
+            timer.timeout.connect(dispatch)
+            timer.start(int(delay) * 60 * 1000)
+            self._pending_tg_jobs.append((timer, message))
+            self.lbl_tg_status.setText(f"Запланировано через {delay} мин")
+            self.lbl_tg_status.setStyleSheet("QLabel{color:#38bdf8;}")
+            self._record_telegram_activity(
+                f"Telegram ⏱ через {delay} мин — {short}",
+                "running",
+            )
+            return
+
         ok = self._send_tg(message)
         if ok:
             self.lbl_tg_status.setText("Сообщение отправлено")
             self.lbl_tg_status.setStyleSheet("QLabel{color:#34d399;}")
             self.ed_tg_quick_message.clear()
+            self._record_telegram_activity(f"Telegram ✓ {short}", "success")
         else:
             self.lbl_tg_status.setText("Не удалось отправить сообщение")
             self.lbl_tg_status.setStyleSheet("QLabel{color:#f87171;}")
+            self._record_telegram_activity(f"Telegram ✗ {short}", "error")
 
     def _clear_quick_telegram_message(self):
         self.ed_tg_quick_message.clear()
@@ -5320,6 +6288,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.chk_activity_visible.blockSignals(True)
             self.chk_activity_visible.setChecked(bool(visible))
             self.chk_activity_visible.blockSignals(False)
+        if hasattr(self, "cb_quick_activity"):
+            self.cb_quick_activity.blockSignals(True)
+            self.cb_quick_activity.setChecked(bool(visible))
+            self.cb_quick_activity.blockSignals(False)
         if hasattr(self, "cb_ui_show_activity"):
             self.cb_ui_show_activity.blockSignals(True)
             self.cb_ui_show_activity.setChecked(bool(visible))
@@ -5327,6 +6299,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cfg.setdefault("ui", {})["show_activity"] = bool(visible)
         if persist:
             save_cfg(self.cfg)
+        self._refresh_overview_context()
 
     @QtCore.pyqtSlot(str)
     def _update_vcodec_ui(self, text: str):
@@ -5363,6 +6336,19 @@ class MainWindow(QtWidgets.QMainWindow):
             f"QListWidget::item{{margin:{margin};padding:{padding};border-radius:{radius};background:#172235;}}"
         )
 
+        if hasattr(self, "cmb_quick_density"):
+            self.cmb_quick_density.blockSignals(True)
+            idx = self.cmb_quick_density.findData(density)
+            if idx >= 0:
+                self.cmb_quick_density.setCurrentIndex(idx)
+            self.cmb_quick_density.blockSignals(False)
+        if hasattr(self, "cmb_ui_activity_density"):
+            self.cmb_ui_activity_density.blockSignals(True)
+            idx_ui = self.cmb_ui_activity_density.findData(density)
+            if idx_ui >= 0:
+                self.cmb_ui_activity_density.setCurrentIndex(idx_ui)
+            self.cmb_ui_activity_density.blockSignals(False)
+
         for idx in range(self.lst_activity.count()):
             item = self.lst_activity.item(idx)
             if item:
@@ -5371,6 +6357,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cfg.setdefault("ui", {})["activity_density"] = density
         if persist:
             save_cfg(self.cfg)
+        self._refresh_overview_context()
 
     def _style_activity_item(self, item: QtWidgets.QListWidgetItem, density: Optional[str] = None):
         density = density or self.cfg.get("ui", {}).get("activity_density", "compact")
@@ -7506,6 +8493,15 @@ class MainWindow(QtWidgets.QMainWindow):
         tg_cfg["enabled"] = bool(self.cb_tg_enabled.isChecked())
         tg_cfg["bot_token"] = self.ed_tg_token.text().strip()
         tg_cfg["chat_id"] = self.ed_tg_chat.text().strip()
+        tg_cfg["templates"] = list(self._telegram_templates)
+        if hasattr(self, "cmb_tg_templates"):
+            data = self.cmb_tg_templates.currentData()
+            if data is not None:
+                try:
+                    tg_cfg["last_template"] = self._telegram_templates[int(data)].get("name", "")
+                except (IndexError, ValueError, TypeError):
+                    pass
+        tg_cfg["quick_delay_minutes"] = int(self.sb_tg_quick_delay.value()) if hasattr(self, "sb_tg_quick_delay") else tg_cfg.get("quick_delay_minutes", 0)
 
         dl_cfg = self.cfg.setdefault("downloader", {})
         dl_cfg["max_videos"] = int(self.sb_max_videos.value())
@@ -7581,6 +8577,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.lbl_settings_status.setStyleSheet("color:#1b9c5d;")
             self.lbl_settings_status.setText(f"Настройки сохранены ({mode} {stamp})")
             self._append_activity(f"Настройки сохранены ({mode})", kind="success")
+        self._refresh_settings_context()
 
         if not silent:
             self._post_status("Настройки сохранены", state="ok")
@@ -7996,6 +8993,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_prompts_active_label()
         if reload:
             self._load_prompts()
+        self._refresh_content_context()
 
     def _refresh_prompt_profiles_ui(self):
         if not hasattr(self, "lst_prompt_profiles"):
@@ -8407,6 +9405,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         if count == 0:
             self.lbl_youtube_queue.setText("Очередь: нет видео в папке")
+            self._refresh_autopost_context()
             return
 
         parts = [f"найдено {count}"]
@@ -8415,6 +9414,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self.cb_youtube_draft_only.isChecked() and self.cb_youtube_schedule.isChecked() and interval > 0 and effective > 1:
             parts.append(f"шаг {interval} мин")
         self.lbl_youtube_queue.setText("Очередь: " + ", ".join(parts))
+        self._refresh_autopost_context()
 
     def _on_youtube_selected(self):
         items = self.lst_youtube_channels.selectedItems()
@@ -8509,12 +9509,14 @@ class MainWindow(QtWidgets.QMainWindow):
         src = _project_path(src_text)
         if not src.exists():
             self.lbl_tiktok_queue.setText("Очередь: папка не найдена")
+            self._refresh_autopost_context()
             return
 
         videos = self._iter_videos(src)
         count = len(videos)
         if count == 0:
             self.lbl_tiktok_queue.setText("Очередь: нет видео в папке")
+            self._refresh_autopost_context()
             return
 
         limit = int(self.sb_tiktok_batch_limit.value()) if hasattr(self, "sb_tiktok_batch_limit") else 0
@@ -8528,6 +9530,7 @@ class MainWindow(QtWidgets.QMainWindow):
         elif self.cb_tiktok_schedule.isChecked() and interval > 0 and effective > 1:
             parts.append(f"шаг {interval} мин")
         self.lbl_tiktok_queue.setText("Очередь: " + ", ".join(parts))
+        self._refresh_autopost_context()
 
     def _toggle_tiktok_schedule(self):
         enable = self.cb_tiktok_schedule.isChecked() and not self.cb_tiktok_draft.isChecked()
