@@ -430,6 +430,11 @@ def normalize_session_list(raw_sessions: object) -> List[Dict[str, Any]]:
         session.setdefault("notes", "")
         session.setdefault("auto_launch_chrome", False)
         session.setdefault("auto_launch_autogen", "idle")
+        session.setdefault("download_dir", "")
+        session.setdefault("titles_file", "")
+        session.setdefault("cursor_file", "")
+        session.setdefault("max_videos", 0)
+        session["max_videos"] = int(_coerce_int(session.get("max_videos")) or 0)
 
         normalized.append(session)
 
@@ -882,11 +887,15 @@ class SessionWorkspaceWindow(QtWidgets.QDialog):
         self.btn_launch_chrome = QtWidgets.QPushButton("Открыть Chrome")
         self.btn_run_prompts = QtWidgets.QPushButton("Промпты Sora")
         self.btn_run_images = QtWidgets.QPushButton("Генерация")
+        self.btn_run_download = QtWidgets.QPushButton("Скачивание")
+        self.btn_open_downloads = QtWidgets.QPushButton("Папка RAW")
         self.btn_stop = QtWidgets.QPushButton("Остановить")
         for btn in (
             self.btn_launch_chrome,
             self.btn_run_prompts,
             self.btn_run_images,
+            self.btn_run_download,
+            self.btn_open_downloads,
             self.btn_stop,
         ):
             btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
@@ -933,6 +942,8 @@ class SessionWorkspaceWindow(QtWidgets.QDialog):
         self.btn_launch_chrome.clicked.connect(lambda: self._main._launch_session_chrome(self.session_id))
         self.btn_run_prompts.clicked.connect(lambda: self._main._run_session_autogen(self.session_id))
         self.btn_run_images.clicked.connect(lambda: self._main._run_session_images(self.session_id))
+        self.btn_run_download.clicked.connect(lambda: self._main._run_session_download(self.session_id))
+        self.btn_open_downloads.clicked.connect(lambda: self._main._open_session_download_dir(self.session_id))
         self.btn_stop.clicked.connect(lambda: self._main._stop_session_runner(self.session_id))
 
     def update_session(self, session: Dict[str, Any]):
@@ -942,9 +953,14 @@ class SessionWorkspaceWindow(QtWidgets.QDialog):
         port = _coerce_int(session.get("cdp_port")) or self._main._session_chrome_port(session)
         self.setWindowTitle(f"Sora — {name}")
         prompt_label = self._main._prompt_profile_label(profile)
+        download_dir = str(self._main._session_download_dir(session))
+        limit_label = self._main._session_download_limit_label(session)
         self.lbl_title.setText(name)
         self.lbl_details.setText(
-            f"Промпты: <b>{prompt_label}</b> · Chrome: <b>{chrome or 'по умолчанию'}</b> · CDP: <b>{port}</b>"
+            (
+                f"Промпты: <b>{prompt_label}</b> · Chrome: <b>{chrome or 'по умолчанию'}</b> · CDP: <b>{port}</b>"
+                f"<br>RAW: <b>{download_dir}</b> · Лимит: <b>{limit_label}</b>"
+            )
         )
 
     def update_status(self, status: str, message: str, rc: Optional[int]):
@@ -1213,6 +1229,10 @@ class MainWindow(QtWidgets.QMainWindow):
                     "notes": "",
                     "auto_launch_chrome": False,
                     "auto_launch_autogen": "idle",
+                    "download_dir": "",
+                    "titles_file": "",
+                    "cursor_file": "",
+                    "max_videos": 0,
                 }
             )
         auto_cfg["sessions"] = sessions_list
@@ -1442,6 +1462,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 "last_rc": None,
                 "last_message": "",
                 "log": deque(maxlen=500),
+                "active_task": "",
+                "last_task": "",
+                "download_before": None,
+                "download_dest": "",
             },
         )
         return state
@@ -1533,6 +1557,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 "notes": session.get("notes", ""),
                 "auto_launch_chrome": bool(session.get("auto_launch_chrome", False)),
                 "auto_launch_autogen": session.get("auto_launch_autogen", "idle"),
+                "download_dir": session.get("download_dir", ""),
+                "titles_file": session.get("titles_file", ""),
+                "cursor_file": session.get("cursor_file", ""),
+                "max_videos": int(_coerce_int(session.get("max_videos")) or 0),
             }
             snapshot.append(entry)
         return snapshot
@@ -1582,6 +1610,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ed_session_image_prompts,
             self.ed_session_submitted,
             self.ed_session_failed,
+            self.ed_session_download_dir,
+            self.ed_session_titles_file,
+            self.ed_session_cursor_file,
         ):
             line.blockSignals(True)
             line.setText("")
@@ -1592,6 +1623,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sb_session_port.blockSignals(True)
         self.sb_session_port.setValue(0)
         self.sb_session_port.blockSignals(False)
+        self.sb_session_max_videos.blockSignals(True)
+        self.sb_session_max_videos.setValue(0)
+        self.sb_session_max_videos.blockSignals(False)
         self.chk_session_auto_chrome.blockSignals(True)
         self.chk_session_auto_chrome.setChecked(False)
         self.chk_session_auto_chrome.blockSignals(False)
@@ -1640,6 +1674,9 @@ class MainWindow(QtWidgets.QMainWindow):
             ("image_prompts_file", self.ed_session_image_prompts),
             ("submitted_log", self.ed_session_submitted),
             ("failed_log", self.ed_session_failed),
+            ("download_dir", self.ed_session_download_dir),
+            ("titles_file", self.ed_session_titles_file),
+            ("cursor_file", self.ed_session_cursor_file),
         ]:
             value = str(session.get(field, "") or "")
             line.blockSignals(True)
@@ -1649,6 +1686,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.te_session_notes.blockSignals(True)
         self.te_session_notes.setPlainText(session.get("notes", ""))
         self.te_session_notes.blockSignals(False)
+
+        limit = _coerce_int(session.get("max_videos")) or 0
+        self.sb_session_max_videos.blockSignals(True)
+        self.sb_session_max_videos.setValue(limit if limit > 0 else 0)
+        self.sb_session_max_videos.blockSignals(False)
 
         self.chk_session_auto_chrome.blockSignals(True)
         self.chk_session_auto_chrome.setChecked(bool(session.get("auto_launch_chrome")))
@@ -1711,6 +1753,10 @@ class MainWindow(QtWidgets.QMainWindow):
             "notes": "",
             "auto_launch_chrome": False,
             "auto_launch_autogen": "idle",
+            "download_dir": "",
+            "titles_file": "",
+            "cursor_file": "",
+            "max_videos": 0,
         }
         self._session_cache[session_id] = session
         self._session_order.append(session_id)
@@ -1749,6 +1795,10 @@ class MainWindow(QtWidgets.QMainWindow):
             "notes",
             "auto_launch_chrome",
             "auto_launch_autogen",
+            "download_dir",
+            "titles_file",
+            "cursor_file",
+            "max_videos",
         ):
             session[key] = base.get(key)
         self._persist_sessions()
@@ -1796,10 +1846,20 @@ class MainWindow(QtWidgets.QMainWindow):
         if session_id:
             self._run_session_images(session_id)
 
+    def _on_session_run_download(self):
+        session_id = getattr(self, "_current_session_id", "")
+        if session_id:
+            self._run_session_download(session_id)
+
     def _on_session_stop(self):
         session_id = getattr(self, "_current_session_id", "")
         if session_id:
             self._stop_session_runner(session_id)
+
+    def _on_session_open_downloads(self):
+        session_id = getattr(self, "_current_session_id", "")
+        if session_id:
+            self._open_session_download_dir(session_id)
 
     def _on_session_open_window(self):
         session_id = getattr(self, "_current_session_id", "")
@@ -1881,6 +1941,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_cache[session_id]["auto_launch_autogen"] = mode
         self._persist_sessions()
 
+    def _on_session_max_videos_changed(self, value: int):
+        session_id = getattr(self, "_current_session_id", "")
+        if not session_id or session_id not in self._session_cache:
+            return
+        limit = int(value)
+        self._session_cache[session_id]["max_videos"] = limit if limit > 0 else 0
+        self._persist_sessions()
+
     def _ensure_session_runner(self, session_id: str) -> ProcRunner:
         runner = self._session_runners.get(session_id)
         if runner:
@@ -1906,9 +1974,50 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_session_runner_finished(self, session_id: str, rc: int):
         session = self._session_cache.get(session_id)
         label = session.get("name") if session else session_id
+        state = self._ensure_session_state(session_id)
+        task = state.get("active_task", "")
         status = "ok" if rc == 0 else "error"
         message = "Завершено успешно" if rc == 0 else "Завершено с ошибкой"
-        self._append_activity(f"Сессия {label}: {message} (rc={rc})", kind="success" if rc == 0 else "error", card_text=False)
+        activity_kind = "success" if rc == 0 else "error"
+        tg_message: Optional[str] = None
+
+        if task == "download":
+            dest_raw = state.get("download_dest") or ""
+            dest_path = Path(dest_raw) if dest_raw else None
+            before = state.get("download_before")
+            try:
+                after = len(self._iter_videos(dest_path)) if dest_path else None
+            except Exception:
+                after = None
+            delta = 0
+            if isinstance(after, int) and isinstance(before, int):
+                delta = max(after - before, 0)
+            base = "Скачивание"
+            message = f"{base} завершено {'успешно' if rc == 0 else 'с ошибками'}"
+            if isinstance(after, int):
+                message += f" · +{delta} (итого {after})"
+            if dest_path:
+                message += f" → {dest_path}"
+            if dest_path:
+                status_word = "готово" if rc == 0 else "ошибки"
+                total_text = after if isinstance(after, int) else "?"
+                tg_message = f"⬇️ {label}: {status_word} · +{delta} файлов (итого {total_text}) → {dest_path}"
+        elif task == "autogen_images":
+            message = f"Autogen (картинки) {'завершён' if rc == 0 else 'с ошибками'}"
+        elif task == "autogen_mix":
+            message = f"Autogen (картинки + промпты) {'завершён' if rc == 0 else 'с ошибками'}"
+        elif task == "autogen_prompts":
+            message = f"Autogen (промпты) {'завершён' if rc == 0 else 'с ошибками'}"
+
+        state["last_task"] = task
+        state["active_task"] = ""
+        state["download_before"] = None
+        state["download_dest"] = ""
+
+        if tg_message:
+            self._send_tg(tg_message)
+
+        self._append_activity(f"Сессия {label}: {message} (rc={rc})", kind=activity_kind, card_text=False)
         self._set_session_status(session_id, status, message, rc)
 
     def _stop_session_runner(self, session_id: str):
@@ -1916,6 +2025,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if not runner:
             return
         runner.stop()
+        state = self._ensure_session_state(session_id)
+        state["active_task"] = ""
+        state["download_before"] = None
+        state["download_dest"] = ""
         self._set_session_status(session_id, "idle", "Остановлено пользователем")
 
     def _run_session_autogen(self, session_id: str, *, force_images: Optional[bool] = None, images_only: bool = False):
@@ -1929,15 +2042,87 @@ class MainWindow(QtWidgets.QMainWindow):
         workdir = self.cfg.get("autogen", {}).get("workdir", str(WORKERS_DIR / "autogen"))
         entry = self.cfg.get("autogen", {}).get("entry", "main.py")
         env = self._session_env(session_id, force_images=force_images, images_only=images_only)
-        mode = "images" if images_only else ("images+prompts" if force_images else "prompts")
+        state = self._ensure_session_state(session_id)
+        if images_only:
+            mode = "images"
+            state["active_task"] = "autogen_images"
+            status_message = "Только генерация картинок…"
+        elif force_images:
+            mode = "images+prompts"
+            state["active_task"] = "autogen_mix"
+            status_message = "Генерация картинок и вставка промптов…"
+        else:
+            mode = "prompts"
+            state["active_task"] = "autogen_prompts"
+            status_message = "Вставка промптов…"
+        state["download_before"] = None
+        state["download_dest"] = ""
         label = session.get("name") or session_id
         self._append_activity(f"Сессия {label}: запуск autogen ({mode})", kind="running", card_text=False)
         self._append_session_log(session_id, f"[SESSION] Запуск autogen ({mode})")
-        self._set_session_status(session_id, "running", "Выполняется autogen")
+        self._set_session_status(session_id, "running", status_message)
         runner.run([sys.executable, entry], cwd=workdir, env=env)
 
     def _run_session_images(self, session_id: str):
         self._run_session_autogen(session_id, force_images=True, images_only=True)
+
+    def _run_session_download(self, session_id: str):
+        session = self._session_cache.get(session_id)
+        if not session:
+            return
+        runner = self._ensure_session_runner(session_id)
+        if runner.proc and runner.proc.poll() is None:
+            self._append_session_log(session_id, "[!] Уже выполняется задача")
+            return
+        dl_cfg = self.cfg.get("downloader", {}) or {}
+        workdir = dl_cfg.get("workdir", str(WORKERS_DIR / "downloader"))
+        entry = dl_cfg.get("entry", "download_all.py")
+        dest_dir = self._session_download_dir(session, ensure=True)
+        titles_path = self._session_titles_path(session)
+        cursor_path = self._session_cursor_path(session)
+        try:
+            titles_path.parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        try:
+            cursor_path.parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
+        env["DOWNLOAD_DIR"] = str(dest_dir)
+        env["TITLES_FILE"] = str(titles_path)
+        env["TITLES_CURSOR_FILE"] = str(cursor_path)
+        limit_value = self._session_download_limit(session)
+        env["MAX_VIDEOS"] = str(limit_value if limit_value > 0 else 0)
+        python = sys.executable
+        cmd = [python, entry]
+        label = session.get("name") or session_id
+        state = self._ensure_session_state(session_id)
+        state["active_task"] = "download"
+        state["download_dest"] = str(dest_dir)
+        try:
+            before = len(self._iter_videos(dest_dir))
+        except Exception:
+            before = 0
+        state["download_before"] = before
+        self._append_activity(
+            f"Сессия {label}: запуск скачивания → {dest_dir}",
+            kind="running",
+            card_text=False,
+        )
+        self._append_session_log(session_id, f"[SESSION] Старт скачивания → {dest_dir}")
+        limit_label = self._session_download_limit_label(session)
+        self._set_session_status(session_id, "running", f"Скачивание видео… (лимит {limit_label})")
+        self._send_tg(f"⬇️ {label}: скачивание запускается → {dest_dir}")
+        runner.run(cmd, cwd=workdir, env=env)
+
+    def _open_session_download_dir(self, session_id: str):
+        session = self._session_cache.get(session_id)
+        if not session:
+            return
+        path = self._session_download_dir(session, ensure=True)
+        open_in_finder(path)
 
     def _launch_session_chrome(self, session_id: str):
         session = self._session_cache.get(session_id)
@@ -2901,9 +3086,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_context_session_window = QtWidgets.QPushButton("Окно")
         self.btn_context_session_prompts = QtWidgets.QPushButton("Автоген")
         self.btn_context_session_images = QtWidgets.QPushButton("Картинки")
+        self.btn_context_session_download = QtWidgets.QPushButton("Скачивание")
         session_buttons.addWidget(self.btn_context_session_window)
         session_buttons.addWidget(self.btn_context_session_prompts)
         session_buttons.addWidget(self.btn_context_session_images)
+        session_buttons.addWidget(self.btn_context_session_download)
         workspace_ctx_layout.addLayout(session_buttons)
         workspace_ctx_layout.addStretch(1)
         register_context("workspaces", workspace_context)
@@ -4261,8 +4448,13 @@ class MainWindow(QtWidgets.QMainWindow):
         name = session.get("name", self._current_session_id)
         chrome = session.get("chrome_profile", "") or "по умолчанию"
         prompt = session.get("prompt_profile", PROMPTS_DEFAULT_KEY)
+        raw_dir = self._session_download_dir(session)
+        raw_label = raw_dir.name if isinstance(raw_dir, Path) else Path(str(raw_dir)).name if raw_dir else "—"
+        limit_label = self._session_download_limit_label(session)
         self.lbl_context_session_name.setText(name)
-        self.lbl_context_session_profiles.setText(f"Chrome: {chrome} · Промпты: {self._prompt_profile_label(prompt)}")
+        self.lbl_context_session_profiles.setText(
+            f"Chrome: {chrome} · Промпты: {self._prompt_profile_label(prompt)} · RAW: {raw_label} ({limit_label})"
+        )
         state = self._ensure_session_state(self._current_session_id)
         status = state.get("status", "idle")
         message = state.get("last_message", "")
@@ -5889,6 +6081,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ed_session_failed, self.btn_session_failed_browse, failed_widget = make_path_field()
         form.addRow("failed.log:", failed_widget)
 
+        self.ed_session_download_dir, self.btn_session_download_dir_browse, download_widget = make_path_field()
+        self.ed_session_download_dir.setPlaceholderText("По умолчанию — отдельная папка RAW для сессии")
+        form.addRow("Папка RAW:", download_widget)
+
+        self.ed_session_titles_file, self.btn_session_titles_browse, titles_widget = make_path_field()
+        self.ed_session_titles_file.setPlaceholderText("Использовать общий список названий")
+        form.addRow("Названия:", titles_widget)
+
+        self.ed_session_cursor_file, self.btn_session_cursor_browse, cursor_widget = make_path_field()
+        self.ed_session_cursor_file.setPlaceholderText("Файл cursor для этой сессии")
+        form.addRow("Cursor:", cursor_widget)
+
+        self.sb_session_max_videos = QtWidgets.QSpinBox()
+        self.sb_session_max_videos.setRange(0, 999)
+        self.sb_session_max_videos.setSpecialValueText("Как в настройках")
+        form.addRow("Лимит скачки:", self.sb_session_max_videos)
+
         detail_layout.addLayout(form)
 
         self.chk_session_auto_chrome = QtWidgets.QCheckBox("Автоматически запускать Chrome при старте")
@@ -5925,11 +6134,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_session_launch_chrome = QtWidgets.QPushButton("Запустить Chrome")
         self.btn_session_run_prompts = QtWidgets.QPushButton("Autogen промптов")
         self.btn_session_run_images = QtWidgets.QPushButton("Только картинки")
+        self.btn_session_run_download = QtWidgets.QPushButton("Скачать видео")
+        self.btn_session_open_downloads = QtWidgets.QPushButton("Открыть RAW")
         self.btn_session_stop_runner = QtWidgets.QPushButton("Остановить")
         for btn in (
             self.btn_session_launch_chrome,
             self.btn_session_run_prompts,
             self.btn_session_run_images,
+            self.btn_session_run_download,
+            self.btn_session_open_downloads,
             self.btn_session_stop_runner,
         ):
             btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
@@ -5955,6 +6168,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self.btn_session_submitted_browse,
             self.ed_session_failed,
             self.btn_session_failed_browse,
+            self.ed_session_download_dir,
+            self.btn_session_download_dir_browse,
+            self.ed_session_titles_file,
+            self.btn_session_titles_browse,
+            self.ed_session_cursor_file,
+            self.btn_session_cursor_browse,
+            self.sb_session_max_videos,
             self.chk_session_auto_chrome,
             self.cmb_session_autogen_mode,
             self.te_session_notes,
@@ -5962,6 +6182,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.btn_session_launch_chrome,
             self.btn_session_run_prompts,
             self.btn_session_run_images,
+            self.btn_session_run_download,
+            self.btn_session_open_downloads,
             self.btn_session_stop_runner,
             self.te_session_log,
         ]
@@ -5988,9 +6210,28 @@ class MainWindow(QtWidgets.QMainWindow):
                 "Логи (*.log *.txt);;Все файлы (*.*)",
             )
         )
+        self.btn_session_download_dir_browse.clicked.connect(
+            lambda: self._browse_dir(self.ed_session_download_dir, "Выбери папку RAW для сессии")
+        )
+        self.btn_session_titles_browse.clicked.connect(
+            lambda: self._browse_file(
+                self.ed_session_titles_file,
+                "Выбери файл названий",
+                "Текстовые файлы (*.txt);;Все файлы (*.*)",
+            )
+        )
+        self.btn_session_cursor_browse.clicked.connect(
+            lambda: self._browse_file(
+                self.ed_session_cursor_file,
+                "Выбери файл cursor",
+                "Cursor (*.cursor *.txt *.log);;Все файлы (*.*)",
+            )
+        )
         self.btn_session_launch_chrome.clicked.connect(self._on_session_launch_chrome)
         self.btn_session_run_prompts.clicked.connect(self._on_session_run_prompts)
         self.btn_session_run_images.clicked.connect(self._on_session_run_images)
+        self.btn_session_run_download.clicked.connect(self._on_session_run_download)
+        self.btn_session_open_downloads.clicked.connect(self._on_session_open_downloads)
         self.btn_session_stop_runner.clicked.connect(self._on_session_stop)
         self.btn_session_open_window.clicked.connect(self._on_session_open_window)
         self.ed_session_name.textEdited.connect(self._on_session_name_changed)
@@ -6007,9 +6248,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ed_session_failed.textEdited.connect(
             lambda: self._on_session_path_changed("failed_log", self.ed_session_failed)
         )
+        self.ed_session_download_dir.textEdited.connect(
+            lambda: self._on_session_path_changed("download_dir", self.ed_session_download_dir)
+        )
+        self.ed_session_titles_file.textEdited.connect(
+            lambda: self._on_session_path_changed("titles_file", self.ed_session_titles_file)
+        )
+        self.ed_session_cursor_file.textEdited.connect(
+            lambda: self._on_session_path_changed("cursor_file", self.ed_session_cursor_file)
+        )
         self.te_session_notes.textChanged.connect(self._on_session_notes_changed)
         self.chk_session_auto_chrome.toggled.connect(self._on_session_auto_chrome_changed)
         self.cmb_session_autogen_mode.currentIndexChanged.connect(self._on_session_autogen_mode_changed)
+        self.sb_session_max_videos.valueChanged.connect(self._on_session_max_videos_changed)
 
         self._refresh_sessions_choices()
         self._refresh_sessions_list()
@@ -6133,6 +6384,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.btn_context_session_prompts.clicked.connect(self._on_session_run_prompts)
         if hasattr(self, "btn_context_session_images"):
             self.btn_context_session_images.clicked.connect(self._on_session_run_images)
+        if hasattr(self, "btn_context_session_download"):
+            self.btn_context_session_download.clicked.connect(self._on_session_run_download)
         if hasattr(self, "btn_context_tg_test"):
             self.btn_context_tg_test.clicked.connect(self._test_tg_settings)
         if hasattr(self, "btn_context_tg_open"):
@@ -7113,6 +7366,54 @@ class MainWindow(QtWidgets.QMainWindow):
             return name
         profile_key = session.get("prompt_profile") or PROMPTS_DEFAULT_KEY
         return self._prompt_profile_label(profile_key)
+
+    def _session_download_dir(self, session: Dict[str, Any], *, ensure: bool = False) -> Path:
+        custom = session.get("download_dir")
+        if custom:
+            path = _project_path(custom)
+        else:
+            base = _project_path(self.cfg.get("downloads_dir", str(DL_DIR)))
+            slug = slugify(self._session_instance_label(session))
+            path = base / "sessions" / slug
+        if ensure:
+            try:
+                path.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+        return path
+
+    def _session_titles_path(self, session: Dict[str, Any]) -> Path:
+        custom = session.get("titles_file")
+        if custom:
+            return _project_path(custom)
+        base_path = _project_path(self.cfg.get("titles_file", str(TITLES_FILE)))
+        slug = slugify(self._session_instance_label(session))
+        stem = base_path.stem or "titles"
+        suffix = base_path.suffix or ".txt"
+        return base_path.with_name(f"{stem}_{slug}{suffix}")
+
+    def _session_cursor_path(self, session: Dict[str, Any]) -> Path:
+        custom = session.get("cursor_file")
+        if custom:
+            return _project_path(custom)
+        titles_path = self._session_titles_path(session)
+        return Path(os.path.splitext(str(titles_path))[0] + ".cursor")
+
+    def _session_download_limit(self, session: Dict[str, Any]) -> int:
+        limit = _coerce_int(session.get("max_videos")) or 0
+        if limit and limit > 0:
+            return int(limit)
+        dl_cfg = self.cfg.get("downloader", {}) or {}
+        return int(dl_cfg.get("max_videos", 0) or 0)
+
+    def _session_download_limit_label(self, session: Dict[str, Any]) -> str:
+        limit = _coerce_int(session.get("max_videos")) or 0
+        if limit and limit > 0:
+            return f"{limit}"
+        global_limit = int((self.cfg.get("downloader", {}) or {}).get("max_videos", 0) or 0)
+        if global_limit > 0:
+            return f"{global_limit} (глобально)"
+        return "без лимита"
 
     def _session_env(self, session_id: str, *, force_images: Optional[bool] = None, images_only: bool = False) -> dict:
         session = self._session_cache.get(session_id)
