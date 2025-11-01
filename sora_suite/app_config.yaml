@@ -12,6 +12,19 @@ autogen:
   failed_log: ./workers/autogen/failed.log
   instances: []
   active_prompts_profile: __general__
+  sessions:
+    - id: default
+      name: "Сессия 1"
+      prompt_profile: __general__
+      chrome_profile: ""
+      cdp_port: null
+      prompts_file: ""
+      image_prompts_file: ""
+      submitted_log: ""
+      failed_log: ""
+      notes: ""
+      auto_launch_chrome: false
+      auto_launch_autogen: idle
 google_genai:
   enabled: false
   api_key: ""
@@ -26,6 +39,17 @@ google_genai:
   person_generation: ""
   output_mime_type: image/jpeg
   attach_to_sora: true
+  seeds: ""
+  consistent_character_design: false
+  lens_type: ""
+  color_palette: ""
+  style: ""
+  reference_prompt: ""
+  notifications_enabled: true
+  daily_quota: 0
+  quota_warning_prompts: 5
+  quota_enforce: false
+  usage_file: ./generated_images/usage.json
 downloader:
   workdir: ./workers/downloader
   entry: download_all.py
@@ -138,3 +162,6 @@ maintenance:
 ui:
   show_activity: true
   accent_kind: info
+  activity_density: compact
+  show_context: true
+  custom_commands: []
