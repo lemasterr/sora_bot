@@ -2095,6 +2095,9 @@ class MainWindow(QtWidgets.QMainWindow):
         env["TITLES_CURSOR_FILE"] = str(cursor_path)
         limit_value = self._session_download_limit(session)
         env["MAX_VIDEOS"] = str(limit_value if limit_value > 0 else 0)
+        port = self._session_chrome_port(session)
+        env["CDP_ENDPOINT"] = f"http://127.0.0.1:{int(port)}"
+        env["SORA_CDP_ENDPOINT"] = env["CDP_ENDPOINT"]
         python = sys.executable
         cmd = [python, entry]
         label = session.get("name") or session_id
