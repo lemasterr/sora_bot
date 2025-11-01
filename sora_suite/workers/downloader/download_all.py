@@ -206,8 +206,25 @@ def go_back_to_drafts(page) -> None:
     page.locator(CARD_LINKS).first.wait_for(timeout=10000)
 
 
+def _wait_for_new_cards(page, previous_total: int, timeout_ms: int) -> bool:
+    """Ждёт появления новых карточек; возвращает True при успехе."""
+
+    try:
+        page.wait_for_function(
+            "(arg) => document.querySelectorAll(arg.selector).length > arg.count",
+            {
+                "selector": CARD_LINKS,
+                "count": int(previous_total),
+            },
+            timeout=timeout_ms,
+        )
+        return True
+    except Exception:
+        return False
+
+
 def collect_card_links(page, desired: int) -> list[str]:
-    """Собирает уникальные ссылки карточек, подгружая их по мере прокрутки."""
+    """Собирает уникальные ссылки карточек, аккуратно прокручивая список."""
 
     print("[i] Сканирую карточки Sora…")
     links: list[str] = []
@@ -215,6 +232,9 @@ def collect_card_links(page, desired: int) -> list[str]:
     stagnation = 0
     satisfied_rounds = 0
     rounds = 0
+
+    target_only = desired > 0
+    settle_rounds = 2 if target_only else 1
 
     try:
         page.evaluate("window.scrollTo(0, 0)")
@@ -232,9 +252,9 @@ def collect_card_links(page, desired: int) -> list[str]:
                 "elements => elements.map(el => el.href).filter(Boolean)",
             )
         except Exception:
-            # fall back на count/scroll при ошибке
             current = []
 
+        dom_count = len(current)
         added = 0
         for href in current:
             if href not in seen:
@@ -248,30 +268,41 @@ def collect_card_links(page, desired: int) -> list[str]:
         else:
             stagnation += 1
 
-        if desired and len(links) >= desired:
+        if target_only and len(links) >= desired:
             satisfied_rounds += 1
         else:
             satisfied_rounds = 0
 
-        if (desired and satisfied_rounds >= 3) or (desired and stagnation >= 8) or (
-            not desired and stagnation >= 4
+        stagnation_limit = 10 if target_only else 5
+        if (
+            (target_only and satisfied_rounds >= settle_rounds)
+            or stagnation >= stagnation_limit
+            or rounds >= (160 if target_only else 90)
         ):
-            break
-        if rounds > 80:
             break
 
         rounds += 1
 
-        try:
-            page.mouse.wheel(0, 1400)
-            page.wait_for_timeout(450)
-            page.mouse.wheel(0, 1400)
-        except Exception:
+        scroll_attempts = 3 if target_only else 1
+        waited = False
+        for _ in range(scroll_attempts):
+            prev_total = dom_count
             try:
-                cards.nth(cards.count() - 1).scroll_into_view_if_needed()
+                page.mouse.wheel(0, 900)
             except Exception:
-                pass
-        long_jitter(0.9, 1.4)
+                try:
+                    idx = max(cards.count() - 1, 0)
+                    cards.nth(idx).scroll_into_view_if_needed()
+                except Exception:
+                    pass
+            page.wait_for_timeout(280 if target_only else 220)
+            if _wait_for_new_cards(page, prev_total, 1600 if target_only else 900):
+                waited = True
+                break
+        if not waited and target_only:
+            # последняя попытка — небольшая пауза перед следующим проходом
+            page.wait_for_timeout(400)
+        long_jitter(1.05, 1.55 if target_only else 1.2)
 
     print(f"[i] Итого уникальных карточек: {len(links)}")
     return links
@@ -295,6 +326,10 @@ def main() -> None:
             links = collect_card_links(page, desired)
 
             if desired:
+                if len(links) < desired:
+                    print(
+                        f"[!] Найдено только {len(links)} карточек из {desired}. Будут скачаны все доступные."
+                    )
                 links = links[:desired]
                 print(f"[i] Скачаю первые {len(links)} карточек")
             else:

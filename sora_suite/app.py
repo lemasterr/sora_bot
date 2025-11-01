@@ -155,6 +155,24 @@ def normalize_zone_list(zones: Optional[List[Dict]]) -> List[Dict[str, int]]:
     return normalized
 
 
+def normalize_custom_commands(raw: object) -> List[Dict[str, str]]:
+    """Приводит кастомные команды к ожидаемому виду."""
+
+    result: List[Dict[str, str]] = []
+    if not isinstance(raw, list):
+        return result
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        title = str(entry.get("name") or entry.get("title") or "").strip()
+        command = str(entry.get("command") or "").strip()
+        description = str(entry.get("description") or entry.get("subtitle") or "").strip()
+        if not title or not command:
+            continue
+        result.append({"name": title, "command": command, "description": description})
+    return result
+
+
 def load_cfg() -> dict:
     if not CFG_PATH.exists():
         raise FileNotFoundError(f"Создай конфиг {CFG_PATH}")
@@ -366,6 +384,9 @@ def load_cfg() -> dict:
     ui.setdefault("show_activity", True)
     ui.setdefault("accent_kind", "info")
     ui.setdefault("activity_density", "compact")
+    ui.setdefault("show_context", True)
+    ui.setdefault("custom_commands", [])
+    ui["custom_commands"] = normalize_custom_commands(ui.get("custom_commands"))
 
     return data
 
@@ -1093,6 +1114,73 @@ class CommandPaletteDialog(QtWidgets.QDialog):
     def selected_command(self) -> Optional[str]:
         return self._selected_id
 
+
+class CustomCommandDialog(QtWidgets.QDialog):
+    def __init__(self, parent: QtWidgets.QWidget, data: Optional[Dict[str, str]] = None):
+        super().__init__(parent)
+        self.setWindowTitle("Быстрая команда")
+        self.setObjectName("customCommandDialog")
+        self.setModal(True)
+        self.resize(420, 240)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
+
+        form = QtWidgets.QFormLayout()
+        form.setHorizontalSpacing(8)
+        form.setVerticalSpacing(10)
+
+        self.ed_name = QtWidgets.QLineEdit()
+        self.ed_name.setPlaceholderText("Например: Открыть RAW")
+        self.ed_command = QtWidgets.QLineEdit()
+        self.ed_command.setPlaceholderText("Команда или путь к скрипту")
+        self.ed_description = QtWidgets.QLineEdit()
+        self.ed_description.setPlaceholderText("Подсказка (необязательно)")
+
+        if isinstance(data, dict):
+            self.ed_name.setText(str(data.get("name", "")))
+            self.ed_command.setText(str(data.get("command", "")))
+            self.ed_description.setText(str(data.get("description", "")))
+
+        form.addRow("Название:", self.ed_name)
+        form.addRow("Команда:", self.ed_command)
+        form.addRow("Описание:", self.ed_description)
+        layout.addLayout(form)
+
+        hint = QtWidgets.QLabel(
+            "Команда запускается через оболочку. Можно указать python-скрипт, `start .` или любой batch/шаблон."
+        )
+        hint.setObjectName("customCommandHint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Cancel | QtWidgets.QDialogButtonBox.StandardButton.Ok
+        )
+        layout.addWidget(buttons)
+
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+    def accept(self) -> None:  # type: ignore[override]
+        if not self.ed_name.text().strip() or not self.ed_command.text().strip():
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Заполните поля",
+                "Нужно указать и название, и команду. Без этих полей сохранение невозможно.",
+            )
+            return
+        super().accept()
+
+    def get_data(self) -> Dict[str, str]:
+        return {
+            "name": self.ed_name.text().strip(),
+            "command": self.ed_command.text().strip(),
+            "description": self.ed_description.text().strip(),
+        }
+
+
 # ---------- главное окно ----------
 class MainWindow(QtWidgets.QMainWindow):
     # сигналы для безопасных UI-апдейтов из потоков
@@ -1139,6 +1227,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._command_actions: Dict[str, QtGui.QAction] = {}
         self._pending_tg_jobs: List[Tuple[QtCore.QTimer, str]] = []
         self._telegram_templates: List[Dict[str, str]] = []
+        self._icon_cache: Dict[Tuple[int, str, int], QtGui.QIcon] = {}
+        self._custom_commands: List[Dict[str, str]] = normalize_custom_commands(
+            self.cfg.get("ui", {}).get("custom_commands", [])
+        )
 
         self._apply_theme()
 
@@ -1148,7 +1240,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # tray notifications
         self.tray = QtWidgets.QSystemTrayIcon(self)
-        icon = self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_ComputerIcon)
+        icon = self._mono_icon(QtWidgets.QStyle.StandardPixmap.SP_ComputerIcon)
         self.tray.setIcon(icon)
         self.tray.setToolTip("Sora Suite")
         self.tray.show()
@@ -1200,6 +1292,40 @@ class MainWindow(QtWidgets.QMainWindow):
             self._ensure_session_state(session_id)
 
     # ----- helpers -----
+    def _mono_icon(
+        self,
+        sp: QtWidgets.QStyle.StandardPixmap,
+        color: str = "#f8fafc",
+        *,
+        size: int = 26,
+    ) -> QtGui.QIcon:
+        key = (int(sp), color, size)
+        cached = self._icon_cache.get(key)
+        if cached:
+            return cached
+
+        base_icon = self.style().standardIcon(sp)
+        pixmap = base_icon.pixmap(size, size)
+        if pixmap.isNull():
+            self._icon_cache[key] = base_icon
+            return base_icon
+
+        image = pixmap.toImage().convertToFormat(QtGui.QImage.Format.Format_ARGB32)
+        tint = QtGui.QColor(color)
+        for y in range(image.height()):
+            for x in range(image.width()):
+                pixel = QtGui.QColor(image.pixel(x, y))
+                alpha = pixel.alpha()
+                if alpha == 0:
+                    continue
+                toned = QtGui.QColor(tint)
+                toned.setAlpha(alpha)
+                image.setPixelColor(x, y, toned)
+
+        icon = QtGui.QIcon(QtGui.QPixmap.fromImage(image))
+        self._icon_cache[key] = icon
+        return icon
+
     def _ensure_path_exists(self, raw: Union[str, Path]) -> Path:
         """Create file/dir for path within project if missing and return Path."""
 
@@ -1860,10 +1986,34 @@ class MainWindow(QtWidgets.QMainWindow):
             QLabel { background: transparent; }
             QGroupBox { border: 1px solid #1f2a40; border-radius: 12px; margin-top: 16px; padding-top: 12px; background: transparent; }
             QGroupBox::title { subcontrol-origin: margin; left: 16px; padding: 0 6px; background: #0d1425; color: #94a3b8; }
-            QPushButton { background-color: #1e2a3f; border: 1px solid #2c3d5a; border-radius: 8px; padding: 6px 14px; color: #f8fafc; }
-            QPushButton:disabled { background-color: #131a2a; border-color: #1f2a3f; color: #475569; }
-            QPushButton:hover { background-color: #273754; }
-            QPushButton:pressed { background-color: #17233a; }
+            QToolButton#contextToggleButton {
+                border: 1px solid #27364d;
+                border-radius: 10px;
+                padding: 6px 12px;
+                background: rgba(15,23,42,0.6);
+                color: #e2e8f0;
+            }
+            QToolButton#contextToggleButton:hover { border-color: #8ba8ff; }
+            QToolButton#contextToggleButton:checked {
+                background: rgba(99,102,241,0.25);
+                border-color: #8ba8ff;
+            }
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #1f2d4a, stop:1 #16213a);
+                border: 1px solid #314365;
+                border-radius: 10px;
+                padding: 8px 18px;
+                color: #f8fafc;
+                font-weight: 500;
+                letter-spacing: 0.2px;
+            }
+            QPushButton:disabled { background: #131a2a; border-color: #1f2a3f; color: #475569; }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #26365a, stop:1 #1b2a46);
+                border-color: #8ba8ff;
+            }
+            QPushButton:pressed { background: #121d34; border-color: #3d4f78; }
+            QPushButton:focus { outline: none; border-color: #9fb4ff; }
             QLineEdit, QSpinBox, QDoubleSpinBox, QDateTimeEdit, QComboBox, QTextEdit, QPlainTextEdit {
                 background-color: #0a1324; border: 1px solid #1f2a40; border-radius: 8px; padding: 4px 8px;
                 selection-background-color: #6366f1; selection-color: #f8fafc;
@@ -1896,6 +2046,28 @@ class MainWindow(QtWidgets.QMainWindow):
             QLabel#dashboardSectionTitle { font-size: 13px; font-weight: 600; letter-spacing: 0.4px; text-transform: uppercase; color: #9fb7ff; }
             QFrame#dashboardHeader { background: transparent; border: 1px solid #1f2a40; border-radius: 18px; }
             QFrame#dashboardQuickActions, QFrame#dashboardStats, QFrame#dashboardActivity, QFrame#dashboardQuickSettings { background: rgba(15,23,42,0.55); border: 1px solid #1f2a40; border-radius: 16px; }
+            QFrame#contextContainer { background: transparent; }
+            QFrame#customCommandPanel { background: rgba(15,23,42,0.55); border: 1px solid rgba(148,163,184,0.22); border-radius: 16px; }
+            QLabel#customCommandTitle { font-size: 13px; font-weight: 600; color: #cbd5f5; }
+            QLabel#customCommandSubtitle { color: #94a3b8; font-size: 11px; }
+            QPushButton#customCommandButton { padding: 8px 14px; text-align: left; }
+            QPushButton#customCommandButton:hover { background: rgba(99,102,241,0.2); }
+            QPushButton#customCommandButton:pressed { background: rgba(99,102,241,0.28); }
+            QListWidget#customCommandList { background: rgba(8,17,32,0.6); border: 1px solid #1f2a40; border-radius: 10px; }
+            QListWidget#customCommandList::item { padding: 6px 10px; border-radius: 6px; }
+            QListWidget#customCommandList::item:selected { background: rgba(99,102,241,0.32); }
+            QToolButton#customCommandMove {
+                border: 1px solid #27364d;
+                border-radius: 8px;
+                padding: 6px;
+                background: rgba(15,23,42,0.6);
+                color: #e2e8f0;
+            }
+            QToolButton#customCommandMove:hover { border-color: #8ba8ff; }
+            QToolButton#customCommandMove:disabled { border-color: #1f2a3f; color: #475569; }
+            QDialog#customCommandDialog { background-color: #101a2f; border: 1px solid #1f2a40; border-radius: 14px; }
+            QDialog#customCommandDialog QLabel { color: #cbd5f5; }
+            QLabel#customCommandHint { color: #94a3b8; font-size: 11px; }
             QTextBrowser { background-color: #081120; border: 1px solid #1f2a40; border-radius: 10px; padding: 12px; }
             QScrollArea { border: none; }
             QFrame#sessionWindowActions, QFrame#sessionWindowStatus, QFrame#sessionWindowLog { background: rgba(15,23,42,0.45); border: 1px solid #1d2840; border-radius: 12px; }
@@ -2091,7 +2263,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_scan_profiles_top = QtWidgets.QToolButton()
         self.btn_scan_profiles_top.setObjectName("chromeScanBtn")
         self.btn_scan_profiles_top.setIcon(
-            self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_BrowserReload)
+            self._mono_icon(QtWidgets.QStyle.StandardPixmap.SP_BrowserReload)
         )
         self.btn_scan_profiles_top.setToolTip("Автообнаружение профилей Chrome в системе")
         chrome_block.addWidget(self.btn_scan_profiles_top)
@@ -2102,7 +2274,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         tb.addSpacing(12)
 
-        icon_dir = self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DirOpenIcon)
+        icon_dir = self._mono_icon(QtWidgets.QStyle.StandardPixmap.SP_DirOpenIcon)
 
         def make_folder_button(text: str) -> QtWidgets.QToolButton:
             btn = QtWidgets.QToolButton()
@@ -2144,9 +2316,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_command_palette_toolbar = QtWidgets.QToolButton()
         self.btn_command_palette_toolbar.setText("Команды")
         self.btn_command_palette_toolbar.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        self.btn_command_palette_toolbar.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_FileDialogContentsView))
+        self.btn_command_palette_toolbar.setIcon(
+            self._mono_icon(QtWidgets.QStyle.StandardPixmap.SP_FileDialogContentsView)
+        )
         self.btn_command_palette_toolbar.clicked.connect(self._open_command_palette)
         tb.addWidget(self.btn_command_palette_toolbar)
+
+        self.btn_toggle_commands = QtWidgets.QToolButton()
+        self.btn_toggle_commands.setObjectName("contextToggleButton")
+        self.btn_toggle_commands.setCheckable(True)
+        self.btn_toggle_commands.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.btn_toggle_commands.setText("Панель")
+        tb.addWidget(self.btn_toggle_commands)
 
         tb.addStretch(1)
 
@@ -2183,11 +2364,40 @@ class MainWindow(QtWidgets.QMainWindow):
         self.section_stack.setObjectName("sectionStack")
         body_layout.addWidget(self.section_stack, 1)
 
+        self.context_container = QtWidgets.QFrame()
+        self.context_container.setObjectName("contextContainer")
+        context_layout = QtWidgets.QVBoxLayout(self.context_container)
+        context_layout.setContentsMargins(0, 0, 0, 0)
+        context_layout.setSpacing(12)
+
         self.context_stack = QtWidgets.QStackedWidget()
         self.context_stack.setObjectName("contextStack")
         self.context_stack.setMinimumWidth(260)
         self.context_stack.setMaximumWidth(320)
-        body_layout.addWidget(self.context_stack)
+        context_layout.addWidget(self.context_stack, 1)
+
+        self.custom_command_panel = QtWidgets.QFrame()
+        self.custom_command_panel.setObjectName("customCommandPanel")
+        custom_panel_layout = QtWidgets.QVBoxLayout(self.custom_command_panel)
+        custom_panel_layout.setContentsMargins(18, 18, 18, 18)
+        custom_panel_layout.setSpacing(10)
+        lbl_custom_title = QtWidgets.QLabel("Быстрые команды")
+        lbl_custom_title.setObjectName("customCommandTitle")
+        custom_panel_layout.addWidget(lbl_custom_title)
+        self.custom_command_caption = QtWidgets.QLabel(
+            "Настрой список в разделе «Настройки → Интерфейс», чтобы запускать любимые скрипты в один клик."
+        )
+        self.custom_command_caption.setObjectName("customCommandSubtitle")
+        self.custom_command_caption.setWordWrap(True)
+        custom_panel_layout.addWidget(self.custom_command_caption)
+        self.custom_command_button_host = QtWidgets.QWidget()
+        self.custom_command_button_layout = QtWidgets.QVBoxLayout(self.custom_command_button_host)
+        self.custom_command_button_layout.setContentsMargins(0, 0, 0, 0)
+        self.custom_command_button_layout.setSpacing(6)
+        custom_panel_layout.addWidget(self.custom_command_button_host)
+        context_layout.addWidget(self.custom_command_panel)
+
+        body_layout.addWidget(self.context_container)
 
         body_layout.setStretch(0, 0)
         body_layout.setStretch(1, 1)
@@ -2325,19 +2535,19 @@ class MainWindow(QtWidgets.QMainWindow):
         quick_layout.setContentsMargins(16, 14, 16, 14)
         quick_layout.setSpacing(12)
         btn_quick_run = QtWidgets.QPushButton("Старт сценария")
-        btn_quick_run.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MediaPlay))
+        btn_quick_run.setIcon(self._mono_icon(QtWidgets.QStyle.StandardPixmap.SP_MediaPlay))
         btn_quick_run.clicked.connect(self._run_scenario)
         btn_quick_images = QtWidgets.QPushButton("Генерация картинок")
-        btn_quick_images.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_FileDialogContentsView))
+        btn_quick_images.setIcon(self._mono_icon(QtWidgets.QStyle.StandardPixmap.SP_FileDialogContentsView))
         btn_quick_images.clicked.connect(self._save_and_run_autogen_images)
         btn_quick_chrome = QtWidgets.QPushButton("Запустить Chrome")
-        btn_quick_chrome.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DesktopIcon))
+        btn_quick_chrome.setIcon(self._mono_icon(QtWidgets.QStyle.StandardPixmap.SP_DesktopIcon))
         btn_quick_chrome.clicked.connect(self._open_chrome)
         btn_quick_sessions = QtWidgets.QPushButton("Рабочие пространства")
-        btn_quick_sessions.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_ComputerIcon))
+        btn_quick_sessions.setIcon(self._mono_icon(QtWidgets.QStyle.StandardPixmap.SP_ComputerIcon))
         btn_quick_sessions.clicked.connect(lambda: self._select_section("workspaces"))
         btn_quick_settings = QtWidgets.QPushButton("Настройки")
-        btn_quick_settings.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_FileDialogDetailedView))
+        btn_quick_settings.setIcon(self._mono_icon(QtWidgets.QStyle.StandardPixmap.SP_FileDialogDetailedView))
         btn_quick_settings.clicked.connect(lambda: self._select_section("settings"))
         for btn in (
             btn_quick_run,
@@ -2499,7 +2709,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.chk_activity_visible.setChecked(bool(self.cfg.get("ui", {}).get("show_activity", True)))
         self.chk_activity_visible.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
         self.btn_activity_clear = QtWidgets.QPushButton("Очистить")
-        self.btn_activity_clear.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DialogResetButton))
+        self.btn_activity_clear.setIcon(self._mono_icon(QtWidgets.QStyle.StandardPixmap.SP_DialogResetButton))
         activity_header.addWidget(self.chk_activity_visible)
         activity_header.addWidget(self.btn_activity_clear)
         activity_layout.addLayout(activity_header)
@@ -2602,7 +2812,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "overview",
             "Обзор",
             overview_root,
-            icon=self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DialogHelpButton),
+            icon=self._mono_icon(QtWidgets.QStyle.StandardPixmap.SP_DialogHelpButton),
             scrollable=True,
             category="Главная",
             description="Центр управления и статистики приложения",
@@ -2638,7 +2848,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "workspaces",
             "Рабочие пространства",
             self.tab_sessions,
-            icon=self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_FileDialogStart),
+            icon=self._mono_icon(QtWidgets.QStyle.StandardPixmap.SP_FileDialogStart),
             scrollable=True,
             category="Рабочие процессы",
             description="Настройка параллельных профилей Chrome и промптов",
@@ -2917,7 +3127,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "automation",
             "Автоматизация",
             self.tab_tasks,
-            icon=self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_ArrowForward),
+            icon=self._mono_icon(QtWidgets.QStyle.StandardPixmap.SP_ArrowForward),
             category="Рабочие процессы",
             description="Пошаговый запуск: генерация, скачивание, блюр, склейка и загрузка",
         )
@@ -3543,7 +3753,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "content",
             "Контент",
             content_host,
-            icon=self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_FileDialogListView),
+            icon=self._mono_icon(QtWidgets.QStyle.StandardPixmap.SP_FileDialogListView),
             category="Контент",
             description="Редакторы промптов, изображений и заголовков",
         )
@@ -3598,7 +3808,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "telegram",
             "Telegram",
             self.telegram_panel,
-            icon=self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MessageBoxInformation),
+            icon=self._mono_icon(QtWidgets.QStyle.StandardPixmap.SP_MessageBoxInformation),
             scrollable=True,
             category="Интеграции",
             description="Уведомления, шаблоны и моментальные сообщения в Telegram",
@@ -3608,7 +3818,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "autopost",
             "Автопостинг",
             autopost_host,
-            icon=self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MediaPlay),
+            icon=self._mono_icon(QtWidgets.QStyle.StandardPixmap.SP_MediaPlay),
             category="Публикации",
             description="YouTube и TikTok: очереди, расписания и архивы",
         )
@@ -3617,7 +3827,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "settings",
             "Настройки",
             self.tab_settings,
-            icon=self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_FileDialogDetailedView),
+            icon=self._mono_icon(QtWidgets.QStyle.StandardPixmap.SP_FileDialogDetailedView),
             category="Система",
             description="Каталоги, Chrome, ffmpeg, история и обслуживание",
         )
@@ -3635,6 +3845,9 @@ class MainWindow(QtWidgets.QMainWindow):
                     break
         else:
             self._current_section_key = "overview"
+        self._set_context_visible(bool(self.cfg.get("ui", {}).get("show_context", True)), persist=False)
+        self._rebuild_custom_command_panel()
+        self._refresh_custom_command_registry()
         self._update_current_event("—", self.cfg.get("ui", {}).get("accent_kind", "info"), persist=False)
         self._apply_activity_visibility(self.chk_activity_visible.isChecked(), persist=False)
 
@@ -3749,6 +3962,211 @@ class MainWindow(QtWidgets.QMainWindow):
                 subtitle=subtitle,
                 keywords=keywords,
             )
+
+    def _refresh_custom_command_registry(self) -> None:
+        self._prune_commands_with_prefix("custom:")
+        for idx, entry in enumerate(self._custom_commands):
+            payload = dict(entry)
+            name = payload.get("name") or f"Команда {idx + 1}"
+            subtitle = payload.get("description") or payload.get("command", "")
+            keywords = [name]
+            keywords.extend((payload.get("command") or "").split())
+            self._register_command(
+                f"custom:{idx}",
+                f"Быстрая команда — {name}",
+                lambda data=payload: self._run_custom_command(data),
+                category="Пользовательские команды",
+                subtitle=subtitle,
+                keywords=keywords,
+            )
+
+    def _set_context_visible(self, visible: bool, *, persist: bool = True) -> None:
+        if hasattr(self, "context_container"):
+            self.context_container.setVisible(bool(visible))
+        if hasattr(self, "btn_toggle_commands"):
+            self.btn_toggle_commands.blockSignals(True)
+            self.btn_toggle_commands.setChecked(bool(visible))
+            icon_sp = (
+                QtWidgets.QStyle.StandardPixmap.SP_ArrowLeft
+                if visible
+                else QtWidgets.QStyle.StandardPixmap.SP_ArrowRight
+            )
+            self.btn_toggle_commands.setIcon(self._mono_icon(icon_sp))
+            self.btn_toggle_commands.setToolTip(
+                "Скрыть панель команд" if visible else "Показать панель команд"
+            )
+            self.btn_toggle_commands.blockSignals(False)
+        if hasattr(self, "cb_ui_show_context"):
+            self.cb_ui_show_context.blockSignals(True)
+            self.cb_ui_show_context.setChecked(bool(visible))
+            self.cb_ui_show_context.blockSignals(False)
+        if persist:
+            self.cfg.setdefault("ui", {})["show_context"] = bool(visible)
+            self._mark_settings_dirty()
+
+    def _rebuild_custom_command_panel(self) -> None:
+        if not hasattr(self, "custom_command_button_layout"):
+            return
+        layout = self.custom_command_button_layout
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        if not self._custom_commands:
+            if hasattr(self, "custom_command_panel"):
+                self.custom_command_panel.hide()
+            if hasattr(self, "custom_command_caption"):
+                self.custom_command_caption.setVisible(True)
+            return
+        if hasattr(self, "custom_command_panel"):
+            self.custom_command_panel.show()
+        if hasattr(self, "custom_command_caption"):
+            self.custom_command_caption.setVisible(False)
+        for entry in self._custom_commands:
+            label = entry.get("name") or "Команда"
+            btn = QtWidgets.QPushButton(label)
+            btn.setObjectName("customCommandButton")
+            btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+            tooltip = entry.get("description") or entry.get("command")
+            if tooltip:
+                btn.setToolTip(tooltip)
+            payload = dict(entry)
+            btn.clicked.connect(lambda _, data=payload: self._run_custom_command(data))
+            layout.addWidget(btn)
+        layout.addStretch(1)
+
+    def _refresh_custom_command_list(self) -> None:
+        if not hasattr(self, "lst_custom_commands"):
+            return
+        self.lst_custom_commands.blockSignals(True)
+        self.lst_custom_commands.clear()
+        for entry in self._custom_commands:
+            name = entry.get("name") or "Команда"
+            item = QtWidgets.QListWidgetItem(name)
+            cmd = entry.get("command")
+            if cmd:
+                item.setToolTip(cmd)
+            self.lst_custom_commands.addItem(item)
+        self.lst_custom_commands.blockSignals(False)
+        self._update_custom_command_buttons()
+
+    def _selected_custom_command_index(self) -> int:
+        if not hasattr(self, "lst_custom_commands"):
+            return -1
+        row = self.lst_custom_commands.currentRow()
+        if 0 <= row < len(self._custom_commands):
+            return row
+        return -1
+
+    def _update_custom_command_buttons(self) -> None:
+        if not hasattr(self, "btn_custom_edit"):
+            return
+        idx = self._selected_custom_command_index()
+        has_selection = idx >= 0
+        total = len(self._custom_commands)
+        self.btn_custom_edit.setEnabled(has_selection)
+        self.btn_custom_delete.setEnabled(has_selection)
+        self.btn_custom_up.setEnabled(has_selection and idx > 0)
+        self.btn_custom_down.setEnabled(has_selection and idx >= 0 and idx < total - 1)
+
+    def _on_custom_command_add(self) -> None:
+        dialog = CustomCommandDialog(self)
+        if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            data = dialog.get_data()
+            self._custom_commands.append(data)
+            self._refresh_custom_command_list()
+            self.lst_custom_commands.setCurrentRow(len(self._custom_commands) - 1)
+            self._rebuild_custom_command_panel()
+            self._refresh_custom_command_registry()
+            self._mark_settings_dirty()
+
+    def _on_custom_command_edit(self) -> None:
+        idx = self._selected_custom_command_index()
+        if idx < 0:
+            return
+        dialog = CustomCommandDialog(self, self._custom_commands[idx])
+        if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            self._custom_commands[idx] = dialog.get_data()
+            self._refresh_custom_command_list()
+            self.lst_custom_commands.setCurrentRow(idx)
+            self._rebuild_custom_command_panel()
+            self._refresh_custom_command_registry()
+            self._mark_settings_dirty()
+
+    def _on_custom_command_remove(self) -> None:
+        idx = self._selected_custom_command_index()
+        if idx < 0:
+            return
+        self._custom_commands.pop(idx)
+        self._refresh_custom_command_list()
+        if self._custom_commands:
+            self.lst_custom_commands.setCurrentRow(min(idx, len(self._custom_commands) - 1))
+        self._rebuild_custom_command_panel()
+        self._refresh_custom_command_registry()
+        self._mark_settings_dirty()
+
+    def _on_custom_command_move(self, direction: int) -> None:
+        idx = self._selected_custom_command_index()
+        if idx < 0:
+            return
+        new_idx = idx + direction
+        if not (0 <= new_idx < len(self._custom_commands)):
+            return
+        self._custom_commands[idx], self._custom_commands[new_idx] = (
+            self._custom_commands[new_idx],
+            self._custom_commands[idx],
+        )
+        self._refresh_custom_command_list()
+        self.lst_custom_commands.setCurrentRow(new_idx)
+        self._rebuild_custom_command_panel()
+        self._refresh_custom_command_registry()
+        self._mark_settings_dirty()
+
+    def _run_custom_command(self, payload: Dict[str, str]) -> None:
+        command = (payload.get("command") or "").strip()
+        name = payload.get("name") or "Команда"
+        if not command:
+            self._post_status(f"Команда «{name}»: не задана команда", state="error")
+            return
+
+        self._append_activity(f"Команда «{name}» запускается…", kind="running")
+
+        def worker() -> None:
+            try:
+                subprocess.Popen(
+                    command,
+                    shell=True,
+                    cwd=self.cfg.get("project_root", str(PROJECT_ROOT)),
+                )
+            except Exception as exc:  # noqa: BLE001
+                self.ui(
+                    lambda: (
+                        self._append_activity(
+                            f"Команда «{name}» не запустилась: {exc}",
+                            kind="error",
+                        ),
+                        self._post_status(f"Команда «{name}» не запустилась", state="error"),
+                    )
+                )
+                return
+
+            self.ui(
+                lambda: (
+                    self._append_activity(
+                        f"Команда «{name}» выполнена", kind="success"
+                    ),
+                    self._post_status(f"Команда «{name}» запущена", state="ok"),
+                )
+            )
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_toolbar_commands_toggle(self, checked: bool) -> None:
+        self._set_context_visible(bool(checked))
+
+    def _on_settings_show_context_changed(self, checked: bool) -> None:
+        self._set_context_visible(bool(checked))
 
     def _update_context_panel_for_section(self, key: str) -> None:
         if not hasattr(self, "context_stack"):
@@ -4153,6 +4571,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # --- Интерфейс ---
         page_ui = QtWidgets.QWidget()
+        self.page_ui_settings = page_ui
         ui_layout = QtWidgets.QVBoxLayout(page_ui)
         ui_layout.setContentsMargins(12, 12, 12, 12)
         grp_ui = QtWidgets.QGroupBox("Отображение")
@@ -4160,6 +4579,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cb_ui_show_activity = QtWidgets.QCheckBox("Показывать историю событий в левой панели")
         self.cb_ui_show_activity.setChecked(bool(self.cfg.get("ui", {}).get("show_activity", True)))
         ui_form.addRow(self.cb_ui_show_activity)
+
+        self.cb_ui_show_context = QtWidgets.QCheckBox("Показывать панель команд справа")
+        self.cb_ui_show_context.setChecked(bool(self.cfg.get("ui", {}).get("show_context", True)))
+        ui_form.addRow(self.cb_ui_show_context)
 
         self.cmb_ui_activity_density = QtWidgets.QComboBox()
         self.cmb_ui_activity_density.addItem("Компактная", "compact")
@@ -4171,11 +4594,58 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cmb_ui_activity_density.setCurrentIndex(idx)
         ui_form.addRow("Вид истории событий:", self.cmb_ui_activity_density)
 
-        ui_hint = QtWidgets.QLabel("Когда история скрыта, остаётся только карточка с текущим этапом.")
+        ui_hint = QtWidgets.QLabel(
+            "Историю и правую панель можно быстро скрыть через верхнюю панель — настройки сохранятся автоматически."
+        )
         ui_hint.setWordWrap(True)
         ui_hint.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
         ui_form.addRow(ui_hint)
         ui_layout.addWidget(grp_ui)
+
+        grp_commands = QtWidgets.QGroupBox("Пользовательские команды")
+        cmd_layout = QtWidgets.QVBoxLayout(grp_commands)
+        cmd_layout.setContentsMargins(12, 12, 12, 12)
+        cmd_layout.setSpacing(8)
+        self.lst_custom_commands = QtWidgets.QListWidget()
+        self.lst_custom_commands.setObjectName("customCommandList")
+        self.lst_custom_commands.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        self.lst_custom_commands.setMinimumHeight(160)
+        cmd_layout.addWidget(self.lst_custom_commands)
+
+        cmd_buttons = QtWidgets.QHBoxLayout()
+        self.btn_custom_add = QtWidgets.QPushButton("Добавить")
+        self.btn_custom_edit = QtWidgets.QPushButton("Изменить")
+        self.btn_custom_delete = QtWidgets.QPushButton("Удалить")
+        self.btn_custom_up = QtWidgets.QToolButton()
+        self.btn_custom_up.setObjectName("customCommandMove")
+        self.btn_custom_up.setIcon(self._mono_icon(QtWidgets.QStyle.StandardPixmap.SP_ArrowUp))
+        self.btn_custom_up.setToolTip("Переместить вверх")
+        self.btn_custom_down = QtWidgets.QToolButton()
+        self.btn_custom_down.setObjectName("customCommandMove")
+        self.btn_custom_down.setIcon(self._mono_icon(QtWidgets.QStyle.StandardPixmap.SP_ArrowDown))
+        self.btn_custom_down.setToolTip("Переместить вниз")
+        for btn in (
+            self.btn_custom_add,
+            self.btn_custom_edit,
+            self.btn_custom_delete,
+            self.btn_custom_up,
+            self.btn_custom_down,
+        ):
+            cmd_buttons.addWidget(btn)
+        self.btn_custom_edit.setEnabled(False)
+        self.btn_custom_delete.setEnabled(False)
+        self.btn_custom_up.setEnabled(False)
+        self.btn_custom_down.setEnabled(False)
+        cmd_buttons.addStretch(1)
+        cmd_layout.addLayout(cmd_buttons)
+        cmd_hint = QtWidgets.QLabel(
+            "Команды появляются в правой панели и в командной палитре. Можно запускать скрипты, открывать папки и т.д."
+        )
+        cmd_hint.setObjectName("customCommandSubtitle")
+        cmd_hint.setWordWrap(True)
+        cmd_layout.addWidget(cmd_hint)
+        ui_layout.addWidget(grp_commands)
+        self._refresh_custom_command_list()
         ui_layout.addStretch(1)
         self.settings_tabs.addTab(page_ui, "Интерфейс")
 
@@ -4815,6 +5285,7 @@ class MainWindow(QtWidgets.QMainWindow):
             (getattr(self, "ed_titles_path", None), "textEdited"),
             (self.sb_max_videos, "valueChanged"),
             (self.cb_ui_show_activity, "toggled"),
+            (getattr(self, "cb_ui_show_context", None), "toggled"),
             (self.cmb_ui_activity_density, "currentIndexChanged"),
             (self.ed_cdp_port, "textEdited"),
             (self.ed_userdir, "textEdited"),
@@ -5499,6 +5970,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.cmb_chrome_profile_top.currentIndexChanged.connect(self._on_top_chrome_profile_changed)
         self.btn_scan_profiles_top.clicked.connect(self._on_toolbar_scan_profiles)
+        if hasattr(self, "btn_toggle_commands"):
+            self.btn_toggle_commands.toggled.connect(self._on_toolbar_commands_toggle)
         self.btn_open_chrome.clicked.connect(self._open_chrome)
         self.btn_open_root.clicked.connect(lambda: open_in_finder(self.cfg.get("project_root", PROJECT_ROOT)))
         self.btn_open_raw.clicked.connect(lambda: open_in_finder(self.cfg.get("downloads_dir", DL_DIR)))
@@ -5511,6 +5984,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.chk_activity_visible.toggled.connect(self._on_activity_toggle)
         self.ed_activity_filter.textChanged.connect(self._on_activity_filter_changed)
         self.btn_activity_export.clicked.connect(self._export_activity_log)
+        if hasattr(self, "lst_custom_commands"):
+            self.lst_custom_commands.itemSelectionChanged.connect(self._update_custom_command_buttons)
+        if hasattr(self, "btn_custom_add"):
+            self.btn_custom_add.clicked.connect(self._on_custom_command_add)
+        if hasattr(self, "btn_custom_edit"):
+            self.btn_custom_edit.clicked.connect(self._on_custom_command_edit)
+        if hasattr(self, "btn_custom_delete"):
+            self.btn_custom_delete.clicked.connect(self._on_custom_command_remove)
+        if hasattr(self, "btn_custom_up"):
+            self.btn_custom_up.clicked.connect(lambda _, direction=-1: self._on_custom_command_move(direction))
+        if hasattr(self, "btn_custom_down"):
+            self.btn_custom_down.clicked.connect(lambda _, direction=1: self._on_custom_command_move(direction))
         if hasattr(self, "cb_quick_activity"):
             self.cb_quick_activity.toggled.connect(lambda checked: self._apply_activity_visibility(bool(checked), persist=True))
         if hasattr(self, "cmb_quick_density"):
@@ -5546,6 +6031,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_maintenance_cleanup.clicked.connect(lambda: self._run_maintenance_cleanup(manual=True))
         self.btn_maintenance_sizes.clicked.connect(self._report_dir_sizes)
         self.cmb_ui_activity_density.currentIndexChanged.connect(self._on_activity_density_changed)
+        if hasattr(self, "cb_ui_show_context"):
+            self.cb_ui_show_context.toggled.connect(self._on_settings_show_context_changed)
         self.cmb_active_preset.currentTextChanged.connect(self._on_active_preset_changed)
         self.btn_preset_add.clicked.connect(self._on_preset_add)
         self.btn_preset_delete.clicked.connect(self._on_preset_delete)
@@ -6022,7 +6509,9 @@ class MainWindow(QtWidgets.QMainWindow):
             "error": QtWidgets.QStyle.StandardPixmap.SP_MessageBoxCritical,
             "warn": QtWidgets.QStyle.StandardPixmap.SP_MessageBoxWarning,
         }
-        item.setIcon(self.style().standardIcon(icon_map.get(kind, QtWidgets.QStyle.StandardPixmap.SP_MessageBoxInformation)))
+        item.setIcon(
+            self._mono_icon(icon_map.get(kind, QtWidgets.QStyle.StandardPixmap.SP_MessageBoxInformation))
+        )
         item.setData(QtCore.Qt.ItemDataRole.UserRole, text.lower())
         self._style_activity_item(item)
         self.lst_activity.addItem(item)
@@ -8508,7 +8997,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         ui_cfg = self.cfg.setdefault("ui", {})
         ui_cfg["show_activity"] = bool(self.cb_ui_show_activity.isChecked())
+        ui_cfg["show_context"] = bool(self.cb_ui_show_context.isChecked()) if hasattr(self, "cb_ui_show_context") else ui_cfg.get("show_context", True)
         ui_cfg["activity_density"] = self.cmb_ui_activity_density.currentData() or "compact"
+        ui_cfg["custom_commands"] = list(self._custom_commands)
 
         genai_cfg = self.cfg.setdefault("google_genai", {})
         genai_cfg["enabled"] = bool(self.cb_genai_enabled.isChecked())

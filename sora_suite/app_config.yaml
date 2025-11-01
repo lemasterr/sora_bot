@@ -162,3 +162,6 @@ maintenance:
 ui:
   show_activity: true
   accent_kind: info
+  activity_density: compact
+  show_context: true
+  custom_commands: []
