@@ -2314,10 +2314,9 @@ class MainWindow(QtWidgets.QMainWindow):
         tb.addWidget(folders_frame)
 
         self.btn_command_palette_toolbar = QtWidgets.QToolButton()
-        self.btn_command_palette_toolbar.setText("Команды")
-        self.btn_command_palette_toolbar.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        self.btn_command_palette_toolbar.setIcon(
-            self._mono_icon(QtWidgets.QStyle.StandardPixmap.SP_FileDialogContentsView)
+        self.btn_command_palette_toolbar.setText("🧭 Команды")
+        self.btn_command_palette_toolbar.setToolButtonStyle(
+            QtCore.Qt.ToolButtonStyle.ToolButtonTextOnly
         )
         self.btn_command_palette_toolbar.clicked.connect(self._open_command_palette)
         tb.addWidget(self.btn_command_palette_toolbar)
@@ -2325,8 +2324,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_toggle_commands = QtWidgets.QToolButton()
         self.btn_toggle_commands.setObjectName("contextToggleButton")
         self.btn_toggle_commands.setCheckable(True)
-        self.btn_toggle_commands.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        self.btn_toggle_commands.setText("Панель")
+        self.btn_toggle_commands.setToolButtonStyle(
+            QtCore.Qt.ToolButtonStyle.ToolButtonTextOnly
+        )
+        self.btn_toggle_commands.setText("🧩 Панель")
         tb.addWidget(self.btn_toggle_commands)
 
         tb.addStretch(1)
@@ -2534,20 +2535,15 @@ class MainWindow(QtWidgets.QMainWindow):
         quick_layout = QtWidgets.QHBoxLayout(quick_panel)
         quick_layout.setContentsMargins(16, 14, 16, 14)
         quick_layout.setSpacing(12)
-        btn_quick_run = QtWidgets.QPushButton("Старт сценария")
-        btn_quick_run.setIcon(self._mono_icon(QtWidgets.QStyle.StandardPixmap.SP_MediaPlay))
+        btn_quick_run = QtWidgets.QPushButton("▶️ Старт сценария")
         btn_quick_run.clicked.connect(self._run_scenario)
-        btn_quick_images = QtWidgets.QPushButton("Генерация картинок")
-        btn_quick_images.setIcon(self._mono_icon(QtWidgets.QStyle.StandardPixmap.SP_FileDialogContentsView))
+        btn_quick_images = QtWidgets.QPushButton("🖼️ Генерация картинок")
         btn_quick_images.clicked.connect(self._save_and_run_autogen_images)
-        btn_quick_chrome = QtWidgets.QPushButton("Запустить Chrome")
-        btn_quick_chrome.setIcon(self._mono_icon(QtWidgets.QStyle.StandardPixmap.SP_DesktopIcon))
+        btn_quick_chrome = QtWidgets.QPushButton("🌐 Запустить Chrome")
         btn_quick_chrome.clicked.connect(self._open_chrome)
-        btn_quick_sessions = QtWidgets.QPushButton("Рабочие пространства")
-        btn_quick_sessions.setIcon(self._mono_icon(QtWidgets.QStyle.StandardPixmap.SP_ComputerIcon))
+        btn_quick_sessions = QtWidgets.QPushButton("🗂️ Рабочие пространства")
         btn_quick_sessions.clicked.connect(lambda: self._select_section("workspaces"))
-        btn_quick_settings = QtWidgets.QPushButton("Настройки")
-        btn_quick_settings.setIcon(self._mono_icon(QtWidgets.QStyle.StandardPixmap.SP_FileDialogDetailedView))
+        btn_quick_settings = QtWidgets.QPushButton("⚙️ Настройки")
         btn_quick_settings.clicked.connect(lambda: self._select_section("settings"))
         for btn in (
             btn_quick_run,
@@ -2810,9 +2806,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         add_section(
             "overview",
-            "Обзор",
+            "🏠 Обзор",
             overview_root,
-            icon=self._mono_icon(QtWidgets.QStyle.StandardPixmap.SP_DialogHelpButton),
             scrollable=True,
             category="Главная",
             description="Центр управления и статистики приложения",
@@ -2846,9 +2841,8 @@ class MainWindow(QtWidgets.QMainWindow):
         register_context("workspaces", workspace_context)
         add_section(
             "workspaces",
-            "Рабочие пространства",
+            "🗂️ Рабочие пространства",
             self.tab_sessions,
-            icon=self._mono_icon(QtWidgets.QStyle.StandardPixmap.SP_FileDialogStart),
             scrollable=True,
             category="Рабочие процессы",
             description="Настройка параллельных профилей Chrome и промптов",
@@ -3125,9 +3119,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         add_section(
             "automation",
-            "Автоматизация",
+            "🤖 Автоматизация",
             self.tab_tasks,
-            icon=self._mono_icon(QtWidgets.QStyle.StandardPixmap.SP_ArrowForward),
             category="Рабочие процессы",
             description="Пошаговый запуск: генерация, скачивание, блюр, склейка и загрузка",
         )
@@ -3751,9 +3744,8 @@ class MainWindow(QtWidgets.QMainWindow):
         register_context("content", content_context)
         add_section(
             "content",
-            "Контент",
+            "📝 Контент",
             content_host,
-            icon=self._mono_icon(QtWidgets.QStyle.StandardPixmap.SP_FileDialogListView),
             category="Контент",
             description="Редакторы промптов, изображений и заголовков",
         )
@@ -3806,9 +3798,8 @@ class MainWindow(QtWidgets.QMainWindow):
         register_context("telegram", telegram_context)
         add_section(
             "telegram",
-            "Telegram",
+            "✈️ Telegram",
             self.telegram_panel,
-            icon=self._mono_icon(QtWidgets.QStyle.StandardPixmap.SP_MessageBoxInformation),
             scrollable=True,
             category="Интеграции",
             description="Уведомления, шаблоны и моментальные сообщения в Telegram",
@@ -3816,18 +3807,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_telegram_history()
         add_section(
             "autopost",
-            "Автопостинг",
+            "📤 Автопостинг",
             autopost_host,
-            icon=self._mono_icon(QtWidgets.QStyle.StandardPixmap.SP_MediaPlay),
             category="Публикации",
             description="YouTube и TikTok: очереди, расписания и архивы",
         )
 
         add_section(
             "settings",
-            "Настройки",
+            "⚙️ Настройки",
             self.tab_settings,
-            icon=self._mono_icon(QtWidgets.QStyle.StandardPixmap.SP_FileDialogDetailedView),
             category="Система",
             description="Каталоги, Chrome, ffmpeg, история и обслуживание",
         )
@@ -3986,12 +3975,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self, "btn_toggle_commands"):
             self.btn_toggle_commands.blockSignals(True)
             self.btn_toggle_commands.setChecked(bool(visible))
-            icon_sp = (
-                QtWidgets.QStyle.StandardPixmap.SP_ArrowLeft
-                if visible
-                else QtWidgets.QStyle.StandardPixmap.SP_ArrowRight
+            self.btn_toggle_commands.setText(
+                "🧩 Панель ⬅️" if visible else "🧩 Панель ➡️"
             )
-            self.btn_toggle_commands.setIcon(self._mono_icon(icon_sp))
             self.btn_toggle_commands.setToolTip(
                 "Скрыть панель команд" if visible else "Показать панель команд"
             )
