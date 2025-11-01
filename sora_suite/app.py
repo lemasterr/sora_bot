@@ -5,6 +5,7 @@ import re  # FIX: используется в _slot_log, _natural_key
 import math
 import sys
 import json
+import uuid
 try:
     import yaml
 except ModuleNotFoundError as exc:
@@ -23,7 +24,7 @@ from pathlib import Path
 from functools import partial
 from urllib.request import urlopen, Request
 from collections import deque
-from typing import Optional, List, Union, Tuple, Dict, Callable, Any
+from typing import Optional, List, Union, Tuple, Dict, Callable, Any, Set, Iterable
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 
@@ -154,6 +155,24 @@ def normalize_zone_list(zones: Optional[List[Dict]]) -> List[Dict[str, int]]:
     return normalized
 
 
+def normalize_custom_commands(raw: object) -> List[Dict[str, str]]:
+    """Приводит кастомные команды к ожидаемому виду."""
+
+    result: List[Dict[str, str]] = []
+    if not isinstance(raw, list):
+        return result
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        title = str(entry.get("name") or entry.get("title") or "").strip()
+        command = str(entry.get("command") or "").strip()
+        description = str(entry.get("description") or entry.get("subtitle") or "").strip()
+        if not title or not command:
+            continue
+        result.append({"name": title, "command": command, "description": description})
+    return result
+
+
 def load_cfg() -> dict:
     if not CFG_PATH.exists():
         raise FileNotFoundError(f"Создай конфиг {CFG_PATH}")
@@ -180,6 +199,12 @@ def load_cfg() -> dict:
     autogen.setdefault("submitted_log", str(WORKERS_DIR / "autogen" / "submitted.log"))
     autogen.setdefault("failed_log", str(WORKERS_DIR / "autogen" / "failed.log"))
     autogen.setdefault("instances", [])
+    sessions = autogen.setdefault("sessions", [])
+    if isinstance(sessions, dict):
+        # старый формат, где сессии хранились как отображение
+        autogen["sessions"] = list(sessions.values())
+    elif not isinstance(sessions, list):
+        autogen["sessions"] = []
     autogen.setdefault("active_prompts_profile", PROMPTS_DEFAULT_KEY)
     autogen.setdefault("image_prompts_file", str(WORKERS_DIR / "autogen" / "image_prompts.txt"))
 
@@ -197,6 +222,17 @@ def load_cfg() -> dict:
     genai.setdefault("person_generation", "")
     genai.setdefault("output_mime_type", "image/jpeg")
     genai.setdefault("attach_to_sora", True)
+    genai.setdefault("seeds", "")
+    genai.setdefault("consistent_character_design", False)
+    genai.setdefault("lens_type", "")
+    genai.setdefault("color_palette", "")
+    genai.setdefault("style", "")
+    genai.setdefault("reference_prompt", "")
+    genai.setdefault("notifications_enabled", True)
+    genai.setdefault("daily_quota", 0)
+    genai.setdefault("quota_warning_prompts", 5)
+    genai.setdefault("quota_enforce", False)
+    genai.setdefault("usage_file", str(Path("generated_images") / "usage.json"))
 
     downloader = data.setdefault("downloader", {})
     downloader.setdefault("workdir", str(WORKERS_DIR / "downloader"))
@@ -273,6 +309,14 @@ def load_cfg() -> dict:
     else:
         ch["binary"] = os.path.expandvars(ch["binary"])  # поддержка Windows %LOCALAPPDATA%
     ch.setdefault("profiles", [])
+    for prof in ch.get("profiles", []) or []:
+        if not isinstance(prof, dict):
+            continue
+        port = _coerce_int(prof.get("cdp_port"))
+        if port and port > 0:
+            prof["cdp_port"] = int(port)
+        else:
+            prof.pop("cdp_port", None)
     ch.setdefault("active_profile", "")
 
     # Fallback: если профилей нет, но задан старый user_data_dir — поднимем Imported
@@ -325,6 +369,9 @@ def load_cfg() -> dict:
     telegram.setdefault("enabled", False)
     telegram.setdefault("bot_token", "")
     telegram.setdefault("chat_id", "")
+    telegram.setdefault("templates", [])
+    telegram.setdefault("last_template", "")
+    telegram.setdefault("quick_delay_minutes", 0)
 
     maintenance = data.setdefault("maintenance", {})
     maintenance.setdefault("auto_cleanup_on_start", False)
@@ -337,6 +384,9 @@ def load_cfg() -> dict:
     ui.setdefault("show_activity", True)
     ui.setdefault("accent_kind", "info")
     ui.setdefault("activity_density", "compact")
+    ui.setdefault("show_context", True)
+    ui.setdefault("custom_commands", [])
+    ui["custom_commands"] = normalize_custom_commands(ui.get("custom_commands"))
 
     return data
 
@@ -345,6 +395,50 @@ def slugify(value: str) -> str:
     value = re.sub(r"[^a-zA-Z0-9]+", "-", value.strip().lower())
     value = re.sub(r"-+", "-", value).strip("-")
     return value or "instance"
+
+
+def normalize_session_list(raw_sessions: object) -> List[Dict[str, Any]]:
+    normalized: List[Dict[str, Any]] = []
+    if not isinstance(raw_sessions, list):
+        return normalized
+
+    seen_ids: Set[str] = set()
+    for idx, item in enumerate(raw_sessions, start=1):
+        if not isinstance(item, dict):
+            continue
+        session = dict(item)
+        sid = str(session.get("id") or "").strip()
+        if not sid:
+            sid = uuid.uuid4().hex[:8]
+        while sid in seen_ids:
+            sid = uuid.uuid4().hex[:8]
+        session["id"] = sid
+        seen_ids.add(sid)
+
+        name = str(session.get("name") or session.get("title") or "").strip()
+        if not name:
+            name = f"Сессия {idx}"
+        session["name"] = name
+
+        session.setdefault("chrome_profile", "")
+        session.setdefault("prompt_profile", PROMPTS_DEFAULT_KEY)
+        session.setdefault("cdp_port", None)
+        session.setdefault("prompts_file", "")
+        session.setdefault("image_prompts_file", "")
+        session.setdefault("submitted_log", "")
+        session.setdefault("failed_log", "")
+        session.setdefault("notes", "")
+        session.setdefault("auto_launch_chrome", False)
+        session.setdefault("auto_launch_autogen", "idle")
+        session.setdefault("download_dir", "")
+        session.setdefault("titles_file", "")
+        session.setdefault("cursor_file", "")
+        session.setdefault("max_videos", 0)
+        session["max_videos"] = int(_coerce_int(session.get("max_videos")) or 0)
+
+        normalized.append(session)
+
+    return normalized
 
 
 ERROR_GUIDE: List[Tuple[str, str, str]] = [
@@ -753,6 +847,356 @@ class ProcRunner(QtCore.QObject):
             self.finished.emit(1, self.tag)
 
 
+# ---------- отдельное окно сессии ----------
+class SessionWorkspaceWindow(QtWidgets.QDialog):
+    """Компактное отдельное окно для управления конкретной сессией."""
+
+    def __init__(self, main: "MainWindow", session_id: str):
+        super().__init__(parent=main)
+        self._main = main
+        self.session_id = session_id
+        self.setWindowTitle("Рабочее пространство Sora")
+        self.setObjectName("sessionWorkspaceWindow")
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self.setModal(False)
+        self.setWindowFlag(QtCore.Qt.WindowType.Window, True)
+        self.setMinimumSize(540, 520)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(14)
+
+        header = QtWidgets.QFrame()
+        header_layout = QtWidgets.QVBoxLayout(header)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(4)
+        self.lbl_title = QtWidgets.QLabel("Сессия")
+        self.lbl_title.setObjectName("sessionWindowTitle")
+        self.lbl_details = QtWidgets.QLabel("—")
+        self.lbl_details.setObjectName("sessionWindowDetails")
+        self.lbl_details.setWordWrap(True)
+        header_layout.addWidget(self.lbl_title)
+        header_layout.addWidget(self.lbl_details)
+        layout.addWidget(header)
+
+        actions_card = QtWidgets.QFrame()
+        actions_card.setObjectName("sessionWindowActions")
+        actions_layout = QtWidgets.QHBoxLayout(actions_card)
+        actions_layout.setContentsMargins(12, 12, 12, 12)
+        actions_layout.setSpacing(8)
+        self.btn_launch_chrome = QtWidgets.QPushButton("Открыть Chrome")
+        self.btn_run_prompts = QtWidgets.QPushButton("Промпты Sora")
+        self.btn_run_images = QtWidgets.QPushButton("Генерация")
+        self.btn_run_download = QtWidgets.QPushButton("Скачивание")
+        self.btn_open_downloads = QtWidgets.QPushButton("Папка RAW")
+        self.btn_stop = QtWidgets.QPushButton("Остановить")
+        for btn in (
+            self.btn_launch_chrome,
+            self.btn_run_prompts,
+            self.btn_run_images,
+            self.btn_run_download,
+            self.btn_open_downloads,
+            self.btn_stop,
+        ):
+            btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+            btn.setMinimumHeight(32)
+            actions_layout.addWidget(btn)
+        actions_layout.addStretch(1)
+        layout.addWidget(actions_card)
+
+        status_card = QtWidgets.QFrame()
+        status_card.setObjectName("sessionWindowStatus")
+        status_layout = QtWidgets.QVBoxLayout(status_card)
+        status_layout.setContentsMargins(12, 12, 12, 12)
+        status_layout.setSpacing(6)
+        self.lbl_status = QtWidgets.QLabel("Статус: —")
+        self.lbl_status.setObjectName("sessionWindowStatusLabel")
+        self.lbl_status.setWordWrap(True)
+        status_layout.addWidget(self.lbl_status)
+        self.lbl_status_hint = QtWidgets.QLabel(
+            "История запуска и лог выполнения обновляются автоматически при действиях в этой сессии."
+        )
+        self.lbl_status_hint.setObjectName("sessionWindowHint")
+        self.lbl_status_hint.setWordWrap(True)
+        status_layout.addWidget(self.lbl_status_hint)
+        layout.addWidget(status_card)
+
+        log_frame = QtWidgets.QFrame()
+        log_frame.setObjectName("sessionWindowLog")
+        log_layout = QtWidgets.QVBoxLayout(log_frame)
+        log_layout.setContentsMargins(12, 12, 12, 12)
+        log_layout.setSpacing(6)
+        lbl_log = QtWidgets.QLabel("Журнал выполнения")
+        lbl_log.setObjectName("sessionWindowLogTitle")
+        log_layout.addWidget(lbl_log)
+        self.log_view = QtWidgets.QPlainTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.setMaximumBlockCount(500)
+        self.log_view.setPlaceholderText("Здесь появятся логи процессов выбранной сессии…")
+        font = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.SystemFont.FixedFont)
+        font.setPointSize(max(font.pointSize() - 1, 9))
+        self.log_view.setFont(font)
+        log_layout.addWidget(self.log_view, 1)
+        layout.addWidget(log_frame, 1)
+
+        self.btn_launch_chrome.clicked.connect(lambda: self._main._launch_session_chrome(self.session_id))
+        self.btn_run_prompts.clicked.connect(lambda: self._main._run_session_autogen(self.session_id))
+        self.btn_run_images.clicked.connect(lambda: self._main._run_session_images(self.session_id))
+        self.btn_run_download.clicked.connect(lambda: self._main._run_session_download(self.session_id))
+        self.btn_open_downloads.clicked.connect(lambda: self._main._open_session_download_dir(self.session_id))
+        self.btn_stop.clicked.connect(lambda: self._main._stop_session_runner(self.session_id))
+
+    def update_session(self, session: Dict[str, Any]):
+        name = session.get("name", self.session_id)
+        profile = session.get("prompt_profile") or PROMPTS_DEFAULT_KEY
+        chrome = session.get("chrome_profile") or "—"
+        port = _coerce_int(session.get("cdp_port")) or self._main._session_chrome_port(session)
+        self.setWindowTitle(f"Sora — {name}")
+        prompt_label = self._main._prompt_profile_label(profile)
+        download_dir = str(self._main._session_download_dir(session))
+        limit_label = self._main._session_download_limit_label(session)
+        self.lbl_title.setText(name)
+        self.lbl_details.setText(
+            (
+                f"Промпты: <b>{prompt_label}</b> · Chrome: <b>{chrome or 'по умолчанию'}</b> · CDP: <b>{port}</b>"
+                f"<br>RAW: <b>{download_dir}</b> · Лимит: <b>{limit_label}</b>"
+            )
+        )
+
+    def update_status(self, status: str, message: str, rc: Optional[int]):
+        icon = self._main._session_status_icon(status)
+        extra = f" (rc={rc})" if rc is not None else ""
+        text = message or f"Статус: {status}"
+        self.lbl_status.setText(f"{icon} {text}{extra}")
+
+    def append_log(self, line: str):
+        self.log_view.appendPlainText(line)
+
+    def set_log(self, lines: Iterable[str]):
+        self.log_view.blockSignals(True)
+        self.log_view.clear()
+        for line in lines:
+            self.log_view.appendPlainText(line)
+        self.log_view.moveCursor(QtGui.QTextCursor.MoveOperation.End)
+        self.log_view.blockSignals(False)
+
+    def closeEvent(self, event: QtGui.QCloseEvent):
+        try:
+            if self.session_id in self._main._session_windows:
+                self._main._session_windows.pop(self.session_id, None)
+        finally:
+            super().closeEvent(event)
+
+
+# ---------- командная палитра ----------
+class CommandPaletteDialog(QtWidgets.QDialog):
+    def __init__(self, parent: QtWidgets.QWidget, commands: List[Dict[str, Any]]):
+        super().__init__(parent)
+        self.setWindowTitle("Командная палитра")
+        self.setObjectName("commandPalette")
+        self.setModal(True)
+        self.setWindowFlag(QtCore.Qt.WindowType.Tool, True)
+        self.setWindowFlag(QtCore.Qt.WindowType.FramelessWindowHint, True)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.resize(520, 440)
+
+        wrapper = QtWidgets.QFrame()
+        wrapper.setObjectName("commandPaletteFrame")
+        wrapper_layout = QtWidgets.QVBoxLayout(wrapper)
+        wrapper_layout.setContentsMargins(16, 16, 16, 16)
+        wrapper_layout.setSpacing(12)
+
+        self.search = QtWidgets.QLineEdit()
+        self.search.setObjectName("commandPaletteSearch")
+        self.search.setPlaceholderText("Найди действие или раздел…")
+        wrapper_layout.addWidget(self.search)
+
+        self.list = QtWidgets.QListWidget()
+        self.list.setObjectName("commandPaletteList")
+        self.list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        self.list.setAlternatingRowColors(False)
+        self.list.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        wrapper_layout.addWidget(self.list, 1)
+
+        hint = QtWidgets.QLabel("↵ — выполнить · Esc — закрыть · Tab — переключить разделы")
+        hint.setObjectName("commandPaletteHint")
+        hint.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        wrapper_layout.addWidget(hint)
+
+        base_layout = QtWidgets.QVBoxLayout(self)
+        base_layout.setContentsMargins(0, 0, 0, 0)
+        base_layout.addWidget(wrapper)
+
+        self._commands = list(commands)
+        self._filtered: List[Dict[str, Any]] = []
+        self._selected_id: Optional[str] = None
+
+        self.search.textChanged.connect(self._apply_filter)
+        self.list.itemActivated.connect(self._choose_current)
+        self.list.itemSelectionChanged.connect(self._sync_focus_label)
+
+        self._apply_filter()
+        self.search.setFocus(QtCore.Qt.FocusReason.PopupFocusReason)
+
+    def keyPressEvent(self, event: QtGui.QKeyEvent):
+        if event.key() in {QtCore.Qt.Key.Key_Return, QtCore.Qt.Key.Key_Enter}:
+            self._choose_current(self.list.currentItem())
+            event.accept()
+            return
+        if event.key() == QtCore.Qt.Key.Key_Tab:
+            self._jump_to_next_category()
+            event.accept()
+            return
+        if event.key() == QtCore.Qt.Key.Key_Escape:
+            self.reject()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def _jump_to_next_category(self):
+        if not self._filtered:
+            return
+        current = self.list.currentRow()
+        current_category = None
+        if 0 <= current < self.list.count():
+            item = self.list.item(current)
+            current_category = item.data(QtCore.Qt.ItemDataRole.UserRole + 1)
+        for idx in range(current + 1, self.list.count()):
+            item = self.list.item(idx)
+            if item and item.data(QtCore.Qt.ItemDataRole.UserRole + 1) != current_category:
+                self.list.setCurrentRow(idx)
+                return
+        # если не нашли впереди — крутимся
+        for idx in range(0, self.list.count()):
+            item = self.list.item(idx)
+            if item and item.data(QtCore.Qt.ItemDataRole.UserRole + 1) != current_category:
+                self.list.setCurrentRow(idx)
+                return
+
+    def _apply_filter(self):
+        query = self.search.text().strip().lower()
+        tokens = [token for token in re.split(r"\s+", query) if token]
+        self.list.blockSignals(True)
+        self.list.clear()
+        self._filtered.clear()
+
+        for command in self._commands:
+            haystack = " ".join(
+                [
+                    command.get("title", ""),
+                    command.get("subtitle", ""),
+                    command.get("category", ""),
+                    " ".join(command.get("keywords", [])),
+                ]
+            ).lower()
+            if all(token in haystack for token in tokens):
+                item = QtWidgets.QListWidgetItem()
+                title = command.get("title", "")
+                subtitle = command.get("subtitle", "")
+                if subtitle:
+                    item.setText(f"{title}\n<small>{subtitle}</small>")
+                else:
+                    item.setText(title)
+                item.setData(QtCore.Qt.ItemDataRole.UserRole, command.get("id"))
+                item.setData(QtCore.Qt.ItemDataRole.UserRole + 1, command.get("category", ""))
+                item.setToolTip(subtitle or title)
+                self.list.addItem(item)
+                self._filtered.append(command)
+
+        self.list.blockSignals(False)
+        if self.list.count():
+            self.list.setCurrentRow(0)
+
+    def _choose_current(self, item: Optional[QtWidgets.QListWidgetItem]):
+        if not item:
+            return
+        command_id = item.data(QtCore.Qt.ItemDataRole.UserRole)
+        if not command_id:
+            return
+        self._selected_id = str(command_id)
+        self.accept()
+
+    def _sync_focus_label(self):
+        # Вставка HTML-меток требует обновления флагов отображения
+        for idx in range(self.list.count()):
+            item = self.list.item(idx)
+            if not item:
+                continue
+            text = item.text()
+            if "<small>" in text:
+                item.setData(QtCore.Qt.ItemDataRole.DisplayRole, QtCore.QVariant())
+                item.setData(QtCore.Qt.ItemDataRole.DisplayRole, text)
+
+    def selected_command(self) -> Optional[str]:
+        return self._selected_id
+
+
+class CustomCommandDialog(QtWidgets.QDialog):
+    def __init__(self, parent: QtWidgets.QWidget, data: Optional[Dict[str, str]] = None):
+        super().__init__(parent)
+        self.setWindowTitle("Быстрая команда")
+        self.setObjectName("customCommandDialog")
+        self.setModal(True)
+        self.resize(420, 240)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
+
+        form = QtWidgets.QFormLayout()
+        form.setHorizontalSpacing(8)
+        form.setVerticalSpacing(10)
+
+        self.ed_name = QtWidgets.QLineEdit()
+        self.ed_name.setPlaceholderText("Например: Открыть RAW")
+        self.ed_command = QtWidgets.QLineEdit()
+        self.ed_command.setPlaceholderText("Команда или путь к скрипту")
+        self.ed_description = QtWidgets.QLineEdit()
+        self.ed_description.setPlaceholderText("Подсказка (необязательно)")
+
+        if isinstance(data, dict):
+            self.ed_name.setText(str(data.get("name", "")))
+            self.ed_command.setText(str(data.get("command", "")))
+            self.ed_description.setText(str(data.get("description", "")))
+
+        form.addRow("Название:", self.ed_name)
+        form.addRow("Команда:", self.ed_command)
+        form.addRow("Описание:", self.ed_description)
+        layout.addLayout(form)
+
+        hint = QtWidgets.QLabel(
+            "Команда запускается через оболочку. Можно указать python-скрипт, `start .` или любой batch/шаблон."
+        )
+        hint.setObjectName("customCommandHint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Cancel | QtWidgets.QDialogButtonBox.StandardButton.Ok
+        )
+        layout.addWidget(buttons)
+
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+    def accept(self) -> None:  # type: ignore[override]
+        if not self.ed_name.text().strip() or not self.ed_command.text().strip():
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Заполните поля",
+                "Нужно указать и название, и команду. Без этих полей сохранение невозможно.",
+            )
+            return
+        super().accept()
+
+    def get_data(self) -> Dict[str, str]:
+        return {
+            "name": self.ed_name.text().strip(),
+            "command": self.ed_command.text().strip(),
+            "description": self.ed_description.text().strip(),
+        }
+
+
 # ---------- главное окно ----------
 class MainWindow(QtWidgets.QMainWindow):
     # сигналы для безопасных UI-апдейтов из потоков
@@ -769,16 +1213,57 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_prompt_profile_key = key
         self._ensure_all_profile_prompts()
 
+        sessions_list = normalize_session_list(auto_cfg.get("sessions"))
+        if not sessions_list:
+            sessions_list.append(
+                {
+                    "id": uuid.uuid4().hex[:8],
+                    "name": "Сессия 1",
+                    "prompt_profile": PROMPTS_DEFAULT_KEY,
+                    "chrome_profile": "",
+                    "cdp_port": None,
+                    "prompts_file": "",
+                    "image_prompts_file": "",
+                    "submitted_log": "",
+                    "failed_log": "",
+                    "notes": "",
+                    "auto_launch_chrome": False,
+                    "auto_launch_autogen": "idle",
+                    "download_dir": "",
+                    "titles_file": "",
+                    "cursor_file": "",
+                    "max_videos": 0,
+                }
+            )
+        auto_cfg["sessions"] = sessions_list
+        self._session_cache: Dict[str, Dict[str, Any]] = {session["id"]: session for session in sessions_list}
+        self._session_order: List[str] = [session["id"] for session in sessions_list]
+        self._session_runners: Dict[str, ProcRunner] = {}
+        self._session_state: Dict[str, Dict[str, Any]] = {}
+        self._session_windows: Dict[str, "SessionWorkspaceWindow"] = {}
+        self._current_session_id: str = self._session_order[0] if self._session_order else ""
+
+        self._command_registry: Dict[str, Dict[str, Any]] = {}
+        self._command_actions: Dict[str, QtGui.QAction] = {}
+        self._pending_tg_jobs: List[Tuple[QtCore.QTimer, str]] = []
+        self._telegram_templates: List[Dict[str, str]] = []
+        self._icon_cache: Dict[Tuple[int, str, int], QtGui.QIcon] = {}
+        self._custom_commands: List[Dict[str, str]] = normalize_custom_commands(
+            self.cfg.get("ui", {}).get("custom_commands", [])
+        )
+
         self._apply_theme()
 
         self.setWindowTitle("Sora Suite — Control Panel")
         self.resize(1500, 950)
         self.setMinimumSize(1024, 720)
 
+        self._app_icon = self._load_app_icon()
+        self.setWindowIcon(self._app_icon)
+
         # tray notifications
         self.tray = QtWidgets.QSystemTrayIcon(self)
-        icon = self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_ComputerIcon)
-        self.tray.setIcon(icon)
+        self.tray.setIcon(self._app_icon)
         self.tray.setToolTip("Sora Suite")
         self.tray.show()
 
@@ -804,6 +1289,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._preset_cache: Dict[str, List[Dict[str, int]]] = {}
         self._preset_tables: Dict[str, QtWidgets.QTableWidget] = {}
 
+        self._section_index: Dict[str, int] = {}
+        self._section_order: List[str] = []
+        self._current_section_key: str = ""
+
         self._build_ui()
         self._wire()
         self._init_state()
@@ -821,7 +1310,78 @@ class MainWindow(QtWidgets.QMainWindow):
         self._settings_autosave_timer.timeout.connect(self._autosave_settings)
         self._register_settings_autosave_sources()
 
+        for session_id in list(self._session_order):
+            self._ensure_session_state(session_id)
+
     # ----- helpers -----
+    def _mono_icon(
+        self,
+        sp: QtWidgets.QStyle.StandardPixmap,
+        color: str = "#f8fafc",
+        *,
+        size: int = 26,
+    ) -> QtGui.QIcon:
+        key = (int(sp), color, size)
+        cached = self._icon_cache.get(key)
+        if cached:
+            return cached
+
+        base_icon = self.style().standardIcon(sp)
+        pixmap = base_icon.pixmap(size, size)
+        if pixmap.isNull():
+            self._icon_cache[key] = base_icon
+            return base_icon
+
+        image = pixmap.toImage().convertToFormat(QtGui.QImage.Format.Format_ARGB32)
+        tint = QtGui.QColor(color)
+        for y in range(image.height()):
+            for x in range(image.width()):
+                pixel = QtGui.QColor(image.pixel(x, y))
+                alpha = pixel.alpha()
+                if alpha == 0:
+                    continue
+                toned = QtGui.QColor(tint)
+                toned.setAlpha(alpha)
+                image.setPixelColor(x, y, toned)
+
+        icon = QtGui.QIcon(QtGui.QPixmap.fromImage(image))
+        self._icon_cache[key] = icon
+        return icon
+
+    def _load_app_icon(self) -> QtGui.QIcon:
+        icon_path = APP_DIR / "app_icon.png"
+        if icon_path.exists():
+            return QtGui.QIcon(str(icon_path))
+
+        size = 256
+        pixmap = QtGui.QPixmap(size, size)
+        pixmap.fill(QtCore.Qt.GlobalColor.transparent)
+
+        painter = QtGui.QPainter(pixmap)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+
+        gradient = QtGui.QLinearGradient(0, 0, size, size)
+        gradient.setColorAt(0.0, QtGui.QColor("#38bdf8"))
+        gradient.setColorAt(1.0, QtGui.QColor("#6366f1"))
+        painter.setBrush(QtGui.QBrush(gradient))
+        painter.setPen(QtCore.Qt.PenStyle.NoPen)
+        painter.drawRoundedRect(0, 0, size, size, 56, 56)
+
+        inner_rect = QtCore.QRectF(size * 0.2, size * 0.2, size * 0.6, size * 0.6)
+        painter.setBrush(QtGui.QBrush(QtGui.QColor("#0f172a")))
+        painter.drawRoundedRect(inner_rect, 42, 42)
+
+        painter.setPen(QtGui.QPen(QtGui.QColor("#f8fafc")))
+        font = QtGui.QFont("Inter", int(size * 0.46))
+        if not font.family():
+            font = QtGui.QFont("Segoe UI", int(size * 0.46))
+        font.setBold(True)
+        painter.setFont(font)
+        painter.drawText(QtCore.QRectF(0, 0, size, size), int(QtCore.Qt.AlignmentFlag.AlignCenter), "S")
+        painter.end()
+
+        return QtGui.QIcon(pixmap)
+
     def _ensure_path_exists(self, raw: Union[str, Path]) -> Path:
         """Create file/dir for path within project if missing and return Path."""
 
@@ -857,14 +1417,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self._reload_history()
         self._auto_scan_profiles_at_start()
         self._refresh_prompt_profiles_ui()
+        self._refresh_content_context()
         self._load_image_prompts()
         self._refresh_youtube_ui()
         self._refresh_tiktok_ui()
+        self._refresh_autopost_context()
         self._load_autogen_cfg_ui()
         self._reload_used_prompts()
+        self._refresh_telegram_context()
+        self._refresh_overview_context()
         maint_cfg = self.cfg.get("maintenance", {}) or {}
         if maint_cfg.get("auto_cleanup_on_start"):
             QtCore.QTimer.singleShot(200, lambda: self._run_maintenance_cleanup(manual=False))
+        QtCore.QTimer.singleShot(400, self._apply_session_autolaunches)
 
     def _ensure_all_profile_prompts(self):
         try:
@@ -886,6 +1451,700 @@ class MainWindow(QtWidgets.QMainWindow):
             self._ensure_path_exists(str(self._default_profile_prompts(profile_name)))
         except Exception:
             pass
+
+    # ----- sessions helpers -----
+    def _ensure_session_state(self, session_id: str) -> Dict[str, Any]:
+        state = self._session_state.setdefault(
+            session_id,
+            {
+                "status": "idle",
+                "running": False,
+                "last_rc": None,
+                "last_message": "",
+                "log": deque(maxlen=500),
+                "active_task": "",
+                "last_task": "",
+                "download_before": None,
+                "download_dest": "",
+            },
+        )
+        return state
+
+    def _append_session_log(self, session_id: str, line: str):
+        state = self._ensure_session_state(session_id)
+        state["log"].append(line)
+        if session_id in self._session_windows:
+            self._session_windows[session_id].append_log(line)
+        if getattr(self, "_current_session_id", "") == session_id and hasattr(self, "te_session_log"):
+            self.te_session_log.appendPlainText(line)
+
+    def _set_session_status(self, session_id: str, status: str, message: str = "", rc: Optional[int] = None):
+        state = self._ensure_session_state(session_id)
+        state["status"] = status
+        state["running"] = status == "running"
+        state["last_message"] = message
+        if rc is not None:
+            state["last_rc"] = rc
+        self._refresh_sessions_list()
+        if getattr(self, "_current_session_id", None) == session_id:
+            self._update_session_status_panel(session_id)
+        self._refresh_workspace_context()
+        window = self._session_windows.get(session_id)
+        if window:
+            window.update_status(status, message, rc)
+
+    def _session_status_icon(self, status: str) -> str:
+        mapping = {
+            "running": "⏳",
+            "ok": "✅",
+            "error": "⚠️",
+            "idle": "🟦",
+        }
+        return mapping.get(status, "🟦")
+
+    def _session_display_label(self, session_id: str) -> str:
+        session = self._session_cache.get(session_id)
+        if not session:
+            return session_id
+        state = self._ensure_session_state(session_id)
+        icon = self._session_status_icon(state.get("status", "idle"))
+        return f"{icon} {session.get('name', session_id)}"
+
+    def _refresh_sessions_list(self):
+        if not hasattr(self, "lst_sessions"):
+            return
+        current_id = getattr(self, "_current_session_id", "")
+        self.lst_sessions.blockSignals(True)
+        self.lst_sessions.clear()
+        target_row = 0
+        for idx, session_id in enumerate(self._session_order):
+            session = self._session_cache.get(session_id)
+            if not session:
+                continue
+            item = QtWidgets.QListWidgetItem(self._session_display_label(session_id))
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, session_id)
+            state = self._ensure_session_state(session_id)
+            tooltip = session.get("notes", "").strip()
+            if state.get("last_message"):
+                tooltip = f"{state['last_message']}\n{tooltip}" if tooltip else state["last_message"]
+            if tooltip:
+                item.setToolTip(tooltip)
+            self.lst_sessions.addItem(item)
+            if session_id == current_id:
+                target_row = idx
+        if self.lst_sessions.count():
+            self.lst_sessions.setCurrentRow(target_row)
+        self.lst_sessions.blockSignals(False)
+        self._refresh_command_palette_sessions()
+        self._refresh_workspace_context()
+
+    def _session_config_snapshot(self) -> List[Dict[str, Any]]:
+        snapshot: List[Dict[str, Any]] = []
+        for session_id in self._session_order:
+            session = self._session_cache.get(session_id)
+            if not session:
+                continue
+            entry = {
+                "id": session_id,
+                "name": session.get("name", ""),
+                "chrome_profile": session.get("chrome_profile", ""),
+                "prompt_profile": session.get("prompt_profile", PROMPTS_DEFAULT_KEY),
+                "cdp_port": session.get("cdp_port"),
+                "prompts_file": session.get("prompts_file", ""),
+                "image_prompts_file": session.get("image_prompts_file", ""),
+                "submitted_log": session.get("submitted_log", ""),
+                "failed_log": session.get("failed_log", ""),
+                "notes": session.get("notes", ""),
+                "auto_launch_chrome": bool(session.get("auto_launch_chrome", False)),
+                "auto_launch_autogen": session.get("auto_launch_autogen", "idle"),
+                "download_dir": session.get("download_dir", ""),
+                "titles_file": session.get("titles_file", ""),
+                "cursor_file": session.get("cursor_file", ""),
+                "max_videos": int(_coerce_int(session.get("max_videos")) or 0),
+            }
+            snapshot.append(entry)
+        return snapshot
+
+    def _persist_sessions(self):
+        auto_cfg = self.cfg.setdefault("autogen", {})
+        auto_cfg["sessions"] = self._session_config_snapshot()
+        self._mark_settings_dirty()
+
+    def _refresh_sessions_choices(self):
+        if not hasattr(self, "cmb_session_prompt_profile"):
+            return
+        profiles = [(PROMPTS_DEFAULT_KEY, self._prompt_profile_label(PROMPTS_DEFAULT_KEY))]
+        for profile in self.cfg.get("chrome", {}).get("profiles", []) or []:
+            name = profile.get("name") or profile.get("profile_directory") or ""
+            if name:
+                profiles.append((name, name))
+        self.cmb_session_prompt_profile.blockSignals(True)
+        self.cmb_session_prompt_profile.clear()
+        for key, label in profiles:
+            self.cmb_session_prompt_profile.addItem(label, key)
+        self.cmb_session_prompt_profile.blockSignals(False)
+
+        chrome_options = [("", "Активный из настроек")]
+        for profile in self.cfg.get("chrome", {}).get("profiles", []) or []:
+            label = profile.get("name") or profile.get("profile_directory") or ""
+            if label:
+                chrome_options.append((label, label))
+        self.cmb_session_chrome_profile.blockSignals(True)
+        self.cmb_session_chrome_profile.clear()
+        for key, label in chrome_options:
+            self.cmb_session_chrome_profile.addItem(label, key)
+        self.cmb_session_chrome_profile.blockSignals(False)
+
+    def _set_session_editor_enabled(self, enabled: bool):
+        for widget in getattr(self, "_session_detail_widgets", []):
+            if isinstance(widget, QtWidgets.QWidget):
+                widget.setEnabled(enabled)
+
+    def _clear_session_editor(self):
+        if not hasattr(self, "ed_session_name"):
+            return
+        self._set_session_editor_enabled(False)
+        for line in (
+            self.ed_session_name,
+            self.ed_session_prompts,
+            self.ed_session_image_prompts,
+            self.ed_session_submitted,
+            self.ed_session_failed,
+            self.ed_session_download_dir,
+            self.ed_session_titles_file,
+            self.ed_session_cursor_file,
+        ):
+            line.blockSignals(True)
+            line.setText("")
+            line.blockSignals(False)
+        self.te_session_notes.blockSignals(True)
+        self.te_session_notes.setPlainText("")
+        self.te_session_notes.blockSignals(False)
+        self.sb_session_port.blockSignals(True)
+        self.sb_session_port.setValue(0)
+        self.sb_session_port.blockSignals(False)
+        self.sb_session_max_videos.blockSignals(True)
+        self.sb_session_max_videos.setValue(0)
+        self.sb_session_max_videos.blockSignals(False)
+        self.chk_session_auto_chrome.blockSignals(True)
+        self.chk_session_auto_chrome.setChecked(False)
+        self.chk_session_auto_chrome.blockSignals(False)
+        self.cmb_session_autogen_mode.blockSignals(True)
+        self.cmb_session_autogen_mode.setCurrentIndex(0)
+        self.cmb_session_autogen_mode.blockSignals(False)
+        self.te_session_log.clear()
+        self.lbl_session_status.setText("Выбери сессию слева, чтобы увидеть детали")
+
+    def _load_session_into_editor(self, session_id: str):
+        session = self._session_cache.get(session_id)
+        if not session:
+            self._clear_session_editor()
+            return
+        self._set_session_editor_enabled(True)
+        name = session.get("name", "")
+        self.ed_session_name.blockSignals(True)
+        self.ed_session_name.setText(name)
+        self.ed_session_name.blockSignals(False)
+
+        prompt_key = session.get("prompt_profile") or PROMPTS_DEFAULT_KEY
+        idx = self.cmb_session_prompt_profile.findData(prompt_key)
+        self.cmb_session_prompt_profile.blockSignals(True)
+        if idx >= 0:
+            self.cmb_session_prompt_profile.setCurrentIndex(idx)
+        else:
+            self.cmb_session_prompt_profile.setCurrentIndex(0)
+        self.cmb_session_prompt_profile.blockSignals(False)
+
+        chrome_key = session.get("chrome_profile") or ""
+        idx = self.cmb_session_chrome_profile.findData(chrome_key)
+        self.cmb_session_chrome_profile.blockSignals(True)
+        if idx >= 0:
+            self.cmb_session_chrome_profile.setCurrentIndex(idx)
+        else:
+            self.cmb_session_chrome_profile.setCurrentIndex(0)
+        self.cmb_session_chrome_profile.blockSignals(False)
+
+        port_val = _coerce_int(session.get("cdp_port")) or 0
+        self.sb_session_port.blockSignals(True)
+        self.sb_session_port.setValue(port_val if port_val > 0 else 0)
+        self.sb_session_port.blockSignals(False)
+
+        for field, line in [
+            ("prompts_file", self.ed_session_prompts),
+            ("image_prompts_file", self.ed_session_image_prompts),
+            ("submitted_log", self.ed_session_submitted),
+            ("failed_log", self.ed_session_failed),
+            ("download_dir", self.ed_session_download_dir),
+            ("titles_file", self.ed_session_titles_file),
+            ("cursor_file", self.ed_session_cursor_file),
+        ]:
+            value = str(session.get(field, "") or "")
+            line.blockSignals(True)
+            line.setText(value)
+            line.blockSignals(False)
+
+        self.te_session_notes.blockSignals(True)
+        self.te_session_notes.setPlainText(session.get("notes", ""))
+        self.te_session_notes.blockSignals(False)
+
+        limit = _coerce_int(session.get("max_videos")) or 0
+        self.sb_session_max_videos.blockSignals(True)
+        self.sb_session_max_videos.setValue(limit if limit > 0 else 0)
+        self.sb_session_max_videos.blockSignals(False)
+
+        self.chk_session_auto_chrome.blockSignals(True)
+        self.chk_session_auto_chrome.setChecked(bool(session.get("auto_launch_chrome")))
+        self.chk_session_auto_chrome.blockSignals(False)
+
+        mode = session.get("auto_launch_autogen", "idle")
+        idx = self.cmb_session_autogen_mode.findData(mode)
+        self.cmb_session_autogen_mode.blockSignals(True)
+        if idx >= 0:
+            self.cmb_session_autogen_mode.setCurrentIndex(idx)
+        else:
+            self.cmb_session_autogen_mode.setCurrentIndex(0)
+        self.cmb_session_autogen_mode.blockSignals(False)
+
+        state = self._ensure_session_state(session_id)
+        self.te_session_log.blockSignals(True)
+        self.te_session_log.clear()
+        for line in state.get("log", []):
+            self.te_session_log.appendPlainText(line)
+        self.te_session_log.blockSignals(False)
+        self._update_session_status_panel(session_id)
+
+    def _update_session_status_panel(self, session_id: str):
+        state = self._ensure_session_state(session_id)
+        status = state.get("status", "idle")
+        message = state.get("last_message", "")
+        icon = self._session_status_icon(status)
+        if message:
+            self.lbl_session_status.setText(f"{icon} {message}")
+        else:
+            self.lbl_session_status.setText(f"{icon} Статус: {status}")
+
+    def _on_session_selection_changed(self):
+        item = self.lst_sessions.currentItem() if hasattr(self, "lst_sessions") else None
+        if not item:
+            self._current_session_id = ""
+            self._clear_session_editor()
+            return
+        session_id = item.data(QtCore.Qt.ItemDataRole.UserRole)
+        if not session_id:
+            self._current_session_id = ""
+            self._clear_session_editor()
+            return
+        self._current_session_id = session_id
+        self._load_session_into_editor(session_id)
+        self._refresh_workspace_context()
+
+    def _create_session(self, name: Optional[str] = None) -> Dict[str, Any]:
+        session_id = uuid.uuid4().hex[:8]
+        session = {
+            "id": session_id,
+            "name": name or f"Сессия {len(self._session_order) + 1}",
+            "prompt_profile": PROMPTS_DEFAULT_KEY,
+            "chrome_profile": "",
+            "cdp_port": None,
+            "prompts_file": "",
+            "image_prompts_file": "",
+            "submitted_log": "",
+            "failed_log": "",
+            "notes": "",
+            "auto_launch_chrome": False,
+            "auto_launch_autogen": "idle",
+            "download_dir": "",
+            "titles_file": "",
+            "cursor_file": "",
+            "max_videos": 0,
+        }
+        self._session_cache[session_id] = session
+        self._session_order.append(session_id)
+        self._ensure_session_state(session_id)
+        return session
+
+    def _on_session_add(self):
+        session = self._create_session()
+        self._persist_sessions()
+        self._refresh_sessions_list()
+        self._select_session(session["id"])
+
+    def _select_session(self, session_id: str):
+        if not hasattr(self, "lst_sessions"):
+            return
+        for row in range(self.lst_sessions.count()):
+            item = self.lst_sessions.item(row)
+            if item.data(QtCore.Qt.ItemDataRole.UserRole) == session_id:
+                self.lst_sessions.setCurrentRow(row)
+                break
+
+    def _on_session_duplicate(self):
+        current = getattr(self, "_current_session_id", "")
+        if not current or current not in self._session_cache:
+            return
+        base = dict(self._session_cache[current])
+        session = self._create_session(name=f"{base.get('name', 'Сессия')} (копия)")
+        for key in (
+            "prompt_profile",
+            "chrome_profile",
+            "cdp_port",
+            "prompts_file",
+            "image_prompts_file",
+            "submitted_log",
+            "failed_log",
+            "notes",
+            "auto_launch_chrome",
+            "auto_launch_autogen",
+            "download_dir",
+            "titles_file",
+            "cursor_file",
+            "max_videos",
+        ):
+            session[key] = base.get(key)
+        self._persist_sessions()
+        self._refresh_sessions_list()
+        self._select_session(session["id"])
+
+    def _on_session_remove(self):
+        current = getattr(self, "_current_session_id", "")
+        if not current:
+            return
+        if len(self._session_order) <= 1:
+            QtWidgets.QMessageBox.information(self, "Рабочие пространства", "Нельзя удалить последнюю сессию.")
+            return
+        if QtWidgets.QMessageBox.question(
+            self,
+            "Удалить сессию",
+            "Удалить выбранную сессию?",
+        ) != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        self._session_order = [sid for sid in self._session_order if sid != current]
+        self._session_cache.pop(current, None)
+        self._session_state.pop(current, None)
+        window = self._session_windows.pop(current, None)
+        if window:
+            window.close()
+        self._persist_sessions()
+        self._refresh_sessions_list()
+        if self._session_order:
+            self._select_session(self._session_order[0])
+        else:
+            self._clear_session_editor()
+
+    def _on_session_launch_chrome(self):
+        session_id = getattr(self, "_current_session_id", "")
+        if session_id:
+            self._launch_session_chrome(session_id)
+
+    def _on_session_run_prompts(self):
+        session_id = getattr(self, "_current_session_id", "")
+        if session_id:
+            self._run_session_autogen(session_id)
+
+    def _on_session_run_images(self):
+        session_id = getattr(self, "_current_session_id", "")
+        if session_id:
+            self._run_session_images(session_id)
+
+    def _on_session_run_download(self):
+        session_id = getattr(self, "_current_session_id", "")
+        if session_id:
+            self._run_session_download(session_id)
+
+    def _on_session_stop(self):
+        session_id = getattr(self, "_current_session_id", "")
+        if session_id:
+            self._stop_session_runner(session_id)
+
+    def _on_session_open_downloads(self):
+        session_id = getattr(self, "_current_session_id", "")
+        if session_id:
+            self._open_session_download_dir(session_id)
+
+    def _on_session_open_window(self):
+        session_id = getattr(self, "_current_session_id", "")
+        if not session_id:
+            return
+        window = self._session_windows.get(session_id)
+        if window is None:
+            window = SessionWorkspaceWindow(self, session_id)
+            self._session_windows[session_id] = window
+        window.update_session(self._session_cache.get(session_id, {}))
+        state = self._ensure_session_state(session_id)
+        window.set_log(state.get("log", []))
+        window.update_status(state.get("status", "idle"), state.get("last_message", ""), state.get("last_rc"))
+        window.show()
+        window.raise_()
+        window.activateWindow()
+
+    def _on_session_name_changed(self, text: str):
+        session_id = getattr(self, "_current_session_id", "")
+        if not session_id or session_id not in self._session_cache:
+            return
+        self._session_cache[session_id]["name"] = text.strip()
+        self._persist_sessions()
+        self._refresh_sessions_list()
+        window = self._session_windows.get(session_id)
+        if window:
+            window.update_session(self._session_cache[session_id])
+
+    def _on_session_prompt_profile_changed(self):
+        session_id = getattr(self, "_current_session_id", "")
+        if not session_id or session_id not in self._session_cache:
+            return
+        key = self.cmb_session_prompt_profile.currentData()
+        self._session_cache[session_id]["prompt_profile"] = key or PROMPTS_DEFAULT_KEY
+        self._persist_sessions()
+        self._update_session_status_panel(session_id)
+
+    def _on_session_chrome_profile_changed(self):
+        session_id = getattr(self, "_current_session_id", "")
+        if not session_id or session_id not in self._session_cache:
+            return
+        key = self.cmb_session_chrome_profile.currentData()
+        self._session_cache[session_id]["chrome_profile"] = key or ""
+        self._persist_sessions()
+
+    def _on_session_port_changed(self, value: int):
+        session_id = getattr(self, "_current_session_id", "")
+        if not session_id or session_id not in self._session_cache:
+            return
+        self._session_cache[session_id]["cdp_port"] = int(value) if int(value) > 0 else None
+        self._persist_sessions()
+
+    def _on_session_path_changed(self, key: str, line: QtWidgets.QLineEdit):
+        session_id = getattr(self, "_current_session_id", "")
+        if not session_id or session_id not in self._session_cache:
+            return
+        self._session_cache[session_id][key] = line.text().strip()
+        self._persist_sessions()
+
+    def _on_session_notes_changed(self):
+        session_id = getattr(self, "_current_session_id", "")
+        if not session_id or session_id not in self._session_cache:
+            return
+        self._session_cache[session_id]["notes"] = self.te_session_notes.toPlainText().strip()
+        self._persist_sessions()
+
+    def _on_session_auto_chrome_changed(self, checked: bool):
+        session_id = getattr(self, "_current_session_id", "")
+        if not session_id or session_id not in self._session_cache:
+            return
+        self._session_cache[session_id]["auto_launch_chrome"] = bool(checked)
+        self._persist_sessions()
+
+    def _on_session_autogen_mode_changed(self):
+        session_id = getattr(self, "_current_session_id", "")
+        if not session_id or session_id not in self._session_cache:
+            return
+        mode = self.cmb_session_autogen_mode.currentData() or "idle"
+        self._session_cache[session_id]["auto_launch_autogen"] = mode
+        self._persist_sessions()
+
+    def _on_session_max_videos_changed(self, value: int):
+        session_id = getattr(self, "_current_session_id", "")
+        if not session_id or session_id not in self._session_cache:
+            return
+        limit = int(value)
+        self._session_cache[session_id]["max_videos"] = limit if limit > 0 else 0
+        self._persist_sessions()
+
+    def _ensure_session_runner(self, session_id: str) -> ProcRunner:
+        runner = self._session_runners.get(session_id)
+        if runner:
+            return runner
+        tag = f"SESSION-{session_id}"
+        runner = ProcRunner(tag, self)
+        runner.line.connect(lambda text, sid=session_id: self._on_session_runner_line(sid, text))
+        runner.finished.connect(lambda rc, _tag, sid=session_id: self._on_session_runner_finished(sid, rc))
+        runner.notify.connect(lambda title, message, sid=session_id: self._on_session_runner_notify(sid, title, message))
+        self._session_runners[session_id] = runner
+        return runner
+
+    def _on_session_runner_line(self, session_id: str, text: str):
+        clean = text.rstrip("\n")
+        self._append_session_log(session_id, clean)
+        self.sig_log.emit(clean)
+
+    def _on_session_runner_notify(self, session_id: str, title: str, message: str):
+        session = self._session_cache.get(session_id) or {"name": session_id}
+        label = session.get("name") or session_id
+        self._notify(f"{title} — {label}", message)
+
+    def _on_session_runner_finished(self, session_id: str, rc: int):
+        session = self._session_cache.get(session_id)
+        label = session.get("name") if session else session_id
+        state = self._ensure_session_state(session_id)
+        task = state.get("active_task", "")
+        status = "ok" if rc == 0 else "error"
+        message = "Завершено успешно" if rc == 0 else "Завершено с ошибкой"
+        activity_kind = "success" if rc == 0 else "error"
+        tg_message: Optional[str] = None
+
+        if task == "download":
+            dest_raw = state.get("download_dest") or ""
+            dest_path = Path(dest_raw) if dest_raw else None
+            before = state.get("download_before")
+            try:
+                after = len(self._iter_videos(dest_path)) if dest_path else None
+            except Exception:
+                after = None
+            delta = 0
+            if isinstance(after, int) and isinstance(before, int):
+                delta = max(after - before, 0)
+            base = "Скачивание"
+            message = f"{base} завершено {'успешно' if rc == 0 else 'с ошибками'}"
+            if isinstance(after, int):
+                message += f" · +{delta} (итого {after})"
+            if dest_path:
+                message += f" → {dest_path}"
+            if dest_path:
+                status_word = "готово" if rc == 0 else "ошибки"
+                total_text = after if isinstance(after, int) else "?"
+                tg_message = f"⬇️ {label}: {status_word} · +{delta} файлов (итого {total_text}) → {dest_path}"
+        elif task == "autogen_images":
+            message = f"Autogen (картинки) {'завершён' if rc == 0 else 'с ошибками'}"
+        elif task == "autogen_mix":
+            message = f"Autogen (картинки + промпты) {'завершён' if rc == 0 else 'с ошибками'}"
+        elif task == "autogen_prompts":
+            message = f"Autogen (промпты) {'завершён' if rc == 0 else 'с ошибками'}"
+
+        state["last_task"] = task
+        state["active_task"] = ""
+        state["download_before"] = None
+        state["download_dest"] = ""
+
+        if tg_message:
+            self._send_tg(tg_message)
+
+        self._append_activity(f"Сессия {label}: {message} (rc={rc})", kind=activity_kind, card_text=False)
+        self._set_session_status(session_id, status, message, rc)
+
+    def _stop_session_runner(self, session_id: str):
+        runner = self._session_runners.get(session_id)
+        if not runner:
+            return
+        runner.stop()
+        state = self._ensure_session_state(session_id)
+        state["active_task"] = ""
+        state["download_before"] = None
+        state["download_dest"] = ""
+        self._set_session_status(session_id, "idle", "Остановлено пользователем")
+
+    def _run_session_autogen(self, session_id: str, *, force_images: Optional[bool] = None, images_only: bool = False):
+        session = self._session_cache.get(session_id)
+        if not session:
+            return
+        runner = self._ensure_session_runner(session_id)
+        if runner.proc and runner.proc.poll() is None:
+            self._append_session_log(session_id, "[!] Уже выполняется задача")
+            return
+        workdir = self.cfg.get("autogen", {}).get("workdir", str(WORKERS_DIR / "autogen"))
+        entry = self.cfg.get("autogen", {}).get("entry", "main.py")
+        env = self._session_env(session_id, force_images=force_images, images_only=images_only)
+        state = self._ensure_session_state(session_id)
+        if images_only:
+            mode = "images"
+            state["active_task"] = "autogen_images"
+            status_message = "Только генерация картинок…"
+        elif force_images:
+            mode = "images+prompts"
+            state["active_task"] = "autogen_mix"
+            status_message = "Генерация картинок и вставка промптов…"
+        else:
+            mode = "prompts"
+            state["active_task"] = "autogen_prompts"
+            status_message = "Вставка промптов…"
+        state["download_before"] = None
+        state["download_dest"] = ""
+        label = session.get("name") or session_id
+        self._append_activity(f"Сессия {label}: запуск autogen ({mode})", kind="running", card_text=False)
+        self._append_session_log(session_id, f"[SESSION] Запуск autogen ({mode})")
+        self._set_session_status(session_id, "running", status_message)
+        runner.run([sys.executable, entry], cwd=workdir, env=env)
+
+    def _run_session_images(self, session_id: str):
+        self._run_session_autogen(session_id, force_images=True, images_only=True)
+
+    def _run_session_download(self, session_id: str):
+        session = self._session_cache.get(session_id)
+        if not session:
+            return
+        runner = self._ensure_session_runner(session_id)
+        if runner.proc and runner.proc.poll() is None:
+            self._append_session_log(session_id, "[!] Уже выполняется задача")
+            return
+        dl_cfg = self.cfg.get("downloader", {}) or {}
+        workdir = dl_cfg.get("workdir", str(WORKERS_DIR / "downloader"))
+        entry = dl_cfg.get("entry", "download_all.py")
+        dest_dir = self._session_download_dir(session, ensure=True)
+        titles_path = self._session_titles_path(session)
+        cursor_path = self._session_cursor_path(session)
+        try:
+            titles_path.parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        try:
+            cursor_path.parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
+        env["DOWNLOAD_DIR"] = str(dest_dir)
+        env["TITLES_FILE"] = str(titles_path)
+        env["TITLES_CURSOR_FILE"] = str(cursor_path)
+        limit_value = self._session_download_limit(session)
+        env["MAX_VIDEOS"] = str(limit_value if limit_value > 0 else 0)
+        port = self._session_chrome_port(session)
+        env["CDP_ENDPOINT"] = f"http://127.0.0.1:{int(port)}"
+        env["SORA_CDP_ENDPOINT"] = env["CDP_ENDPOINT"]
+        python = sys.executable
+        cmd = [python, entry]
+        label = session.get("name") or session_id
+        state = self._ensure_session_state(session_id)
+        state["active_task"] = "download"
+        state["download_dest"] = str(dest_dir)
+        try:
+            before = len(self._iter_videos(dest_dir))
+        except Exception:
+            before = 0
+        state["download_before"] = before
+        self._append_activity(
+            f"Сессия {label}: запуск скачивания → {dest_dir}",
+            kind="running",
+            card_text=False,
+        )
+        self._append_session_log(session_id, f"[SESSION] Старт скачивания → {dest_dir}")
+        limit_label = self._session_download_limit_label(session)
+        self._set_session_status(session_id, "running", f"Скачивание видео… (лимит {limit_label})")
+        self._send_tg(f"⬇️ {label}: скачивание запускается → {dest_dir}")
+        runner.run(cmd, cwd=workdir, env=env)
+
+    def _open_session_download_dir(self, session_id: str):
+        session = self._session_cache.get(session_id)
+        if not session:
+            return
+        path = self._session_download_dir(session, ensure=True)
+        open_in_finder(path)
+
+    def _launch_session_chrome(self, session_id: str):
+        session = self._session_cache.get(session_id)
+        if not session:
+            return
+        self._open_chrome(session=session)
+
+    def _apply_session_autolaunches(self):
+        for session_id in self._session_order:
+            session = self._session_cache.get(session_id)
+            if not session:
+                continue
+            if session.get("auto_launch_chrome"):
+                QtCore.QTimer.singleShot(0, lambda sid=session_id: self._launch_session_chrome(sid))
+            mode = session.get("auto_launch_autogen", "idle")
+            if mode == "prompts":
+                QtCore.QTimer.singleShot(0, lambda sid=session_id: self._run_session_autogen(sid))
+            elif mode == "images":
+                QtCore.QTimer.singleShot(0, lambda sid=session_id: self._run_session_images(sid))
 
     def _refresh_update_buttons(self):
         available = bool(shutil.which("git")) and (PROJECT_ROOT / ".git").exists()
@@ -947,37 +2206,110 @@ class MainWindow(QtWidgets.QMainWindow):
 
         app.setStyleSheet(
             """
-            QWidget { background-color: #0f172a; color: #f1f5f9; }
-            QGroupBox { border: 1px solid #22314d; border-radius: 12px; margin-top: 14px; background-color: #101a2f; }
-            QGroupBox::title { subcontrol-origin: margin; left: 16px; padding: 0 6px; background-color: #101a2f; }
-            QPushButton { background-color: #1f2d4a; border: 1px solid #2f4368; border-radius: 8px; padding: 6px 14px; color: #f8fafc; }
-            QPushButton:disabled { background-color: #1b2640; border-color: #2a3654; color: #66738a; }
-            QPushButton:hover { background-color: #2b3c5d; }
-            QPushButton:pressed { background-color: #1a2540; }
+            QWidget { background-color: #0d1425; color: #e2e8f0; }
+            QLabel { background: transparent; }
+            QGroupBox { border: 1px solid #1f2a40; border-radius: 12px; margin-top: 16px; padding-top: 12px; background: transparent; }
+            QGroupBox::title { subcontrol-origin: margin; left: 16px; padding: 0 6px; background: #0d1425; color: #94a3b8; }
+            QToolButton#contextToggleButton {
+                border: 1px solid #27364d;
+                border-radius: 10px;
+                padding: 6px 12px;
+                background: rgba(15,23,42,0.6);
+                color: #e2e8f0;
+            }
+            QToolButton#contextToggleButton:hover { border-color: #8ba8ff; }
+            QToolButton#contextToggleButton:checked {
+                background: rgba(99,102,241,0.25);
+                border-color: #8ba8ff;
+            }
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #1f2d4a, stop:1 #16213a);
+                border: 1px solid #314365;
+                border-radius: 10px;
+                padding: 8px 18px;
+                color: #f8fafc;
+                font-weight: 500;
+                letter-spacing: 0.2px;
+            }
+            QPushButton:disabled { background: #131a2a; border-color: #1f2a3f; color: #475569; }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #26365a, stop:1 #1b2a46);
+                border-color: #8ba8ff;
+            }
+            QPushButton:pressed { background: #121d34; border-color: #3d4f78; }
+            QPushButton:focus { outline: none; border-color: #9fb4ff; }
             QLineEdit, QSpinBox, QDoubleSpinBox, QDateTimeEdit, QComboBox, QTextEdit, QPlainTextEdit {
-                background-color: #0b1528; border: 1px solid #22314d; border-radius: 8px; padding: 4px 8px;
-                selection-background-color: #4c6ef5; selection-color: #f8fafc;
+                background-color: #0a1324; border: 1px solid #1f2a40; border-radius: 8px; padding: 4px 8px;
+                selection-background-color: #6366f1; selection-color: #f8fafc;
             }
             QPlainTextEdit { padding: 8px; }
-            QCheckBox { color: #f8fafc; spacing: 8px; }
+            QCheckBox { color: #e2e8f0; spacing: 8px; }
             QCheckBox::indicator {
                 width: 18px; height: 18px; border-radius: 5px;
-                border: 1px solid #334155; background: #0b1528;
+                border: 1px solid #334155; background: #0a1324;
             }
             QCheckBox::indicator:unchecked { image: none; }
             QCheckBox::indicator:checked {
-                background: #4c6ef5; border: 1px solid #93c5fd; image: none;
+                background: #6366f1; border: 1px solid #a5b4fc; image: none;
             }
             QCheckBox::indicator:disabled { background: #1e293b; border-color: #27364d; }
-            QListWidget { border: 1px solid #22314d; border-radius: 12px; background-color: #0b1528; color: #f1f5f9; }
-            QTabWidget::pane { border: 1px solid #22314d; border-radius: 12px; margin-top: -4px; background: #0f172a; }
-            QTabBar::tab { background: #101a2f; border: 1px solid #22314d; padding: 6px 12px; margin-right: 4px;
+            QListWidget { border: none; background: transparent; color: #f1f5f9; }
+            QListWidget#sectionNav { background: transparent; border: none; padding: 6px 4px; }
+            QListWidget#sectionNav::item { margin: 4px 8px; padding: 10px 14px; border-radius: 12px; color: #cbd5f5; }
+            QListWidget#sectionNav::item:!enabled { margin: 16px 8px 6px 8px; padding: 4px 14px; color: #64748b; font-weight:600; background: transparent; }
+            QListWidget#sectionNav::item:selected { background: rgba(99,102,241,0.36); color: #ffffff; }
+            QListWidget#sectionNav::item:hover { background: rgba(148,163,184,0.18); }
+            QTabWidget::pane { border: 1px solid #1f2a40; border-radius: 12px; margin-top: -4px; background: rgba(13,20,37,0.6); }
+            QTabBar::tab { background: rgba(15,23,42,0.6); border: 1px solid #1f2a40; padding: 6px 12px; margin-right: 4px;
                            border-top-left-radius: 6px; border-top-right-radius: 6px; }
-            QTabBar::tab:selected { background: #4c6ef5; color: #f8fafc; }
-            QTabBar::tab:hover { background: #374968; }
-            QLabel#statusBanner { font-size: 15px; }
-            QTextBrowser { background-color: #0b1528; border: 1px solid #22314d; border-radius: 10px; padding: 12px; }
+            QTabBar::tab:selected { background: rgba(99,102,241,0.35); color: #f8fafc; }
+            QTabBar::tab:hover { background: rgba(99,102,241,0.25); }
+            QLabel#statusBanner { padding: 12px 18px; border-radius: 12px; border: 1px solid #1f2a40; background: rgba(148,163,184,0.1); }
+            QLabel#dashboardTitle { font-size: 22px; font-weight: 700; color: #f8fafc; }
+            QLabel#dashboardSubtitle { color: #cbd5f5; font-size: 13px; }
+            QLabel#dashboardSectionTitle { font-size: 13px; font-weight: 600; letter-spacing: 0.4px; text-transform: uppercase; color: #9fb7ff; }
+            QFrame#dashboardHeader { background: transparent; border: 1px solid #1f2a40; border-radius: 18px; }
+            QFrame#dashboardQuickActions, QFrame#dashboardStats, QFrame#dashboardActivity, QFrame#dashboardQuickSettings { background: rgba(15,23,42,0.55); border: 1px solid #1f2a40; border-radius: 16px; }
+            QFrame#contextContainer { background: transparent; }
+            QFrame#customCommandPanel { background: rgba(15,23,42,0.55); border: 1px solid rgba(148,163,184,0.22); border-radius: 16px; }
+            QLabel#customCommandTitle { font-size: 13px; font-weight: 600; color: #cbd5f5; }
+            QLabel#customCommandSubtitle { color: #94a3b8; font-size: 11px; }
+            QPushButton#customCommandButton { padding: 8px 14px; text-align: left; }
+            QPushButton#customCommandButton:hover { background: rgba(99,102,241,0.2); }
+            QPushButton#customCommandButton:pressed { background: rgba(99,102,241,0.28); }
+            QListWidget#customCommandList { background: rgba(8,17,32,0.6); border: 1px solid #1f2a40; border-radius: 10px; }
+            QListWidget#customCommandList::item { padding: 6px 10px; border-radius: 6px; }
+            QListWidget#customCommandList::item:selected { background: rgba(99,102,241,0.32); }
+            QToolButton#customCommandMove {
+                border: 1px solid #27364d;
+                border-radius: 8px;
+                padding: 6px;
+                background: rgba(15,23,42,0.6);
+                color: #e2e8f0;
+            }
+            QToolButton#customCommandMove:hover { border-color: #8ba8ff; }
+            QToolButton#customCommandMove:disabled { border-color: #1f2a3f; color: #475569; }
+            QDialog#customCommandDialog { background-color: #101a2f; border: 1px solid #1f2a40; border-radius: 14px; }
+            QDialog#customCommandDialog QLabel { color: #cbd5f5; }
+            QLabel#customCommandHint { color: #94a3b8; font-size: 11px; }
+            QTextBrowser { background-color: #081120; border: 1px solid #1f2a40; border-radius: 10px; padding: 12px; }
             QScrollArea { border: none; }
+            QFrame#sessionWindowActions, QFrame#sessionWindowStatus, QFrame#sessionWindowLog { background: rgba(15,23,42,0.45); border: 1px solid #1d2840; border-radius: 12px; }
+            QLabel#sessionWindowTitle { font-size: 20px; font-weight: 600; }
+            QLabel#sessionWindowDetails { color: #94a3b8; }
+            QLabel#sessionWindowStatusLabel { font-size: 13px; font-weight: 600; color: #e2e8f0; }
+            QLabel#sessionWindowHint { color: #94a3b8; font-size: 11px; }
+            QLabel#sessionWindowLogTitle { font-size: 12px; font-weight: 600; color: #cbd5f5; }
+            QFrame#contextCard { background: rgba(15,23,42,0.6); border:1px solid rgba(148,163,184,0.24); border-radius:16px; }
+            QLabel#contextTitle { font-size:14px; font-weight:600; color:#cbd5f5; }
+            QLabel#contextSubtitle { color:#94a3b8; font-size:12px; }
+            QDialog#commandPalette { background: transparent; }
+            QFrame#commandPaletteFrame { background: rgba(9,13,25,0.96); border-radius:18px; border:1px solid rgba(99,102,241,0.35); }
+            QLineEdit#commandPaletteSearch { background:#070d1a; border-radius:12px; border:1px solid #27364d; padding:10px 14px; font-size:14px; }
+            QListWidget#commandPaletteList { background: transparent; border:none; }
+            QListWidget#commandPaletteList::item { margin:4px 0; padding:10px 12px; border-radius:10px; color:#e2e8f0; }
+            QListWidget#commandPaletteList::item:selected { background: rgba(99,102,241,0.35); }
+            QLabel#commandPaletteHint { color:#64748b; font-size:11px; }
             """
         )
 
@@ -1037,21 +2369,6 @@ class MainWindow(QtWidgets.QMainWindow):
         if not target:
             return
         open_in_finder(target)
-
-    def _sync_image_dirs(self, from_catalog: bool):
-        if not hasattr(self, "ed_images_dir") or not hasattr(self, "ed_genai_output_dir"):
-            return
-        catalog = self.ed_images_dir.text().strip()
-        genai = self.ed_genai_output_dir.text().strip()
-        if from_catalog:
-            target = catalog
-            dest = self.ed_genai_output_dir
-        else:
-            target = genai
-            dest = self.ed_images_dir
-        dest.blockSignals(True)
-        dest.setText(target)
-        dest.blockSignals(False)
 
     def _toggle_youtube_schedule(self):
         enable = self.cb_youtube_schedule.isChecked() and not self.cb_youtube_draft_only.isChecked()
@@ -1127,8 +2444,7 @@ class MainWindow(QtWidgets.QMainWindow):
         banner.setWordWrap(True)
         banner.setStyleSheet(
             "QLabel#statusBanner{padding:12px 18px;border-radius:12px;"
-            "background:qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #4c6ef5,stop:1 #1d4ed8);"
-            "color:#f8fafc;font-weight:600;letter-spacing:0.3px;border:1px solid #1a1f4a;}"
+            "background:transparent;color:#f1f5f9;font-weight:600;letter-spacing:0.3px;border:1px solid #1a1f4a;}"
         )
         v.addWidget(banner)
 
@@ -1138,9 +2454,20 @@ class MainWindow(QtWidgets.QMainWindow):
             "QFrame#topToolbar{background:rgba(15,23,42,0.92);border:1px solid #1e293b;"
             "border-radius:12px;}"
             "QComboBox#chromeProfileTop{min-width:150px;}"
-            "QToolButton#topFolderButton{padding:2px 8px;border-radius:8px;"
-            "background:#1e293b;color:#e2e8f0;font-size:11px;}"
+            "QToolButton#topFolderButton{padding:4px 10px;border-radius:10px;"
+            "background:#1e293b;color:#e2e8f0;font-size:11px;font-weight:600;}"
             "QToolButton#topFolderButton::hover{background:#27364d;}"
+            "QToolButton#topCommandButton{padding:6px 14px;border-radius:10px;background:rgba(99,102,241,0.15);"
+            "color:#cbd5f5;font-weight:600;}"
+            "QToolButton#topCommandButton::hover{background:rgba(129,140,248,0.25);}"
+            "QPushButton#chromeLaunchBtn, QPushButton#topActionButton{padding:8px 22px;border-radius:12px;"
+            "background:qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #2563eb, stop:1 #7c3aed);"
+            "border:1px solid #3b82f6;font-weight:600;letter-spacing:0.3px;}"
+            "QPushButton#chromeLaunchBtn:hover, QPushButton#topActionButton:hover{border-color:#a855f7;"
+            "background:qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #1d4ed8, stop:1 #6d28d9);}"
+            "QPushButton#chromeLaunchBtn:disabled, QPushButton#topActionButton:disabled{background:#1e293b;border-color:#27364d;color:#64748b;}"
+            "QPushButton#topActionButton[theme=\"danger\"]{background:#dc2626;border-color:#f87171;}"
+            "QPushButton#topActionButton[theme=\"danger\"]:hover{background:#b91c1c;border-color:#fca5a5;}"
         )
         tb = QtWidgets.QHBoxLayout(toolbar)
         tb.setContentsMargins(12, 6, 12, 6)
@@ -1157,7 +2484,7 @@ class MainWindow(QtWidgets.QMainWindow):
         chrome_block = QtWidgets.QHBoxLayout(chrome_frame)
         chrome_block.setContentsMargins(4, 0, 4, 0)
         chrome_block.setSpacing(6)
-        lbl_chrome = QtWidgets.QLabel("Chrome")
+        lbl_chrome = QtWidgets.QLabel("🌐 Chrome")
         lbl_chrome.setStyleSheet("QLabel{color:#cbd5f5;font-weight:600;}")
         chrome_block.addWidget(lbl_chrome)
         self.cmb_chrome_profile_top = QtWidgets.QComboBox()
@@ -1170,26 +2497,36 @@ class MainWindow(QtWidgets.QMainWindow):
         chrome_block.addWidget(self.cmb_chrome_profile_top)
         self.btn_scan_profiles_top = QtWidgets.QToolButton()
         self.btn_scan_profiles_top.setObjectName("chromeScanBtn")
-        self.btn_scan_profiles_top.setIcon(
-            self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_BrowserReload)
+        self.btn_scan_profiles_top.setToolButtonStyle(
+            QtCore.Qt.ToolButtonStyle.ToolButtonTextOnly
         )
+        self.btn_scan_profiles_top.setText("🔄")
+        self.btn_scan_profiles_top.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
         self.btn_scan_profiles_top.setToolTip("Автообнаружение профилей Chrome в системе")
         chrome_block.addWidget(self.btn_scan_profiles_top)
-        self.btn_open_chrome = QtWidgets.QPushButton("Запустить Chrome")
+        self.btn_open_chrome = QtWidgets.QPushButton("🚀 Запустить Chrome")
         self.btn_open_chrome.setObjectName("chromeLaunchBtn")
+        self.btn_open_chrome.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
         chrome_block.addWidget(self.btn_open_chrome)
         tb.addWidget(chrome_frame)
 
         tb.addSpacing(12)
 
-        icon_dir = self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DirOpenIcon)
+        folder_emojis = {
+            "Проект": "📁",
+            "RAW": "🧾",
+            "BLURRED": "🌫️",
+            "MERGED": "🎬",
+            "Images": "🖼️",
+        }
 
         def make_folder_button(text: str) -> QtWidgets.QToolButton:
             btn = QtWidgets.QToolButton()
             btn.setObjectName("topFolderButton")
-            btn.setIcon(icon_dir)
-            btn.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-            btn.setText(text)
+            btn.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextOnly)
+            emoji = folder_emojis.get(text, "📁")
+            btn.setText(f"{emoji} {text}")
+            btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
             return btn
 
         folders_frame = QtWidgets.QFrame()
@@ -1201,7 +2538,7 @@ class MainWindow(QtWidgets.QMainWindow):
         folders_block = QtWidgets.QHBoxLayout(folders_frame)
         folders_block.setContentsMargins(4, 0, 4, 0)
         folders_block.setSpacing(6)
-        lbl_folders = QtWidgets.QLabel("Каталоги")
+        lbl_folders = QtWidgets.QLabel("🗂️ Каталоги")
         lbl_folders.setObjectName("foldersTopLabel")
         folders_block.addWidget(lbl_folders)
         folders_block.addSpacing(4)
@@ -1221,10 +2558,35 @@ class MainWindow(QtWidgets.QMainWindow):
             folders_block.addWidget(btn)
         tb.addWidget(folders_frame)
 
+        self.btn_command_palette_toolbar = QtWidgets.QToolButton()
+        self.btn_command_palette_toolbar.setObjectName("topCommandButton")
+        self.btn_command_palette_toolbar.setText("🧭 Команды")
+        self.btn_command_palette_toolbar.setToolButtonStyle(
+            QtCore.Qt.ToolButtonStyle.ToolButtonTextOnly
+        )
+        self.btn_command_palette_toolbar.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        self.btn_command_palette_toolbar.clicked.connect(self._open_command_palette)
+        tb.addWidget(self.btn_command_palette_toolbar)
+
+        self.btn_toggle_commands = QtWidgets.QToolButton()
+        self.btn_toggle_commands.setObjectName("contextToggleButton")
+        self.btn_toggle_commands.setCheckable(True)
+        self.btn_toggle_commands.setToolButtonStyle(
+            QtCore.Qt.ToolButtonStyle.ToolButtonTextOnly
+        )
+        self.btn_toggle_commands.setText("🧩 Панель")
+        self.btn_toggle_commands.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        tb.addWidget(self.btn_toggle_commands)
+
         tb.addStretch(1)
 
-        self.btn_start_selected = QtWidgets.QPushButton("Старт выбранного")
-        self.btn_stop_all = QtWidgets.QPushButton("Стоп все")
+        self.btn_start_selected = QtWidgets.QPushButton("⚡ Старт выбранного")
+        self.btn_start_selected.setObjectName("topActionButton")
+        self.btn_start_selected.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        self.btn_stop_all = QtWidgets.QPushButton("⛔ Стоп все")
+        self.btn_stop_all.setObjectName("topActionButton")
+        self.btn_stop_all.setProperty("theme", "danger")
+        self.btn_stop_all.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
         action_block = QtWidgets.QHBoxLayout()
         action_block.setContentsMargins(0, 0, 0, 0)
         action_block.setSpacing(6)
@@ -1232,41 +2594,394 @@ class MainWindow(QtWidgets.QMainWindow):
         action_block.addWidget(self.btn_stop_all)
         tb.addLayout(action_block)
 
+        for themed in (self.btn_stop_all,):
+            themed.style().unpolish(themed)
+            themed.style().polish(themed)
+
         v.addWidget(toolbar)
 
-        split = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
-        split.setChildrenCollapsible(False)
-        split.setHandleWidth(8)
-        v.addWidget(split, 1)
+        body = QtWidgets.QFrame()
+        body.setObjectName("mainBody")
+        body_layout = QtWidgets.QHBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(16)
 
-        # слева — информационная панель
-        self.panel_activity = QtWidgets.QFrame()
-        act_layout = QtWidgets.QVBoxLayout(self.panel_activity)
-        act_layout.setContentsMargins(8, 8, 8, 8)
-        act_layout.setSpacing(6)
+        self.section_nav = QtWidgets.QListWidget()
+        self.section_nav.setObjectName("sectionNav")
+        self.section_nav.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.section_nav.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.section_nav.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        self.section_nav.setSpacing(4)
+        self.section_nav.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        self.section_nav.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
+        self.section_nav.setMinimumWidth(220)
+        self.section_nav.setMaximumWidth(260)
+        body_layout.addWidget(self.section_nav)
+
+        self.section_stack = QtWidgets.QStackedWidget()
+        self.section_stack.setObjectName("sectionStack")
+        body_layout.addWidget(self.section_stack, 1)
+
+        self.context_container = QtWidgets.QFrame()
+        self.context_container.setObjectName("contextContainer")
+        context_layout = QtWidgets.QVBoxLayout(self.context_container)
+        context_layout.setContentsMargins(0, 0, 0, 0)
+        context_layout.setSpacing(12)
+
+        self.context_stack = QtWidgets.QStackedWidget()
+        self.context_stack.setObjectName("contextStack")
+        self.context_stack.setMinimumWidth(260)
+        self.context_stack.setMaximumWidth(320)
+        context_layout.addWidget(self.context_stack, 1)
+
+        self.custom_command_panel = QtWidgets.QFrame()
+        self.custom_command_panel.setObjectName("customCommandPanel")
+        custom_panel_layout = QtWidgets.QVBoxLayout(self.custom_command_panel)
+        custom_panel_layout.setContentsMargins(18, 18, 18, 18)
+        custom_panel_layout.setSpacing(10)
+        lbl_custom_title = QtWidgets.QLabel("Быстрые команды")
+        lbl_custom_title.setObjectName("customCommandTitle")
+        custom_panel_layout.addWidget(lbl_custom_title)
+        self.custom_command_caption = QtWidgets.QLabel(
+            "Настрой список в разделе «Настройки → Интерфейс», чтобы запускать любимые скрипты в один клик."
+        )
+        self.custom_command_caption.setObjectName("customCommandSubtitle")
+        self.custom_command_caption.setWordWrap(True)
+        custom_panel_layout.addWidget(self.custom_command_caption)
+        self.custom_command_button_host = QtWidgets.QWidget()
+        self.custom_command_button_layout = QtWidgets.QVBoxLayout(self.custom_command_button_host)
+        self.custom_command_button_layout.setContentsMargins(0, 0, 0, 0)
+        self.custom_command_button_layout.setSpacing(6)
+        custom_panel_layout.addWidget(self.custom_command_button_host)
+        context_layout.addWidget(self.custom_command_panel)
+
+        body_layout.addWidget(self.context_container)
+
+        body_layout.setStretch(0, 0)
+        body_layout.setStretch(1, 1)
+        body_layout.setStretch(2, 0)
+
+        v.addWidget(body, 1)
+
+        self._section_index = {}
+        self._section_order = []
+        self._section_nav_items: Dict[str, QtWidgets.QListWidgetItem] = {}
+        self._section_meta: Dict[str, Dict[str, Any]] = {}
+        self._nav_group_rows: Dict[str, QtWidgets.QListWidgetItem] = {}
+
+        context_placeholder = QtWidgets.QWidget()
+        placeholder_layout = QtWidgets.QVBoxLayout(context_placeholder)
+        placeholder_layout.setContentsMargins(24, 24, 24, 24)
+        placeholder_layout.addStretch(1)
+        self._context_default_idx = self.context_stack.addWidget(context_placeholder)
+        self._context_index: Dict[str, int] = {}
+
+        def add_section(
+            key: str,
+            title: str,
+            widget: QtWidgets.QWidget,
+            *,
+            icon: Optional[QtGui.QIcon] = None,
+            scrollable: bool = False,
+            category: str = "Приложение",
+            description: str = "",
+        ) -> QtWidgets.QWidget:
+            container = widget
+            if scrollable:
+                area = QtWidgets.QScrollArea()
+                area.setWidgetResizable(True)
+                area.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+                area.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+                area.setWidget(widget)
+                container = area
+            idx = self.section_stack.addWidget(container)
+            self._section_index[key] = idx
+            self._section_order.append(key)
+            if category not in self._nav_group_rows:
+                group_item = QtWidgets.QListWidgetItem(category.upper())
+                group_item.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled)
+                font = QtGui.QFont(self.section_nav.font())
+                font.setBold(True)
+                font.setPointSize(max(font.pointSize() - 1, 9))
+                group_item.setFont(font)
+                group_item.setForeground(QtGui.QColor("#64748b"))
+                group_item.setSizeHint(QtCore.QSize(220, 30))
+                group_item.setData(QtCore.Qt.ItemDataRole.UserRole, None)
+                group_item.setData(QtCore.Qt.ItemDataRole.UserRole + 1, "header")
+                self.section_nav.addItem(group_item)
+                self._nav_group_rows[category] = group_item
+            item = QtWidgets.QListWidgetItem(icon, title) if icon else QtWidgets.QListWidgetItem(title)
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, key)
+            item.setData(QtCore.Qt.ItemDataRole.UserRole + 1, category)
+            item.setSizeHint(QtCore.QSize(220, 48))
+            if description:
+                item.setToolTip(description)
+            self.section_nav.addItem(item)
+            self._section_nav_items[key] = item
+            self._section_meta[key] = {
+                "title": title,
+                "category": category,
+                "description": description,
+            }
+            self._register_command(
+                f"section:{key}",
+                f"Раздел — {title}",
+                lambda k=key: self._focus_section_from_command(k),
+                category="Навигация",
+                subtitle=description or f"Перейти к разделу «{title}»",
+                keywords=[title, category],
+            )
+            return container
+
+        def make_scroll_tab(margins=(12, 12, 12, 12), spacing=10):
+            area = QtWidgets.QScrollArea()
+            area.setWidgetResizable(True)
+            area.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+            area.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            area.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            body_widget = QtWidgets.QWidget()
+            layout = QtWidgets.QVBoxLayout(body_widget)
+            layout.setContentsMargins(*margins)
+            layout.setSpacing(spacing)
+            area.setWidget(body_widget)
+            return area, layout
+
+        def register_context(key: str, widget: QtWidgets.QWidget) -> None:
+            idx = self.context_stack.addWidget(widget)
+            self._context_index[key] = idx
+
+        def make_context_card(title: str, subtitle: str = "") -> Tuple[QtWidgets.QWidget, QtWidgets.QVBoxLayout]:
+            card = QtWidgets.QFrame()
+            card.setObjectName("contextCard")
+            layout = QtWidgets.QVBoxLayout(card)
+            layout.setContentsMargins(18, 18, 18, 18)
+            layout.setSpacing(12)
+            lbl_title = QtWidgets.QLabel(title)
+            lbl_title.setObjectName("contextTitle")
+            layout.addWidget(lbl_title)
+            if subtitle:
+                lbl_sub = QtWidgets.QLabel(subtitle)
+                lbl_sub.setObjectName("contextSubtitle")
+                lbl_sub.setWordWrap(True)
+                layout.addWidget(lbl_sub)
+            return card, layout
+
+        overview_root = QtWidgets.QWidget()
+        overview_layout = QtWidgets.QVBoxLayout(overview_root)
+        overview_layout.setContentsMargins(12, 12, 12, 12)
+        overview_layout.setSpacing(16)
+
+        overview_header = QtWidgets.QFrame()
+        overview_header.setObjectName("dashboardHeader")
+        header_layout = QtWidgets.QVBoxLayout(overview_header)
+        header_layout.setContentsMargins(18, 18, 18, 18)
+        header_layout.setSpacing(6)
+        lbl_dash_title = QtWidgets.QLabel("Центр управления")
+        lbl_dash_title.setObjectName("dashboardTitle")
+        lbl_dash_sub = QtWidgets.QLabel(
+            "Следи за прогрессом процессов, журналом событий и статистикой рабочих папок в одном месте."
+        )
+        lbl_dash_sub.setObjectName("dashboardSubtitle")
+        lbl_dash_sub.setWordWrap(True)
+        header_layout.addWidget(lbl_dash_title)
+        header_layout.addWidget(lbl_dash_sub)
+        overview_layout.addWidget(overview_header)
+
+        quick_panel = QtWidgets.QFrame()
+        quick_panel.setObjectName("dashboardQuickActions")
+        quick_layout = QtWidgets.QHBoxLayout(quick_panel)
+        quick_layout.setContentsMargins(16, 14, 16, 14)
+        quick_layout.setSpacing(12)
+        btn_quick_run = QtWidgets.QPushButton("▶️ Старт сценария")
+        btn_quick_run.clicked.connect(self._run_scenario)
+        btn_quick_images = QtWidgets.QPushButton("🖼️ Генерация картинок")
+        btn_quick_images.clicked.connect(self._save_and_run_autogen_images)
+        btn_quick_chrome = QtWidgets.QPushButton("🌐 Запустить Chrome")
+        btn_quick_chrome.clicked.connect(self._open_chrome)
+        btn_quick_sessions = QtWidgets.QPushButton("🗂️ Рабочие пространства")
+        btn_quick_sessions.clicked.connect(lambda: self._select_section("workspaces"))
+        btn_quick_settings = QtWidgets.QPushButton("⚙️ Настройки")
+        btn_quick_settings.clicked.connect(lambda: self._select_section("settings"))
+        for btn in (
+            btn_quick_run,
+            btn_quick_images,
+            btn_quick_chrome,
+            btn_quick_sessions,
+            btn_quick_settings,
+        ):
+            btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+            btn.setMinimumHeight(38)
+        quick_layout.addWidget(btn_quick_run)
+        quick_layout.addWidget(btn_quick_images)
+        quick_layout.addWidget(btn_quick_chrome)
+        quick_layout.addWidget(btn_quick_sessions)
+        quick_layout.addWidget(btn_quick_settings)
+        quick_layout.addStretch(1)
+        overview_layout.addWidget(quick_panel)
+
+        self._register_command(
+            "app:command_palette",
+            "Командная палитра",
+            self._open_command_palette,
+            category="Приложение",
+            subtitle="Быстрый поиск действий и разделов",
+            shortcut="Ctrl+K",
+            keywords=["поиск", "palette"],
+        )
+        self._register_command(
+            "action:run_scenario",
+            "Запустить сценарий",
+            self._run_scenario,
+            category="Автоматизация",
+            subtitle="Старт сценария по выбранным шагам",
+            keywords=["start", "automation"],
+        )
+        self._register_command(
+            "action:run_images",
+            "Генерация картинок",
+            self._save_and_run_autogen_images,
+            category="Автоматизация",
+            subtitle="Запустить генерацию в Google AI Studio",
+            keywords=["images", "google"],
+        )
+        self._register_command(
+            "action:open_chrome",
+            "Запустить Chrome",
+            self._open_chrome,
+            category="Рабочие пространства",
+            subtitle="Открыть активный профиль Chrome",
+            keywords=["browser", "cdp"],
+        )
+
+        quick_settings = QtWidgets.QFrame()
+        quick_settings.setObjectName("dashboardQuickSettings")
+        quick_settings_layout = QtWidgets.QHBoxLayout(quick_settings)
+        quick_settings_layout.setContentsMargins(16, 12, 16, 12)
+        quick_settings_layout.setSpacing(12)
+        self.cb_quick_activity = QtWidgets.QCheckBox("Журнал на обзоре")
+        self.cb_quick_activity.setChecked(bool(self.cfg.get("ui", {}).get("show_activity", True)))
+        quick_settings_layout.addWidget(self.cb_quick_activity)
+        lbl_density = QtWidgets.QLabel("Вид списка:")
+        quick_settings_layout.addWidget(lbl_density)
+        self.cmb_quick_density = QtWidgets.QComboBox()
+        self.cmb_quick_density.addItem("Компактная", "compact")
+        self.cmb_quick_density.addItem("Стандартная", "cozy")
+        density_pref = self.cfg.get("ui", {}).get("activity_density", "compact")
+        idx_density = self.cmb_quick_density.findData(density_pref)
+        if idx_density < 0:
+            idx_density = 0
+        self.cmb_quick_density.setCurrentIndex(idx_density)
+        quick_settings_layout.addWidget(self.cmb_quick_density)
+        quick_settings_layout.addStretch(1)
+
+        def open_ui_settings():
+            self._focus_section_from_command("settings")
+            if hasattr(self, "settings_tabs") and hasattr(self, "page_ui_settings"):
+                idx = self.settings_tabs.indexOf(self.page_ui_settings)
+                if idx >= 0:
+                    self.settings_tabs.setCurrentIndex(idx)
+
+        btn_open_ui_settings = QtWidgets.QPushButton("Настройки интерфейса…")
+        btn_open_ui_settings.clicked.connect(open_ui_settings)
+        quick_settings_layout.addWidget(btn_open_ui_settings)
+        overview_layout.addWidget(quick_settings)
+
+        stats_panel = QtWidgets.QFrame()
+        stats_panel.setObjectName("dashboardStats")
+        stats_layout = QtWidgets.QVBoxLayout(stats_panel)
+        stats_layout.setContentsMargins(16, 16, 16, 16)
+        stats_layout.setSpacing(12)
+        stats_header = QtWidgets.QHBoxLayout()
+        lbl_stats_title = QtWidgets.QLabel("Мониторинг папок")
+        lbl_stats_title.setObjectName("dashboardSectionTitle")
+        stats_header.addWidget(lbl_stats_title)
+        stats_header.addStretch(1)
+        stats_layout.addLayout(stats_header)
+        stats_grid = QtWidgets.QGridLayout()
+        stats_grid.setHorizontalSpacing(16)
+        stats_grid.setVerticalSpacing(12)
+        stats_layout.addLayout(stats_grid)
+        self._dashboard_stat_values = {}
+        self._dashboard_stat_desc = {}
+
+        def add_dashboard_card(row: int, col: int, key: str, title: str, tooltip: str, accent: str):
+            card = QtWidgets.QFrame()
+            card.setObjectName(f"dashStat_{key}")
+            card.setStyleSheet(
+                (
+                    "QFrame#dashStat_{key}{background:rgba(15,23,42,0.92);border-radius:16px;"
+                    "border:1px solid rgba(148,163,184,0.22);}"
+                    "QLabel#dashStatTitle_{key}{color:#cbd5f5;font-size:11px;text-transform:uppercase;letter-spacing:0.6px;}"
+                    "QLabel#dashStatDesc_{key}{color:#94a3b8;font-size:11px;}"
+                ).replace("{key}", key)
+            )
+            layout = QtWidgets.QVBoxLayout(card)
+            layout.setContentsMargins(16, 14, 16, 14)
+            layout.setSpacing(6)
+            accent_bar = QtWidgets.QFrame()
+            accent_bar.setFixedHeight(4)
+            accent_bar.setStyleSheet(f"QFrame{{background:{accent};border-radius:2px;}}")
+            layout.addWidget(accent_bar)
+            title_lbl = QtWidgets.QLabel(title)
+            title_lbl.setObjectName(f"dashStatTitle_{key}")
+            value_lbl = QtWidgets.QLabel("0")
+            value_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            value_lbl.setStyleSheet(
+                f"QLabel{{font:700 26px 'JetBrains Mono','Menlo','Consolas';color:{accent};padding-top:4px;}}"
+            )
+            desc_lbl = QtWidgets.QLabel("—")
+            desc_lbl.setObjectName(f"dashStatDesc_{key}")
+            desc_lbl.setWordWrap(True)
+            desc_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            layout.addWidget(title_lbl, 0, QtCore.Qt.AlignmentFlag.AlignCenter)
+            layout.addWidget(value_lbl)
+            layout.addWidget(desc_lbl)
+            card.setToolTip(tooltip)
+            stats_grid.addWidget(card, row, col)
+            self._dashboard_stat_values[key] = value_lbl
+            self._dashboard_stat_desc[key] = desc_lbl
+
+        add_dashboard_card(0, 0, "raw", "RAW", "Количество файлов в каталоге RAW", "#38bdf8")
+        add_dashboard_card(0, 1, "blur", "BLURRED", "Готовые для блюра клипы", "#a855f7")
+        add_dashboard_card(0, 2, "merge", "MERGED", "Склеенные ролики", "#f97316")
+        add_dashboard_card(1, 0, "youtube", "YOUTUBE", "Очередь загрузки YouTube", "#4ade80")
+        add_dashboard_card(1, 1, "tiktok", "TIKTOK", "Очередь загрузки TikTok", "#f472b6")
+        add_dashboard_card(1, 2, "images", "IMAGES", "Сгенерированные изображения", "#60a5fa")
+        overview_layout.addWidget(stats_panel)
+
+        activity_panel = QtWidgets.QFrame()
+        activity_panel.setObjectName("dashboardActivity")
+        activity_layout = QtWidgets.QVBoxLayout(activity_panel)
+        activity_layout.setContentsMargins(16, 16, 16, 16)
+        activity_layout.setSpacing(12)
+        activity_header = QtWidgets.QHBoxLayout()
+        self.lbl_activity = QtWidgets.QLabel("Журнал процессов")
+        activity_header.addWidget(self.lbl_activity)
+        activity_header.addStretch(1)
+        self.chk_activity_visible = QtWidgets.QCheckBox("Показывать журнал")
+        self.chk_activity_visible.setChecked(bool(self.cfg.get("ui", {}).get("show_activity", True)))
+        self.chk_activity_visible.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        self.btn_activity_clear = QtWidgets.QPushButton("🧹 Очистить")
+        activity_header.addWidget(self.chk_activity_visible)
+        activity_header.addWidget(self.btn_activity_clear)
+        activity_layout.addLayout(activity_header)
 
         self.activity_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
         self.activity_splitter.setChildrenCollapsible(False)
         self.activity_splitter.setHandleWidth(8)
         self._activity_sizes_cache = []
-        act_layout.addWidget(self.activity_splitter, 1)
 
         current_wrap = QtWidgets.QWidget()
         current_wrap.setObjectName("currentEventWrapper")
-        current_wrap.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Preferred,
-            QtWidgets.QSizePolicy.Policy.Maximum,
-        )
         current_layout = QtWidgets.QVBoxLayout(current_wrap)
         current_layout.setContentsMargins(0, 0, 0, 0)
         current_layout.setSpacing(6)
-
         self.current_event_card = QtWidgets.QFrame()
         self.current_event_card.setObjectName("currentEventCard")
         self.current_event_card.setStyleSheet(
             "QFrame#currentEventCard{background:transparent;border:1px solid #27364d;border-radius:14px;padding:0;}"
             "QLabel#currentEventTitle{color:#9fb7ff;font-size:11px;letter-spacing:1px;text-transform:uppercase;}"
-            "QFrame#currentEventBodyFrame{background:rgba(76,110,245,0.2);border:1px solid #3b4cc0;border-radius:10px;}"
+            "QFrame#currentEventBodyFrame{background:transparent;border:1px solid #1f2a40;border-radius:10px;}"
             "QLabel#currentEventBody{color:#f8fafc;font-size:15px;font-weight:600;background:transparent;}"
         )
         card_layout = QtWidgets.QVBoxLayout(self.current_event_card)
@@ -1296,20 +3011,6 @@ class MainWindow(QtWidgets.QMainWindow):
         history_layout = QtWidgets.QVBoxLayout(self.history_panel)
         history_layout.setContentsMargins(0, 0, 0, 0)
         history_layout.setSpacing(6)
-
-        act_header = QtWidgets.QHBoxLayout()
-        self.lbl_activity = QtWidgets.QLabel("<b>История событий</b>")
-        self.chk_activity_visible = QtWidgets.QCheckBox("Показывать")
-        self.chk_activity_visible.setChecked(bool(self.cfg.get("ui", {}).get("show_activity", True)))
-        self.chk_activity_visible.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
-        self.btn_activity_clear = QtWidgets.QPushButton("Очистить")
-        self.btn_activity_clear.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DialogResetButton))
-        act_header.addWidget(self.lbl_activity)
-        act_header.addStretch(1)
-        act_header.addWidget(self.chk_activity_visible)
-        act_header.addWidget(self.btn_activity_clear)
-        history_layout.addLayout(act_header)
-
         filter_row = QtWidgets.QHBoxLayout()
         self.ed_activity_filter = QtWidgets.QLineEdit()
         self.ed_activity_filter.setPlaceholderText("Фильтр по тексту или тегу…")
@@ -1318,7 +3019,6 @@ class MainWindow(QtWidgets.QMainWindow):
         filter_row.addWidget(self.ed_activity_filter, 1)
         filter_row.addWidget(self.btn_activity_export)
         history_layout.addLayout(filter_row)
-
         self.lst_activity = QtWidgets.QListWidget()
         self.lst_activity.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
         self.lst_activity.setUniformItemSizes(False)
@@ -1327,44 +3027,84 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lst_activity.setSpacing(2)
         self._apply_activity_density(persist=False)
         history_layout.addWidget(self.lst_activity, 1)
-
-        self.lbl_activity_hint = QtWidgets.QLabel("Здесь можно посмотреть детальный лог процессов: скачка, блюр, склейка, загрузка.")
+        self.lbl_activity_hint = QtWidgets.QLabel(
+            "Журнал объединяет статусы скачки, блюра, склейки, загрузки и автогена."
+        )
         self.lbl_activity_hint.setWordWrap(True)
         self.lbl_activity_hint.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
         history_layout.addWidget(self.lbl_activity_hint)
-
         self.activity_splitter.addWidget(self.history_panel)
         self.activity_splitter.setStretchFactor(0, 0)
         self.activity_splitter.setStretchFactor(1, 1)
+        activity_layout.addWidget(self.activity_splitter, 1)
+        overview_layout.addWidget(activity_panel)
 
-        split.addWidget(self.panel_activity)
+        overview_context, overview_ctx_layout = make_context_card(
+            "Обзор",
+            "Быстрая настройка панели активности и доступ к глобальным действиям.",
+        )
+        stats_form = QtWidgets.QFormLayout()
+        stats_form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignLeft)
+        stats_form.setHorizontalSpacing(8)
+        stats_form.setVerticalSpacing(6)
+        self.lbl_context_overview_activity = QtWidgets.QLabel("—")
+        self.lbl_context_overview_density = QtWidgets.QLabel("—")
+        stats_form.addRow("Журнал:", self.lbl_context_overview_activity)
+        stats_form.addRow("Формат списка:", self.lbl_context_overview_density)
+        overview_ctx_layout.addLayout(stats_form)
 
-        # справа — вкладки
-        self.tabs = QtWidgets.QTabWidget()
-        self.tabs.setTabPosition(QtWidgets.QTabWidget.TabPosition.North)
-        self.tabs.setDocumentMode(True)
-        self.tabs.setMovable(False)
-        split.addWidget(self.tabs)
-        split.setStretchFactor(0, 1)
-        split.setStretchFactor(1, 3)
+        btn_palette = QtWidgets.QPushButton("Командная палитра…")
+        btn_palette.setObjectName("contextPaletteButton")
+        btn_palette.clicked.connect(self._open_command_palette)
+        overview_ctx_layout.addWidget(btn_palette)
+        overview_ctx_layout.addStretch(1)
+        register_context("overview", overview_context)
 
-        # применяем настройки отображения после создания виджетов
-        self._update_current_event("—", self.cfg.get("ui", {}).get("accent_kind", "info"), persist=False)
-        self._apply_activity_visibility(self.chk_activity_visible.isChecked(), persist=False)
+        add_section(
+            "overview",
+            "🏠 Обзор",
+            overview_root,
+            scrollable=True,
+            category="Главная",
+            description="Центр управления и статистики приложения",
+        )
 
-        # TAB: Задачи
-        def make_scroll_tab(margins=(12, 12, 12, 12), spacing=10):
-            area = QtWidgets.QScrollArea()
-            area.setWidgetResizable(True)
-            area.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
-            area.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-            area.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-            body = QtWidgets.QWidget()
-            layout = QtWidgets.QVBoxLayout(body)
-            layout.setContentsMargins(*margins)
-            layout.setSpacing(spacing)
-            area.setWidget(body)
-            return area, layout
+        self.tab_sessions = self._build_sessions_tab()
+        workspace_context, workspace_ctx_layout = make_context_card(
+            "Рабочее пространство",
+            "Следи за активной сессией и управляй действиями без перехода в раздел.",
+        )
+        session_form = QtWidgets.QFormLayout()
+        session_form.setHorizontalSpacing(8)
+        session_form.setVerticalSpacing(6)
+        self.lbl_context_session_name = QtWidgets.QLabel("—")
+        self.lbl_context_session_profiles = QtWidgets.QLabel("—")
+        self.lbl_context_session_status = QtWidgets.QLabel("—")
+        session_form.addRow("Сессия:", self.lbl_context_session_name)
+        session_form.addRow("Профили:", self.lbl_context_session_profiles)
+        session_form.addRow("Статус:", self.lbl_context_session_status)
+        workspace_ctx_layout.addLayout(session_form)
+
+        session_buttons = QtWidgets.QHBoxLayout()
+        self.btn_context_session_window = QtWidgets.QPushButton("Окно")
+        self.btn_context_session_prompts = QtWidgets.QPushButton("Автоген")
+        self.btn_context_session_images = QtWidgets.QPushButton("Картинки")
+        self.btn_context_session_download = QtWidgets.QPushButton("Скачивание")
+        session_buttons.addWidget(self.btn_context_session_window)
+        session_buttons.addWidget(self.btn_context_session_prompts)
+        session_buttons.addWidget(self.btn_context_session_images)
+        session_buttons.addWidget(self.btn_context_session_download)
+        workspace_ctx_layout.addLayout(session_buttons)
+        workspace_ctx_layout.addStretch(1)
+        register_context("workspaces", workspace_context)
+        add_section(
+            "workspaces",
+            "🗂️ Рабочие пространства",
+            self.tab_sessions,
+            scrollable=True,
+            category="Рабочие процессы",
+            description="Настройка параллельных профилей Chrome и промптов",
+        )
 
         self.tab_tasks, lt = make_scroll_tab(margins=(0, 0, 0, 0))
         tasks_intro = QtWidgets.QLabel(
@@ -1614,6 +3354,34 @@ class MainWindow(QtWidgets.QMainWindow):
         merge_layout.addWidget(grp_merge)
         merge_layout.addStretch(1)
         self.task_tabs.addTab(merge_tab, "Склейка")
+
+        automation_context, automation_ctx_layout = make_context_card(
+            "Пресеты запуска",
+            "Готовые сценарии отмечают нужные этапы и помогают переключаться между режимами работы.",
+        )
+        preset_hint = QtWidgets.QLabel("Выбери набор шагов или собери свой вручную в разделе «Автоматизация».")
+        preset_hint.setWordWrap(True)
+        automation_ctx_layout.addWidget(preset_hint)
+        preset_buttons = QtWidgets.QVBoxLayout()
+        self.btn_preset_full_cycle = QtWidgets.QPushButton("Полный цикл")
+        self.btn_preset_generate = QtWidgets.QPushButton("Генерация + постинг")
+        self.btn_preset_prompts_only = QtWidgets.QPushButton("Только промпты")
+        self.btn_preset_clear = QtWidgets.QPushButton("Сбросить выбор")
+        preset_buttons.addWidget(self.btn_preset_full_cycle)
+        preset_buttons.addWidget(self.btn_preset_generate)
+        preset_buttons.addWidget(self.btn_preset_prompts_only)
+        preset_buttons.addWidget(self.btn_preset_clear)
+        automation_ctx_layout.addLayout(preset_buttons)
+        automation_ctx_layout.addStretch(1)
+        register_context("automation", automation_context)
+
+        add_section(
+            "automation",
+            "🤖 Автоматизация",
+            self.tab_tasks,
+            category="Рабочие процессы",
+            description="Пошаговый запуск: генерация, скачивание, блюр, склейка и загрузка",
+        )
 
         # TAB: YouTube uploader
         yt_cfg = self.cfg.get("youtube", {}) or {}
@@ -2126,7 +3894,7 @@ class MainWindow(QtWidgets.QMainWindow):
         settings_body = QtWidgets.QWidget()
         settings_layout = QtWidgets.QVBoxLayout(settings_body)
         settings_layout.setContentsMargins(16, 16, 16, 16)
-        settings_intro = QtWidgets.QLabel("Настройки сгруппированы по вкладкам: каталоги, Chrome, FFmpeg, YouTube, Telegram и обслуживание.")
+        settings_intro = QtWidgets.QLabel("Настройки сгруппированы по вкладкам: каталоги, Chrome, FFmpeg, YouTube и обслуживание. Раздел Telegram вынесен отдельно слева.")
         settings_intro.setWordWrap(True)
         settings_intro.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
         settings_layout.addWidget(settings_intro)
@@ -2173,12 +3941,23 @@ class MainWindow(QtWidgets.QMainWindow):
         settings_layout.addLayout(controls_row)
 
         self.tab_settings.setWidget(settings_body)
-
-        overview_host = QtWidgets.QWidget()
-        overview_layout = QtWidgets.QVBoxLayout(overview_host)
-        overview_layout.setContentsMargins(0, 0, 0, 0)
-        overview_layout.addWidget(self.tab_tasks, 1)
-        self.tabs.addTab(overview_host, "Обзор")
+        settings_context, settings_ctx_layout = make_context_card(
+            "Конфигурация",
+            "Следи за статусом сохранения и быстро открывай каталог проекта.",
+        )
+        settings_form = QtWidgets.QFormLayout()
+        settings_form.setHorizontalSpacing(8)
+        settings_form.setVerticalSpacing(6)
+        self.lbl_context_settings_status = QtWidgets.QLabel("—")
+        self.lbl_context_project_root = QtWidgets.QLabel(self.cfg.get("project_root", str(PROJECT_ROOT)))
+        self.lbl_context_project_root.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        settings_form.addRow("Сохранение:", self.lbl_context_settings_status)
+        settings_form.addRow("Проект:", self.lbl_context_project_root)
+        settings_ctx_layout.addLayout(settings_form)
+        self.btn_context_open_project = QtWidgets.QPushButton("Открыть папку проекта")
+        settings_ctx_layout.addWidget(self.btn_context_open_project)
+        settings_ctx_layout.addStretch(1)
+        register_context("settings", settings_context)
 
         content_host = QtWidgets.QWidget()
         content_layout = QtWidgets.QVBoxLayout(content_host)
@@ -2189,7 +3968,45 @@ class MainWindow(QtWidgets.QMainWindow):
         self.content_tabs.addTab(self.tab_image_prompts, "Промпты картинок")
         self.content_tabs.addTab(self.tab_titles, "Названия")
         content_layout.addWidget(self.content_tabs)
-        self.tabs.addTab(content_host, "Контент")
+        content_context, content_ctx_layout = make_context_card(
+            "Материалы",
+            "Текущие файлы с промптами, шаблонами изображений и названиями.",
+        )
+        content_form = QtWidgets.QFormLayout()
+        content_form.setHorizontalSpacing(8)
+        content_form.setVerticalSpacing(6)
+        self.lbl_context_content_profile = QtWidgets.QLabel("—")
+        self.lbl_context_prompts_path = QtWidgets.QLabel("—")
+        self.lbl_context_image_prompts_path = QtWidgets.QLabel("—")
+        self.lbl_context_titles_path = QtWidgets.QLabel("—")
+        for label in (
+            self.lbl_context_prompts_path,
+            self.lbl_context_image_prompts_path,
+            self.lbl_context_titles_path,
+        ):
+            label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        content_form.addRow("Профиль:", self.lbl_context_content_profile)
+        content_form.addRow("Sora:", self.lbl_context_prompts_path)
+        content_form.addRow("Картинки:", self.lbl_context_image_prompts_path)
+        content_form.addRow("Названия:", self.lbl_context_titles_path)
+        content_ctx_layout.addLayout(content_form)
+        btn_row = QtWidgets.QHBoxLayout()
+        self.btn_context_open_prompts = QtWidgets.QPushButton("Открыть промпты")
+        self.btn_context_open_image_prompts = QtWidgets.QPushButton("Открыть картинки")
+        self.btn_context_open_titles = QtWidgets.QPushButton("Открыть названия")
+        btn_row.addWidget(self.btn_context_open_prompts)
+        btn_row.addWidget(self.btn_context_open_image_prompts)
+        btn_row.addWidget(self.btn_context_open_titles)
+        content_ctx_layout.addLayout(btn_row)
+        content_ctx_layout.addStretch(1)
+        register_context("content", content_context)
+        add_section(
+            "content",
+            "📝 Контент",
+            content_host,
+            category="Контент",
+            description="Редакторы промптов, изображений и заголовков",
+        )
 
         autopost_host = QtWidgets.QWidget()
         autopost_layout = QtWidgets.QVBoxLayout(autopost_host)
@@ -2199,12 +4016,673 @@ class MainWindow(QtWidgets.QMainWindow):
         self.autopost_tabs.addTab(self.tab_youtube, "YouTube")
         self.autopost_tabs.addTab(self.tab_tiktok, "TikTok")
         autopost_layout.addWidget(self.autopost_tabs)
-        self.tabs.addTab(autopost_host, "Автопостинг")
+        autopost_context, autopost_ctx_layout = make_context_card(
+            "Очереди",
+            "Контролируй количество роликов в очереди публикаций и обновляй данные перед стартом.",
+        )
+        queue_form = QtWidgets.QFormLayout()
+        queue_form.setHorizontalSpacing(8)
+        queue_form.setVerticalSpacing(6)
+        self.lbl_context_youtube_queue = QtWidgets.QLabel("—")
+        self.lbl_context_tiktok_queue = QtWidgets.QLabel("—")
+        queue_form.addRow("YouTube:", self.lbl_context_youtube_queue)
+        queue_form.addRow("TikTok:", self.lbl_context_tiktok_queue)
+        autopost_ctx_layout.addLayout(queue_form)
+        self.btn_context_refresh_queues = QtWidgets.QPushButton("Обновить очереди")
+        autopost_ctx_layout.addWidget(self.btn_context_refresh_queues)
+        autopost_ctx_layout.addStretch(1)
+        register_context("autopost", autopost_context)
 
-        self.tabs.addTab(self.tab_settings, "Настройки")
+        self.telegram_panel = self._build_telegram_panel()
+        telegram_context, telegram_ctx_layout = make_context_card(
+            "Telegram",
+            "Статус подключения и быстрые проверки рассылки.",
+        )
+        tg_form = QtWidgets.QFormLayout()
+        tg_form.setHorizontalSpacing(8)
+        tg_form.setVerticalSpacing(6)
+        self.lbl_context_tg_enabled = QtWidgets.QLabel("—")
+        self.lbl_context_tg_template = QtWidgets.QLabel("—")
+        tg_form.addRow("Уведомления:", self.lbl_context_tg_enabled)
+        tg_form.addRow("Шаблон:", self.lbl_context_tg_template)
+        telegram_ctx_layout.addLayout(tg_form)
+        tg_btns = QtWidgets.QHBoxLayout()
+        self.btn_context_tg_test = QtWidgets.QPushButton("Тест")
+        self.btn_context_tg_open = QtWidgets.QPushButton("Открыть раздел")
+        tg_btns.addWidget(self.btn_context_tg_test)
+        tg_btns.addWidget(self.btn_context_tg_open)
+        telegram_ctx_layout.addLayout(tg_btns)
+        telegram_ctx_layout.addStretch(1)
+        register_context("telegram", telegram_context)
+        add_section(
+            "telegram",
+            "✈️ Telegram",
+            self.telegram_panel,
+            scrollable=True,
+            category="Интеграции",
+            description="Уведомления, шаблоны и моментальные сообщения в Telegram",
+        )
+        self._refresh_telegram_history()
+        add_section(
+            "autopost",
+            "📤 Автопостинг",
+            autopost_host,
+            category="Публикации",
+            description="YouTube и TikTok: очереди, расписания и архивы",
+        )
+
+        add_section(
+            "settings",
+            "⚙️ Настройки",
+            self.tab_settings,
+            category="Система",
+            description="Каталоги, Chrome, ffmpeg, история и обслуживание",
+        )
 
         self._load_zones_into_ui()
         self._toggle_youtube_schedule()
+        self._refresh_settings_context()
+
+        self.section_nav.currentRowChanged.connect(self._on_section_nav_changed)
+        if self.section_nav.count():
+            for row in range(self.section_nav.count()):
+                item = self.section_nav.item(row)
+                if item and item.data(QtCore.Qt.ItemDataRole.UserRole):
+                    self.section_nav.setCurrentRow(row)
+                    break
+        else:
+            self._current_section_key = "overview"
+        self._set_context_visible(bool(self.cfg.get("ui", {}).get("show_context", True)), persist=False)
+        self._rebuild_custom_command_panel()
+        self._refresh_custom_command_registry()
+        self._update_current_event("—", self.cfg.get("ui", {}).get("accent_kind", "info"), persist=False)
+        self._apply_activity_visibility(self.chk_activity_visible.isChecked(), persist=False)
+
+    # ----- command palette -----
+    def _register_command(
+        self,
+        command_id: str,
+        title: str,
+        callback: Callable[[], None],
+        *,
+        category: str = "Приложение",
+        subtitle: str = "",
+        shortcut: Optional[str] = None,
+        keywords: Optional[Iterable[str]] = None,
+    ) -> None:
+        if not callable(callback):
+            return
+        keywords = list(keywords or [])
+        existing_action = self._command_actions.pop(command_id, None)
+        if existing_action is not None:
+            self.removeAction(existing_action)
+
+        action = None
+        if shortcut:
+            action = QtGui.QAction(title, self)
+            action.setShortcut(QtGui.QKeySequence(shortcut))
+            action.setShortcutContext(QtCore.Qt.ShortcutContext.ApplicationShortcut)
+            action.triggered.connect(callback)
+            self.addAction(action)
+            self._command_actions[command_id] = action
+
+        self._command_registry[command_id] = {
+            "id": command_id,
+            "title": title,
+            "subtitle": subtitle or "",
+            "category": category,
+            "keywords": keywords,
+            "callback": callback,
+            "shortcut": shortcut or "",
+        }
+
+    def _remove_command(self, command_id: str) -> None:
+        if command_id in self._command_registry:
+            self._command_registry.pop(command_id, None)
+        action = self._command_actions.pop(command_id, None)
+        if action:
+            self.removeAction(action)
+
+    def _prune_commands_with_prefix(self, prefix: str) -> None:
+        to_remove = [cid for cid in self._command_registry if cid.startswith(prefix)]
+        for cid in to_remove:
+            self._remove_command(cid)
+
+    def _open_command_palette(self) -> None:
+        items: List[Dict[str, Any]] = []
+        for meta in self._command_registry.values():
+            items.append(
+                {
+                    "id": meta.get("id"),
+                    "title": meta.get("title", ""),
+                    "subtitle": meta.get("subtitle", ""),
+                    "category": meta.get("category", ""),
+                    "keywords": list(meta.get("keywords", [])),
+                }
+            )
+        items.sort(key=lambda it: (it.get("category", ""), it.get("title", "")))
+        dialog = CommandPaletteDialog(self, items)
+        geo = self.geometry()
+        dlg_geo = dialog.frameGeometry()
+        dlg_geo.moveCenter(geo.center())
+        dialog.move(dlg_geo.topLeft())
+        if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            selected = dialog.selected_command()
+            if selected and selected in self._command_registry:
+                callback = self._command_registry[selected].get("callback")
+                if callable(callback):
+                    callback()
+
+    def _focus_section_from_command(self, key: str) -> None:
+        self._select_section(key)
+        self.raise_()
+        self.activateWindow()
+
+    def _focus_session_from_command(self, session_id: str) -> None:
+        self._focus_section_from_command("workspaces")
+        if not hasattr(self, "lst_sessions"):
+            return
+        for row in range(self.lst_sessions.count()):
+            item = self.lst_sessions.item(row)
+            if not item:
+                continue
+            if item.data(QtCore.Qt.ItemDataRole.UserRole) == session_id:
+                self.lst_sessions.setCurrentRow(row)
+                break
+
+    def _refresh_command_palette_sessions(self) -> None:
+        self._prune_commands_with_prefix("session:")
+        for session_id in self._session_order:
+            session = self._session_cache.get(session_id)
+            if not session:
+                continue
+            name = session.get("name", session_id)
+            chrome = session.get("chrome_profile", "") or "по умолчанию"
+            prompt = session.get("prompt_profile", PROMPTS_DEFAULT_KEY)
+            subtitle = f"Chrome: {chrome} · Промпты: {self._prompt_profile_label(prompt)}"
+            keywords = [name, chrome, prompt]
+            self._register_command(
+                f"session:{session_id}",
+                f"Рабочее пространство — {name}",
+                lambda sid=session_id: self._focus_session_from_command(sid),
+                category="Рабочие пространства",
+                subtitle=subtitle,
+                keywords=keywords,
+            )
+
+    def _refresh_custom_command_registry(self) -> None:
+        self._prune_commands_with_prefix("custom:")
+        for idx, entry in enumerate(self._custom_commands):
+            payload = dict(entry)
+            name = payload.get("name") or f"Команда {idx + 1}"
+            subtitle = payload.get("description") or payload.get("command", "")
+            keywords = [name]
+            keywords.extend((payload.get("command") or "").split())
+            self._register_command(
+                f"custom:{idx}",
+                f"Быстрая команда — {name}",
+                lambda data=payload: self._run_custom_command(data),
+                category="Пользовательские команды",
+                subtitle=subtitle,
+                keywords=keywords,
+            )
+
+    def _set_context_visible(self, visible: bool, *, persist: bool = True) -> None:
+        if hasattr(self, "context_container"):
+            self.context_container.setVisible(bool(visible))
+        if hasattr(self, "btn_toggle_commands"):
+            self.btn_toggle_commands.blockSignals(True)
+            self.btn_toggle_commands.setChecked(bool(visible))
+            self.btn_toggle_commands.setText(
+                "🧩 Панель ⬅️" if visible else "🧩 Панель ➡️"
+            )
+            self.btn_toggle_commands.setToolTip(
+                "Скрыть панель команд" if visible else "Показать панель команд"
+            )
+            self.btn_toggle_commands.blockSignals(False)
+        if hasattr(self, "cb_ui_show_context"):
+            self.cb_ui_show_context.blockSignals(True)
+            self.cb_ui_show_context.setChecked(bool(visible))
+            self.cb_ui_show_context.blockSignals(False)
+        if persist:
+            self.cfg.setdefault("ui", {})["show_context"] = bool(visible)
+            self._mark_settings_dirty()
+
+    def _rebuild_custom_command_panel(self) -> None:
+        if not hasattr(self, "custom_command_button_layout"):
+            return
+        layout = self.custom_command_button_layout
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        if not self._custom_commands:
+            if hasattr(self, "custom_command_panel"):
+                self.custom_command_panel.hide()
+            if hasattr(self, "custom_command_caption"):
+                self.custom_command_caption.setVisible(True)
+            return
+        if hasattr(self, "custom_command_panel"):
+            self.custom_command_panel.show()
+        if hasattr(self, "custom_command_caption"):
+            self.custom_command_caption.setVisible(False)
+        for entry in self._custom_commands:
+            label = entry.get("name") or "Команда"
+            btn = QtWidgets.QPushButton(label)
+            btn.setObjectName("customCommandButton")
+            btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+            tooltip = entry.get("description") or entry.get("command")
+            if tooltip:
+                btn.setToolTip(tooltip)
+            payload = dict(entry)
+            btn.clicked.connect(lambda _, data=payload: self._run_custom_command(data))
+            layout.addWidget(btn)
+        layout.addStretch(1)
+
+    def _refresh_custom_command_list(self) -> None:
+        if not hasattr(self, "lst_custom_commands"):
+            return
+        self.lst_custom_commands.blockSignals(True)
+        self.lst_custom_commands.clear()
+        for entry in self._custom_commands:
+            name = entry.get("name") or "Команда"
+            item = QtWidgets.QListWidgetItem(name)
+            cmd = entry.get("command")
+            if cmd:
+                item.setToolTip(cmd)
+            self.lst_custom_commands.addItem(item)
+        self.lst_custom_commands.blockSignals(False)
+        self._update_custom_command_buttons()
+
+    def _selected_custom_command_index(self) -> int:
+        if not hasattr(self, "lst_custom_commands"):
+            return -1
+        row = self.lst_custom_commands.currentRow()
+        if 0 <= row < len(self._custom_commands):
+            return row
+        return -1
+
+    def _update_custom_command_buttons(self) -> None:
+        if not hasattr(self, "btn_custom_edit"):
+            return
+        idx = self._selected_custom_command_index()
+        has_selection = idx >= 0
+        total = len(self._custom_commands)
+        self.btn_custom_edit.setEnabled(has_selection)
+        self.btn_custom_delete.setEnabled(has_selection)
+        self.btn_custom_up.setEnabled(has_selection and idx > 0)
+        self.btn_custom_down.setEnabled(has_selection and idx >= 0 and idx < total - 1)
+
+    def _on_custom_command_add(self) -> None:
+        dialog = CustomCommandDialog(self)
+        if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            data = dialog.get_data()
+            self._custom_commands.append(data)
+            self._refresh_custom_command_list()
+            self.lst_custom_commands.setCurrentRow(len(self._custom_commands) - 1)
+            self._rebuild_custom_command_panel()
+            self._refresh_custom_command_registry()
+            self._mark_settings_dirty()
+
+    def _on_custom_command_edit(self) -> None:
+        idx = self._selected_custom_command_index()
+        if idx < 0:
+            return
+        dialog = CustomCommandDialog(self, self._custom_commands[idx])
+        if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            self._custom_commands[idx] = dialog.get_data()
+            self._refresh_custom_command_list()
+            self.lst_custom_commands.setCurrentRow(idx)
+            self._rebuild_custom_command_panel()
+            self._refresh_custom_command_registry()
+            self._mark_settings_dirty()
+
+    def _on_custom_command_remove(self) -> None:
+        idx = self._selected_custom_command_index()
+        if idx < 0:
+            return
+        self._custom_commands.pop(idx)
+        self._refresh_custom_command_list()
+        if self._custom_commands:
+            self.lst_custom_commands.setCurrentRow(min(idx, len(self._custom_commands) - 1))
+        self._rebuild_custom_command_panel()
+        self._refresh_custom_command_registry()
+        self._mark_settings_dirty()
+
+    def _on_custom_command_move(self, direction: int) -> None:
+        idx = self._selected_custom_command_index()
+        if idx < 0:
+            return
+        new_idx = idx + direction
+        if not (0 <= new_idx < len(self._custom_commands)):
+            return
+        self._custom_commands[idx], self._custom_commands[new_idx] = (
+            self._custom_commands[new_idx],
+            self._custom_commands[idx],
+        )
+        self._refresh_custom_command_list()
+        self.lst_custom_commands.setCurrentRow(new_idx)
+        self._rebuild_custom_command_panel()
+        self._refresh_custom_command_registry()
+        self._mark_settings_dirty()
+
+    def _run_custom_command(self, payload: Dict[str, str]) -> None:
+        command = (payload.get("command") or "").strip()
+        name = payload.get("name") or "Команда"
+        if not command:
+            self._post_status(f"Команда «{name}»: не задана команда", state="error")
+            return
+
+        self._append_activity(f"Команда «{name}» запускается…", kind="running")
+
+        def worker() -> None:
+            try:
+                subprocess.Popen(
+                    command,
+                    shell=True,
+                    cwd=self.cfg.get("project_root", str(PROJECT_ROOT)),
+                )
+            except Exception as exc:  # noqa: BLE001
+                self.ui(
+                    lambda: (
+                        self._append_activity(
+                            f"Команда «{name}» не запустилась: {exc}",
+                            kind="error",
+                        ),
+                        self._post_status(f"Команда «{name}» не запустилась", state="error"),
+                    )
+                )
+                return
+
+            self.ui(
+                lambda: (
+                    self._append_activity(
+                        f"Команда «{name}» выполнена", kind="success"
+                    ),
+                    self._post_status(f"Команда «{name}» запущена", state="ok"),
+                )
+            )
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_toolbar_commands_toggle(self, checked: bool) -> None:
+        self._set_context_visible(bool(checked))
+
+    def _on_settings_show_context_changed(self, checked: bool) -> None:
+        self._set_context_visible(bool(checked))
+
+    def _update_context_panel_for_section(self, key: str) -> None:
+        if not hasattr(self, "context_stack"):
+            return
+        idx = self._context_index.get(key, getattr(self, "_context_default_idx", 0))
+        if self.context_stack.currentIndex() != idx:
+            self.context_stack.setCurrentIndex(idx)
+        refresher = {
+            "overview": self._refresh_overview_context,
+            "workspaces": self._refresh_workspace_context,
+            "automation": self._refresh_automation_context,
+            "content": self._refresh_content_context,
+            "telegram": self._refresh_telegram_context,
+            "autopost": self._refresh_autopost_context,
+            "settings": self._refresh_settings_context,
+        }.get(key)
+        if callable(refresher):
+            refresher()
+
+    def _refresh_overview_context(self) -> None:
+        visible = bool(self.cfg.get("ui", {}).get("show_activity", True))
+        density = self.cfg.get("ui", {}).get("activity_density", "compact")
+        if hasattr(self, "lbl_context_overview_activity"):
+            self.lbl_context_overview_activity.setText("включён" if visible else "скрыт")
+        if hasattr(self, "lbl_context_overview_density"):
+            mapping = {"compact": "компактная", "cozy": "стандартная"}
+            self.lbl_context_overview_density.setText(mapping.get(density, density))
+
+    def _refresh_workspace_context(self) -> None:
+        if not hasattr(self, "lbl_context_session_name"):
+            return
+        session = self._session_cache.get(self._current_session_id)
+        if not session:
+            self.lbl_context_session_name.setText("—")
+            self.lbl_context_session_profiles.setText("—")
+            self.lbl_context_session_status.setText("—")
+            return
+        name = session.get("name", self._current_session_id)
+        chrome = session.get("chrome_profile", "") or "по умолчанию"
+        prompt = session.get("prompt_profile", PROMPTS_DEFAULT_KEY)
+        raw_dir = self._session_download_dir(session)
+        raw_label = raw_dir.name if isinstance(raw_dir, Path) else Path(str(raw_dir)).name if raw_dir else "—"
+        limit_label = self._session_download_limit_label(session)
+        self.lbl_context_session_name.setText(name)
+        self.lbl_context_session_profiles.setText(
+            f"Chrome: {chrome} · Промпты: {self._prompt_profile_label(prompt)} · RAW: {raw_label} ({limit_label})"
+        )
+        state = self._ensure_session_state(self._current_session_id)
+        status = state.get("status", "idle")
+        message = state.get("last_message", "")
+        icon = self._session_status_icon(status)
+        self.lbl_context_session_status.setText(message or f"{icon} {status}")
+
+    def _refresh_automation_context(self) -> None:
+        # Контекстная панель основана на статических пресетах, динамических данных нет
+        return
+
+    def _refresh_content_context(self) -> None:
+        if not hasattr(self, "lbl_context_content_profile"):
+            return
+        profile_label = self._prompt_profile_label(self._current_prompt_profile_key)
+        self.lbl_context_content_profile.setText(profile_label)
+        try:
+            prompts_path = str(self._prompts_path())
+        except Exception:
+            prompts_path = "—"
+        try:
+            image_path = str(self._image_prompts_path())
+        except Exception:
+            image_path = "—"
+        titles_path = self.cfg.get("titles_file", str(TITLES_FILE))
+        self.lbl_context_prompts_path.setText(prompts_path)
+        self.lbl_context_image_prompts_path.setText(image_path)
+        self.lbl_context_titles_path.setText(str(titles_path))
+
+    def _refresh_telegram_context(self) -> None:
+        tg_cfg = self.cfg.get("telegram", {}) or {}
+        enabled = tg_cfg.get("enabled", False)
+        template = tg_cfg.get("last_template") or "—"
+        if hasattr(self, "lbl_context_tg_enabled"):
+            self.lbl_context_tg_enabled.setText("включены" if enabled else "выключены")
+        if hasattr(self, "lbl_context_tg_template"):
+            self.lbl_context_tg_template.setText(template)
+
+    def _refresh_autopost_context(self) -> None:
+        if hasattr(self, "lbl_context_youtube_queue") and hasattr(self, "lbl_youtube_queue"):
+            self.lbl_context_youtube_queue.setText(self.lbl_youtube_queue.text())
+        if hasattr(self, "lbl_context_tiktok_queue") and hasattr(self, "lbl_tiktok_queue"):
+            self.lbl_context_tiktok_queue.setText(self.lbl_tiktok_queue.text())
+
+    def _refresh_settings_context(self) -> None:
+        if hasattr(self, "lbl_context_settings_status") and hasattr(self, "lbl_settings_status"):
+            self.lbl_context_settings_status.setText(self.lbl_settings_status.text())
+        if hasattr(self, "lbl_context_project_root"):
+            self.lbl_context_project_root.setText(self.cfg.get("project_root", str(PROJECT_ROOT)))
+
+    def _refresh_telegram_templates(self) -> None:
+        if not hasattr(self, "cmb_tg_templates"):
+            return
+        self.cmb_tg_templates.blockSignals(True)
+        self.cmb_tg_templates.clear()
+        self.cmb_tg_templates.addItem("— Без шаблона —", None)
+        for idx, template in enumerate(self._telegram_templates):
+            name = template.get("name") or f"Шаблон {idx + 1}"
+            self.cmb_tg_templates.addItem(name, idx)
+        self.cmb_tg_templates.blockSignals(False)
+        last = self.cfg.get("telegram", {}).get("last_template", "") or ""
+        if last:
+            self._select_telegram_template_by_name(last, apply_text=True)
+        else:
+            self.cmb_tg_templates.setCurrentIndex(0)
+            if hasattr(self, "ed_tg_template_name"):
+                self.ed_tg_template_name.clear()
+
+    def _select_telegram_template_by_name(self, name: str, apply_text: bool = True) -> None:
+        if not hasattr(self, "cmb_tg_templates"):
+            return
+        target_idx = None
+        for idx, template in enumerate(self._telegram_templates):
+            if template.get("name") == name:
+                target_idx = idx
+                break
+        if target_idx is None:
+            self.cmb_tg_templates.blockSignals(True)
+            self.cmb_tg_templates.setCurrentIndex(0)
+            self.cmb_tg_templates.blockSignals(False)
+            if apply_text and hasattr(self, "ed_tg_template_name"):
+                self.ed_tg_template_name.setText(name or "")
+            return
+        for row in range(self.cmb_tg_templates.count()):
+            data = self.cmb_tg_templates.itemData(row)
+            if data == target_idx:
+                self.cmb_tg_templates.blockSignals(True)
+                self.cmb_tg_templates.setCurrentIndex(row)
+                self.cmb_tg_templates.blockSignals(False)
+                if apply_text and 0 <= target_idx < len(self._telegram_templates):
+                    template = self._telegram_templates[target_idx]
+                    if hasattr(self, "ed_tg_template_name"):
+                        self.ed_tg_template_name.setText(template.get("name", ""))
+                    if hasattr(self, "ed_tg_quick_message"):
+                        self.ed_tg_quick_message.setPlainText(template.get("text", ""))
+                break
+
+    def _on_tg_template_selected(self, index: int) -> None:
+        if not hasattr(self, "cmb_tg_templates"):
+            return
+        data = self.cmb_tg_templates.itemData(index)
+        if data is None:
+            if hasattr(self, "ed_tg_template_name"):
+                self.ed_tg_template_name.clear()
+            return
+        try:
+            template = self._telegram_templates[int(data)]
+        except (IndexError, ValueError, TypeError):
+            return
+        if hasattr(self, "ed_tg_template_name"):
+            self.ed_tg_template_name.setText(template.get("name", ""))
+        if hasattr(self, "ed_tg_quick_message"):
+            self.ed_tg_quick_message.setPlainText(template.get("text", ""))
+        tg_cfg = self.cfg.setdefault("telegram", {})
+        tg_cfg["last_template"] = template.get("name", "")
+        save_cfg(self.cfg)
+        self._refresh_telegram_context()
+
+    def _on_tg_template_save(self) -> None:
+        name = self.ed_tg_template_name.text().strip() if hasattr(self, "ed_tg_template_name") else ""
+        body = self.ed_tg_quick_message.toPlainText().strip() if hasattr(self, "ed_tg_quick_message") else ""
+        if not name or not body:
+            self.lbl_tg_status.setText("Укажи название и текст для шаблона")
+            self.lbl_tg_status.setStyleSheet("QLabel{color:#facc15;}")
+            return
+        updated = False
+        for template in self._telegram_templates:
+            if template.get("name") == name:
+                template["text"] = body
+                updated = True
+                break
+        if not updated:
+            self._telegram_templates.append({"name": name, "text": body})
+        tg_cfg = self.cfg.setdefault("telegram", {})
+        tg_cfg["templates"] = list(self._telegram_templates)
+        tg_cfg["last_template"] = name
+        save_cfg(self.cfg)
+        self._refresh_telegram_templates()
+        self._select_telegram_template_by_name(name, apply_text=False)
+        self.lbl_tg_status.setText("Шаблон сохранён")
+        self.lbl_tg_status.setStyleSheet("QLabel{color:#34d399;}")
+        self._refresh_telegram_context()
+
+    def _on_tg_template_delete(self) -> None:
+        name = self.ed_tg_template_name.text().strip() if hasattr(self, "ed_tg_template_name") else ""
+        if not name:
+            self.lbl_tg_status.setText("Выбери шаблон для удаления")
+            self.lbl_tg_status.setStyleSheet("QLabel{color:#facc15;}")
+            return
+        before = len(self._telegram_templates)
+        self._telegram_templates = [tpl for tpl in self._telegram_templates if tpl.get("name") != name]
+        if len(self._telegram_templates) == before:
+            self.lbl_tg_status.setText("Шаблон не найден")
+            self.lbl_tg_status.setStyleSheet("QLabel{color:#facc15;}")
+            return
+        tg_cfg = self.cfg.setdefault("telegram", {})
+        tg_cfg["templates"] = list(self._telegram_templates)
+        if tg_cfg.get("last_template") == name:
+            tg_cfg["last_template"] = ""
+        save_cfg(self.cfg)
+        self._refresh_telegram_templates()
+        self._select_telegram_template_by_name("", apply_text=False)
+        if hasattr(self, "ed_tg_template_name"):
+            self.ed_tg_template_name.clear()
+        self.lbl_tg_status.setText("Шаблон удалён")
+        self.lbl_tg_status.setStyleSheet("QLabel{color:#38bdf8;}")
+        self._refresh_telegram_context()
+
+    def _on_tg_delay_changed(self, value: int) -> None:
+        tg_cfg = self.cfg.setdefault("telegram", {})
+        tg_cfg["quick_delay_minutes"] = int(value)
+        self._mark_settings_dirty()
+
+    def _apply_task_preset(self, preset_name: str, steps: Iterable[str]) -> None:
+        mapping = {
+            "images": getattr(self, "cb_do_images", None),
+            "prompts": getattr(self, "cb_do_autogen", None),
+            "download": getattr(self, "cb_do_download", None),
+            "blur": getattr(self, "cb_do_blur", None),
+            "merge": getattr(self, "cb_do_merge", None),
+            "youtube": getattr(self, "cb_do_upload", None),
+            "tiktok": getattr(self, "cb_do_tiktok", None),
+        }
+        selected = {step for step in steps}
+        for key, checkbox in mapping.items():
+            if not checkbox:
+                continue
+            checkbox.blockSignals(True)
+            checkbox.setChecked(key in selected)
+            checkbox.blockSignals(False)
+        message = f"Пресет задач: {preset_name}"
+        self._append_activity(message, kind="info")
+        try:
+            self._post_status(message, state="info")
+        except Exception:
+            pass
+
+    def _on_section_nav_changed(self, row: int):
+        item = self.section_nav.item(row) if row >= 0 else None
+        if not item:
+            return
+        key = item.data(QtCore.Qt.ItemDataRole.UserRole)
+        if not key:
+            return
+        idx = self._section_index.get(key)
+        if idx is None:
+            return
+        self.section_stack.setCurrentIndex(idx)
+        self._current_section_key = key
+        if key == "telegram":
+            self._refresh_telegram_history()
+        self._update_context_panel_for_section(key)
+
+    def _select_section(self, key: str):
+        if not getattr(self, "section_nav", None):
+            return
+        item = self._section_nav_items.get(key)
+        if not item:
+            return
+        row = self.section_nav.row(item)
+        if row < 0:
+            return
+        self.section_nav.blockSignals(True)
+        self.section_nav.setCurrentRow(row)
+        self.section_nav.blockSignals(False)
+        self._on_section_nav_changed(row)
 
     def _build_settings_pages(self):
         ch = self.cfg.get("chrome", {})
@@ -2306,14 +4784,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.cfg.get("merge_src_dir", self.cfg.get("blurred_dir", str(BLUR_DIR))),
         )
 
-        self.ed_images_dir = add_path_row(
-            "Изображения (Google AI):",
-            "ed_images_dir",
-            "btn_browse_images_dir",
-            "btn_open_images_dir",
-            self.cfg.get("google_genai", {}).get("output_dir", str(IMAGES_DIR)),
-        )
-
         self.ed_history_path = add_path_row(
             "Файл истории:",
             "ed_history_path",
@@ -2350,6 +4820,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # --- Интерфейс ---
         page_ui = QtWidgets.QWidget()
+        self.page_ui_settings = page_ui
         ui_layout = QtWidgets.QVBoxLayout(page_ui)
         ui_layout.setContentsMargins(12, 12, 12, 12)
         grp_ui = QtWidgets.QGroupBox("Отображение")
@@ -2357,6 +4828,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cb_ui_show_activity = QtWidgets.QCheckBox("Показывать историю событий в левой панели")
         self.cb_ui_show_activity.setChecked(bool(self.cfg.get("ui", {}).get("show_activity", True)))
         ui_form.addRow(self.cb_ui_show_activity)
+
+        self.cb_ui_show_context = QtWidgets.QCheckBox("Показывать панель команд справа")
+        self.cb_ui_show_context.setChecked(bool(self.cfg.get("ui", {}).get("show_context", True)))
+        ui_form.addRow(self.cb_ui_show_context)
 
         self.cmb_ui_activity_density = QtWidgets.QComboBox()
         self.cmb_ui_activity_density.addItem("Компактная", "compact")
@@ -2368,11 +4843,58 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cmb_ui_activity_density.setCurrentIndex(idx)
         ui_form.addRow("Вид истории событий:", self.cmb_ui_activity_density)
 
-        ui_hint = QtWidgets.QLabel("Когда история скрыта, остаётся только карточка с текущим этапом.")
+        ui_hint = QtWidgets.QLabel(
+            "Историю и правую панель можно быстро скрыть через верхнюю панель — настройки сохранятся автоматически."
+        )
         ui_hint.setWordWrap(True)
         ui_hint.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
         ui_form.addRow(ui_hint)
         ui_layout.addWidget(grp_ui)
+
+        grp_commands = QtWidgets.QGroupBox("Пользовательские команды")
+        cmd_layout = QtWidgets.QVBoxLayout(grp_commands)
+        cmd_layout.setContentsMargins(12, 12, 12, 12)
+        cmd_layout.setSpacing(8)
+        self.lst_custom_commands = QtWidgets.QListWidget()
+        self.lst_custom_commands.setObjectName("customCommandList")
+        self.lst_custom_commands.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        self.lst_custom_commands.setMinimumHeight(160)
+        cmd_layout.addWidget(self.lst_custom_commands)
+
+        cmd_buttons = QtWidgets.QHBoxLayout()
+        self.btn_custom_add = QtWidgets.QPushButton("Добавить")
+        self.btn_custom_edit = QtWidgets.QPushButton("Изменить")
+        self.btn_custom_delete = QtWidgets.QPushButton("Удалить")
+        self.btn_custom_up = QtWidgets.QToolButton()
+        self.btn_custom_up.setObjectName("customCommandMove")
+        self.btn_custom_up.setText("⬆️")
+        self.btn_custom_up.setToolTip("Переместить вверх")
+        self.btn_custom_down = QtWidgets.QToolButton()
+        self.btn_custom_down.setObjectName("customCommandMove")
+        self.btn_custom_down.setText("⬇️")
+        self.btn_custom_down.setToolTip("Переместить вниз")
+        for btn in (
+            self.btn_custom_add,
+            self.btn_custom_edit,
+            self.btn_custom_delete,
+            self.btn_custom_up,
+            self.btn_custom_down,
+        ):
+            cmd_buttons.addWidget(btn)
+        self.btn_custom_edit.setEnabled(False)
+        self.btn_custom_delete.setEnabled(False)
+        self.btn_custom_up.setEnabled(False)
+        self.btn_custom_down.setEnabled(False)
+        cmd_buttons.addStretch(1)
+        cmd_layout.addLayout(cmd_buttons)
+        cmd_hint = QtWidgets.QLabel(
+            "Команды появляются в правой панели и в командной палитре. Можно запускать скрипты, открывать папки и т.д."
+        )
+        cmd_hint.setObjectName("customCommandSubtitle")
+        cmd_hint.setWordWrap(True)
+        cmd_layout.addWidget(cmd_hint)
+        ui_layout.addWidget(grp_commands)
+        self._refresh_custom_command_list()
         ui_layout.addStretch(1)
         self.settings_tabs.addTab(page_ui, "Интерфейс")
 
@@ -2398,11 +4920,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ed_prof_name = QtWidgets.QLineEdit()
         self.ed_prof_userdir = QtWidgets.QLineEdit()
         self.ed_prof_directory = QtWidgets.QLineEdit()
+        self.sb_prof_port = QtWidgets.QSpinBox()
+        self.sb_prof_port.setRange(0, 65535)
+        self.sb_prof_port.setSpecialValueText("По умолчанию")
+        self.sb_prof_port.setToolTip("0 — использовать общий порт CDP из настроек Chrome")
         self.ed_prof_root = self.ed_prof_userdir
         self.ed_prof_dir = self.ed_prof_directory
         form.addRow("Название:", self.ed_prof_name)
         form.addRow("user_data_dir:", self.ed_prof_userdir)
         form.addRow("profile_directory:", self.ed_prof_directory)
+        form.addRow("CDP порт:", self.sb_prof_port)
         btns = QtWidgets.QHBoxLayout()
         self.btn_prof_add = QtWidgets.QPushButton("Добавить/обновить")
         self.btn_prof_del = QtWidgets.QPushButton("Удалить")
@@ -2700,29 +5227,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.settings_tabs.addTab(page_maint, "Обслуживание")
 
-        # --- Telegram ---
-        tg_cfg = self.cfg.get("telegram", {}) or {}
-        page_tg = QtWidgets.QWidget()
-        tg_form = QtWidgets.QFormLayout(page_tg)
-        self.cb_tg_enabled = QtWidgets.QCheckBox("Включить уведомления")
-        self.cb_tg_enabled.setChecked(bool(tg_cfg.get("enabled", False)))
-        tg_form.addRow(self.cb_tg_enabled)
-        self.ed_tg_token = QtWidgets.QLineEdit(tg_cfg.get("bot_token", ""))
-        self.ed_tg_token.setPlaceholderText("123456:ABCDEF...")
-        tg_form.addRow("Bot token:", self.ed_tg_token)
-        self.ed_tg_chat = QtWidgets.QLineEdit(tg_cfg.get("chat_id", ""))
-        self.ed_tg_chat.setPlaceholderText("@channel или chat id")
-        tg_form.addRow("Chat ID:", self.ed_tg_chat)
-        btn_row = QtWidgets.QHBoxLayout()
-        self.btn_tg_test = QtWidgets.QPushButton("Отправить тест")
-        btn_row.addWidget(self.btn_tg_test)
-        btn_row.addStretch(1)
-        tg_form.addRow(btn_row)
-        hint = QtWidgets.QLabel("Уведомления отправляются после завершения шагов сценария.")
-        hint.setWordWrap(True)
-        tg_form.addRow(hint)
-        self.settings_tabs.addTab(page_tg, "Telegram")
-
         # --- Автоген ---
         page_auto = QtWidgets.QWidget()
         auto_layout = QtWidgets.QVBoxLayout(page_auto)
@@ -2746,24 +5250,43 @@ class MainWindow(QtWidgets.QMainWindow):
         genai_layout.setSpacing(12)
 
         genai_cfg = self.cfg.get("google_genai", {}) or {}
-        grp_genai = QtWidgets.QGroupBox("Google AI Studio — генерация изображений")
-        fg = QtWidgets.QFormLayout(grp_genai)
+
+        self.tabs_genai = QtWidgets.QTabWidget()
+        genai_layout.addWidget(self.tabs_genai)
+
+        tab_genai_main = QtWidgets.QWidget()
+        fg_main = QtWidgets.QFormLayout(tab_genai_main)
+        fg_main.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
 
         self.cb_genai_enabled = QtWidgets.QCheckBox("Включить генерацию изображений перед отправкой промпта")
         self.cb_genai_enabled.setChecked(bool(genai_cfg.get("enabled", False)))
-        fg.addRow(self.cb_genai_enabled)
+        fg_main.addRow(self.cb_genai_enabled)
 
         self.cb_genai_attach = QtWidgets.QCheckBox("Прикреплять сгенерированные изображения к заявке в Sora")
         self.cb_genai_attach.setChecked(bool(genai_cfg.get("attach_to_sora", True)))
-        fg.addRow(self.cb_genai_attach)
+        fg_main.addRow(self.cb_genai_attach)
 
         self.ed_genai_api_key = QtWidgets.QLineEdit(genai_cfg.get("api_key", ""))
         self.ed_genai_api_key.setPlaceholderText("AIza...")
         self.ed_genai_api_key.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
-        fg.addRow("API ключ:", self.ed_genai_api_key)
+        fg_main.addRow("API ключ:", self.ed_genai_api_key)
 
-        self.ed_genai_model = QtWidgets.QLineEdit(genai_cfg.get("model", "models/imagen-4.0-generate-001"))
-        fg.addRow("Модель:", self.ed_genai_model)
+        self.cmb_genai_model = QtWidgets.QComboBox()
+        self.cmb_genai_model.setEditable(True)
+        self.cmb_genai_model.setInsertPolicy(QtWidgets.QComboBox.InsertPolicy.NoInsert)
+        known_models = [
+            "models/imagen-4.0-generate-001",
+            "models/imagen-3.0-generate-001",
+            "models/imagen-3.0-generate-002",
+            "models/imagegeneration@006",
+        ]
+        for model_name in known_models:
+            self.cmb_genai_model.addItem(model_name)
+        current_model = genai_cfg.get("model", known_models[0] if known_models else "models/imagen-4.0-generate-001")
+        if current_model and self.cmb_genai_model.findText(current_model) < 0:
+            self.cmb_genai_model.addItem(current_model)
+        self.cmb_genai_model.setCurrentText(current_model)
+        fg_main.addRow("Модель:", self.cmb_genai_model)
 
         self.cmb_genai_person = QtWidgets.QComboBox()
         self.cmb_genai_person.setEditable(True)
@@ -2782,37 +5305,39 @@ class MainWindow(QtWidgets.QMainWindow):
                 idx_person = 0
         self.cmb_genai_person.setCurrentIndex(idx_person)
         self.cmb_genai_person.lineEdit().setPlaceholderText("оставь пустым, чтобы следовать политике модели")
-        fg.addRow("Генерация людей:", self.cmb_genai_person)
+        fg_main.addRow("Генерация людей:", self.cmb_genai_person)
 
         self.ed_genai_aspect = QtWidgets.QLineEdit(str(genai_cfg.get("aspect_ratio", "1:1")))
-        fg.addRow("Соотношение сторон:", self.ed_genai_aspect)
+        fg_main.addRow("Соотношение сторон:", self.ed_genai_aspect)
 
         self.ed_genai_size = QtWidgets.QLineEdit(str(genai_cfg.get("image_size", "1K")))
-        fg.addRow("Размер:", self.ed_genai_size)
+        fg_main.addRow("Размер:", self.ed_genai_size)
 
         self.ed_genai_mime = QtWidgets.QLineEdit(str(genai_cfg.get("output_mime_type", "image/jpeg")))
-        fg.addRow("MIME-тип:", self.ed_genai_mime)
+        fg_main.addRow("MIME-тип:", self.ed_genai_mime)
 
         self.sb_genai_images = QtWidgets.QSpinBox()
         self.sb_genai_images.setRange(1, 8)
         self.sb_genai_images.setValue(int(genai_cfg.get("number_of_images", 1) or 1))
-        fg.addRow("Картинок на промпт:", self.sb_genai_images)
+        fg_main.addRow("Картинок на промпт:", self.sb_genai_images)
 
         self.sb_genai_rpm = QtWidgets.QSpinBox()
         self.sb_genai_rpm.setRange(0, 120)
         self.sb_genai_rpm.setSpecialValueText("без ограничений")
         self.sb_genai_rpm.setValue(int(genai_cfg.get("rate_limit_per_minute", 0) or 0))
-        fg.addRow("Лимит запросов в минуту:", self.sb_genai_rpm)
+        fg_main.addRow("Лимит запросов в минуту:", self.sb_genai_rpm)
 
         self.sb_genai_retries = QtWidgets.QSpinBox()
         self.sb_genai_retries.setRange(0, 10)
         self.sb_genai_retries.setValue(int(genai_cfg.get("max_retries", 3) or 0))
-        fg.addRow("Повторов при ошибке:", self.sb_genai_retries)
+        fg_main.addRow("Повторов при ошибке:", self.sb_genai_retries)
 
         output_dir = genai_cfg.get("output_dir", str(IMAGES_DIR))
         self.ed_genai_output_dir = QtWidgets.QLineEdit(str(output_dir))
         self.btn_genai_output_browse = QtWidgets.QPushButton("…")
-        self.btn_genai_output_open = QtWidgets.QToolButton(); self.btn_genai_output_open.setText("↗"); self.btn_genai_output_open.setToolTip("Открыть папку вывода")
+        self.btn_genai_output_open = QtWidgets.QToolButton()
+        self.btn_genai_output_open.setText("↗")
+        self.btn_genai_output_open.setToolTip("Открыть папку вывода")
         row_widget = QtWidgets.QWidget()
         row_layout = QtWidgets.QHBoxLayout(row_widget)
         row_layout.setContentsMargins(0, 0, 0, 0)
@@ -2820,14 +5345,105 @@ class MainWindow(QtWidgets.QMainWindow):
         row_layout.addWidget(self.ed_genai_output_dir, 1)
         row_layout.addWidget(self.btn_genai_output_browse, 0)
         row_layout.addWidget(self.btn_genai_output_open, 0)
-        fg.addRow("Папка вывода:", row_widget)
+        fg_main.addRow("Папка изображений:", row_widget)
 
-        hint = QtWidgets.QLabel("Папка вывода создаётся автоматически. Настройки применяются при запуске автогена.")
-        hint.setWordWrap(True)
-        hint.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
-        fg.addRow(hint)
+        manifest_hint = QtWidgets.QLabel(
+            "Manifest используется для повторного сопоставления промптов и файлов."
+            " При необходимости его путь можно изменить вручную в конфиге."
+        )
+        manifest_hint.setWordWrap(True)
+        manifest_hint.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
+        fg_main.addRow(manifest_hint)
 
-        genai_layout.addWidget(grp_genai)
+        self.tabs_genai.addTab(tab_genai_main, "Основные")
+
+        tab_genai_style = QtWidgets.QWidget()
+        fg_style = QtWidgets.QFormLayout(tab_genai_style)
+        fg_style.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+
+        self.ed_genai_seeds = QtWidgets.QLineEdit(str(genai_cfg.get("seeds", "")))
+        self.ed_genai_seeds.setPlaceholderText("Например: 12345, 67890")
+        fg_style.addRow("Сиды (через запятую):", self.ed_genai_seeds)
+
+        self.cb_genai_consistent = QtWidgets.QCheckBox("consistent character design")
+        self.cb_genai_consistent.setChecked(bool(genai_cfg.get("consistent_character_design", False)))
+        fg_style.addRow(self.cb_genai_consistent)
+
+        self.ed_genai_lens = QtWidgets.QLineEdit(str(genai_cfg.get("lens_type", "")))
+        self.ed_genai_lens.setPlaceholderText("например, 35mm cinematic")
+        fg_style.addRow("Тип объектива:", self.ed_genai_lens)
+
+        self.ed_genai_palette = QtWidgets.QLineEdit(str(genai_cfg.get("color_palette", "")))
+        self.ed_genai_palette.setPlaceholderText("например, cool blue and golden tones")
+        fg_style.addRow("Цветовая палитра:", self.ed_genai_palette)
+
+        self.ed_genai_style = QtWidgets.QLineEdit(str(genai_cfg.get("style", "")))
+        self.ed_genai_style.setPlaceholderText("например, ultra-realistic fantasy film")
+        fg_style.addRow("Стиль:", self.ed_genai_style)
+
+        self.te_genai_reference = QtWidgets.QPlainTextEdit()
+        self.te_genai_reference.setPlaceholderText("Дополнительные подсказки и референсы для промпта")
+        self.te_genai_reference.setPlainText(str(genai_cfg.get("reference_prompt", "")))
+        self.te_genai_reference.setTabChangesFocus(True)
+        self.te_genai_reference.setMaximumHeight(120)
+        fg_style.addRow("Доп. подсказка:", self.te_genai_reference)
+
+        style_hint = QtWidgets.QLabel(
+            "Эти поля автоматически добавляются к текстовому промпту, сохраняя единый стиль изображений."
+        )
+        style_hint.setWordWrap(True)
+        style_hint.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
+        fg_style.addRow(style_hint)
+
+        self.tabs_genai.addTab(tab_genai_style, "Стиль")
+
+        tab_genai_notify = QtWidgets.QWidget()
+        fg_notify = QtWidgets.QFormLayout(tab_genai_notify)
+        fg_notify.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+
+        self.cb_genai_notifications = QtWidgets.QCheckBox("Включить уведомления о суточной квоте")
+        self.cb_genai_notifications.setChecked(bool(genai_cfg.get("notifications_enabled", True)))
+        fg_notify.addRow(self.cb_genai_notifications)
+
+        self.sb_genai_daily_quota = QtWidgets.QSpinBox()
+        self.sb_genai_daily_quota.setRange(0, 10000)
+        self.sb_genai_daily_quota.setSpecialValueText("без лимита")
+        self.sb_genai_daily_quota.setValue(int(genai_cfg.get("daily_quota", 0) or 0))
+        fg_notify.addRow("Квота промптов в сутки:", self.sb_genai_daily_quota)
+
+        self.sb_genai_quota_warning = QtWidgets.QSpinBox()
+        self.sb_genai_quota_warning.setRange(0, 1000)
+        self.sb_genai_quota_warning.setValue(int(genai_cfg.get("quota_warning_prompts", 5) or 0))
+        fg_notify.addRow("Предупреждать за N промптов:", self.sb_genai_quota_warning)
+
+        self.cb_genai_quota_enforce = QtWidgets.QCheckBox("Останавливать генерацию при исчерпании квоты")
+        self.cb_genai_quota_enforce.setChecked(bool(genai_cfg.get("quota_enforce", False)))
+        fg_notify.addRow(self.cb_genai_quota_enforce)
+
+        usage_default = genai_cfg.get("usage_file") or str(Path(output_dir) / "usage.json")
+        self.ed_genai_usage_file = QtWidgets.QLineEdit(str(usage_default))
+        self.btn_genai_usage_browse = QtWidgets.QPushButton("…")
+        self.btn_genai_usage_open = QtWidgets.QToolButton()
+        self.btn_genai_usage_open.setText("↗")
+        self.btn_genai_usage_open.setToolTip("Открыть файл статистики квот")
+        usage_row = QtWidgets.QWidget()
+        usage_layout = QtWidgets.QHBoxLayout(usage_row)
+        usage_layout.setContentsMargins(0, 0, 0, 0)
+        usage_layout.setSpacing(6)
+        usage_layout.addWidget(self.ed_genai_usage_file, 1)
+        usage_layout.addWidget(self.btn_genai_usage_browse, 0)
+        usage_layout.addWidget(self.btn_genai_usage_open, 0)
+        fg_notify.addRow("Файл учёта квоты:", usage_row)
+
+        quota_hint = QtWidgets.QLabel(
+            "Уведомления появляются в консоли workers/autogen. Порог предупреждения задаётся отдельно для каждой модели."
+        )
+        quota_hint.setWordWrap(True)
+        quota_hint.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
+        fg_notify.addRow(quota_hint)
+
+        self.tabs_genai.addTab(tab_genai_notify, "Уведомления")
+
         genai_layout.addStretch(1)
         self.settings_tabs.addTab(page_genai, "Генерация картинок")
 
@@ -2857,7 +5473,6 @@ class MainWindow(QtWidgets.QMainWindow):
             ("Chrome", page_chrome),
             ("YouTube", page_yt),
             ("TikTok", page_tt),
-            ("Telegram", page_tg),
             ("Интерфейс", page_ui),
             ("Обслуживание", page_maint),
             ("Ошибки", self.tab_errors),
@@ -2881,7 +5496,6 @@ class MainWindow(QtWidgets.QMainWindow):
             (self.ed_merged, self.cfg.get("merged_dir", str(MERG_DIR))),
             (self.ed_blur_src, self.cfg.get("blur_src_dir", self.cfg.get("downloads_dir", str(DL_DIR)))),
             (self.ed_merge_src, self.cfg.get("merge_src_dir", self.cfg.get("blurred_dir", str(BLUR_DIR)))),
-            (getattr(self, "ed_images_dir", None), self.cfg.get("google_genai", {}).get("output_dir", str(IMAGES_DIR))),
             (getattr(self, "ed_history_path", None), self.cfg.get("history_file", str(HIST_FILE))),
             (getattr(self, "ed_titles_path", None), self.cfg.get("titles_file", str(TITLES_FILE))),
             (getattr(self, "ed_tiktok_src", None), self.cfg.get("tiktok", {}).get("upload_src_dir", self.cfg.get("merged_dir", str(MERG_DIR))))
@@ -2894,8 +5508,6 @@ class MainWindow(QtWidgets.QMainWindow):
             line.blockSignals(True)
             line.setText(str(value))
             line.blockSignals(False)
-        if hasattr(self, "ed_images_dir") and hasattr(self, "ed_genai_output_dir"):
-            self._sync_image_dirs(from_catalog=True)
 
     def _mark_settings_dirty(self, *args):
         self._settings_dirty = True
@@ -2904,6 +5516,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self, "_settings_autosave_timer"):
             self._settings_autosave_timer.stop()
             self._settings_autosave_timer.start()
+        self._refresh_settings_context()
 
     def _autosave_settings(self):
         if getattr(self, "_settings_dirty", False):
@@ -2917,11 +5530,11 @@ class MainWindow(QtWidgets.QMainWindow):
             (self.ed_merged, "textEdited"),
             (self.ed_blur_src, "textEdited"),
             (self.ed_merge_src, "textEdited"),
-            (getattr(self, "ed_images_dir", None), "textEdited"),
             (getattr(self, "ed_history_path", None), "textEdited"),
             (getattr(self, "ed_titles_path", None), "textEdited"),
             (self.sb_max_videos, "valueChanged"),
             (self.cb_ui_show_activity, "toggled"),
+            (getattr(self, "cb_ui_show_context", None), "toggled"),
             (self.cmb_ui_activity_density, "currentIndexChanged"),
             (self.ed_cdp_port, "textEdited"),
             (self.ed_userdir, "textEdited"),
@@ -2965,7 +5578,8 @@ class MainWindow(QtWidgets.QMainWindow):
             (self.cb_genai_enabled, "toggled"),
             (self.cb_genai_attach, "toggled"),
             (self.ed_genai_api_key, "textEdited"),
-            (self.ed_genai_model, "textEdited"),
+            (self.cmb_genai_model, "currentIndexChanged"),
+            (self.cmb_genai_model.lineEdit(), "textEdited"),
             (self.cmb_genai_person, "currentIndexChanged"),
             (self.cmb_genai_person.lineEdit(), "textEdited"),
             (self.ed_genai_aspect, "textEdited"),
@@ -2975,6 +5589,17 @@ class MainWindow(QtWidgets.QMainWindow):
             (self.sb_genai_rpm, "valueChanged"),
             (self.sb_genai_retries, "valueChanged"),
             (self.ed_genai_output_dir, "textEdited"),
+            (self.ed_genai_seeds, "textEdited"),
+            (self.cb_genai_consistent, "toggled"),
+            (self.ed_genai_lens, "textEdited"),
+            (self.ed_genai_palette, "textEdited"),
+            (self.ed_genai_style, "textEdited"),
+            (self.te_genai_reference, "textChanged"),
+            (self.cb_genai_notifications, "toggled"),
+            (self.sb_genai_daily_quota, "valueChanged"),
+            (self.sb_genai_quota_warning, "valueChanged"),
+            (self.cb_genai_quota_enforce, "toggled"),
+            (self.ed_genai_usage_file, "textEdited"),
         ]
         for widget, signal_name in watchers:
             signal = getattr(widget, signal_name, None)
@@ -3231,6 +5856,421 @@ class MainWindow(QtWidgets.QMainWindow):
             self._append_activity("README.md не найден", kind="error")
         self._readme_loaded = True
 
+    def _build_telegram_panel(self) -> QtWidgets.QWidget:
+        tg_cfg = self.cfg.get("telegram", {}) or {}
+        raw_templates = tg_cfg.get("templates") or []
+        self._telegram_templates = [
+            {"name": str(t.get("name", "")).strip(), "text": t.get("text", "")}
+            for t in raw_templates
+            if isinstance(t, dict)
+        ]
+        root = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(root)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
+
+        intro = QtWidgets.QLabel(
+            "Настрой уведомления и контролируй отправку сообщений в Telegram прямо из Sora Suite."
+        )
+        intro.setWordWrap(True)
+        intro.setStyleSheet("QLabel{color:#94a3b8;font-size:12px;}")
+        layout.addWidget(intro)
+
+        cfg_box = QtWidgets.QGroupBox("Параметры уведомлений")
+        cfg_form = QtWidgets.QFormLayout(cfg_box)
+        cfg_form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        self.cb_tg_enabled = QtWidgets.QCheckBox("Включить уведомления")
+        self.cb_tg_enabled.setChecked(bool(tg_cfg.get("enabled", False)))
+        cfg_form.addRow(self.cb_tg_enabled)
+        self.ed_tg_token = QtWidgets.QLineEdit(tg_cfg.get("bot_token", ""))
+        self.ed_tg_token.setPlaceholderText("123456:ABCDEF...")
+        cfg_form.addRow("Bot token:", self.ed_tg_token)
+        self.ed_tg_chat = QtWidgets.QLineEdit(tg_cfg.get("chat_id", ""))
+        self.ed_tg_chat.setPlaceholderText("@channel или chat id")
+        cfg_form.addRow("Chat ID:", self.ed_tg_chat)
+        btn_row = QtWidgets.QHBoxLayout()
+        self.btn_tg_test = QtWidgets.QPushButton("Отправить тест")
+        btn_row.addWidget(self.btn_tg_test)
+        btn_row.addStretch(1)
+        cfg_form.addRow(btn_row)
+        hint = QtWidgets.QLabel("Уведомления отправляются после ключевых шагов сценария и сервисных операций.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
+        cfg_form.addRow(hint)
+        layout.addWidget(cfg_box)
+
+        quick_box = QtWidgets.QGroupBox("Быстрая отправка")
+        quick_layout = QtWidgets.QVBoxLayout(quick_box)
+        quick_layout.setSpacing(8)
+        self.ed_tg_quick_message = QtWidgets.QPlainTextEdit()
+        self.ed_tg_quick_message.setPlaceholderText("Напиши сообщение для команды или канала…")
+        self.ed_tg_quick_message.setMaximumBlockCount(200)
+        quick_layout.addWidget(self.ed_tg_quick_message)
+        schedule_row = QtWidgets.QHBoxLayout()
+        schedule_row.addWidget(QtWidgets.QLabel("Отправить через:"))
+        self.sb_tg_quick_delay = QtWidgets.QSpinBox()
+        self.sb_tg_quick_delay.setRange(0, 1440)
+        self.sb_tg_quick_delay.setSuffix(" мин")
+        self.sb_tg_quick_delay.setValue(int(tg_cfg.get("quick_delay_minutes", 0)))
+        schedule_row.addWidget(self.sb_tg_quick_delay)
+        schedule_row.addStretch(1)
+        quick_layout.addLayout(schedule_row)
+        quick_buttons = QtWidgets.QHBoxLayout()
+        self.btn_tg_quick_send = QtWidgets.QPushButton("Отправить сейчас")
+        self.btn_tg_quick_clear = QtWidgets.QPushButton("Очистить")
+        quick_buttons.addWidget(self.btn_tg_quick_send)
+        quick_buttons.addWidget(self.btn_tg_quick_clear)
+        quick_buttons.addStretch(1)
+        quick_layout.addLayout(quick_buttons)
+        self.lbl_tg_status = QtWidgets.QLabel("Готово к отправке")
+        self.lbl_tg_status.setStyleSheet("QLabel{color:#94a3b8;}")
+        quick_layout.addWidget(self.lbl_tg_status)
+        layout.addWidget(quick_box)
+
+        templates_box = QtWidgets.QGroupBox("Шаблоны сообщений")
+        templates_form = QtWidgets.QFormLayout(templates_box)
+        templates_form.setHorizontalSpacing(8)
+        templates_form.setVerticalSpacing(6)
+        self.cmb_tg_templates = QtWidgets.QComboBox()
+        templates_form.addRow("Выбрать:", self.cmb_tg_templates)
+        self.ed_tg_template_name = QtWidgets.QLineEdit()
+        templates_form.addRow("Название:", self.ed_tg_template_name)
+        template_buttons = QtWidgets.QHBoxLayout()
+        self.btn_tg_template_save = QtWidgets.QPushButton("Сохранить")
+        self.btn_tg_template_delete = QtWidgets.QPushButton("Удалить")
+        template_buttons.addWidget(self.btn_tg_template_save)
+        template_buttons.addWidget(self.btn_tg_template_delete)
+        template_buttons.addStretch(1)
+        templates_form.addRow(template_buttons)
+        layout.addWidget(templates_box)
+
+        history_box = QtWidgets.QGroupBox("Недавние сообщения")
+        history_layout = QtWidgets.QVBoxLayout(history_box)
+        history_layout.setSpacing(8)
+        self.lst_tg_history = QtWidgets.QListWidget()
+        self.lst_tg_history.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
+        self.lst_tg_history.setWordWrap(True)
+        self.lst_tg_history.setAlternatingRowColors(False)
+        history_layout.addWidget(self.lst_tg_history, 1)
+        history_buttons = QtWidgets.QHBoxLayout()
+        self.btn_tg_history_refresh = QtWidgets.QPushButton("Обновить")
+        self.btn_tg_history_clear = QtWidgets.QPushButton("Очистить журнал")
+        history_buttons.addWidget(self.btn_tg_history_refresh)
+        history_buttons.addWidget(self.btn_tg_history_clear)
+        history_buttons.addStretch(1)
+        history_layout.addLayout(history_buttons)
+        layout.addWidget(history_box, 1)
+
+        layout.addStretch(1)
+
+        cache = getattr(self, "_telegram_activity_cache", None)
+        if cache is None:
+            self._telegram_activity_cache = deque(maxlen=200)
+
+        self.btn_tg_quick_send.clicked.connect(self._send_quick_telegram)
+        self.btn_tg_quick_clear.clicked.connect(self._clear_quick_telegram_message)
+        self.btn_tg_history_refresh.clicked.connect(self._refresh_telegram_history)
+        self.btn_tg_history_clear.clicked.connect(self._clear_telegram_history)
+        self.cmb_tg_templates.currentIndexChanged.connect(self._on_tg_template_selected)
+        self.btn_tg_template_save.clicked.connect(self._on_tg_template_save)
+        self.btn_tg_template_delete.clicked.connect(self._on_tg_template_delete)
+        self.sb_tg_quick_delay.valueChanged.connect(self._on_tg_delay_changed)
+
+        self._refresh_telegram_templates()
+        self._refresh_telegram_context()
+
+        return root
+
+    def _build_sessions_tab(self) -> QtWidgets.QWidget:
+        tab = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(tab)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
+
+        header = QtWidgets.QLabel(
+            "Создавай отдельные рабочие пространства для параллельных окон Chrome: каждое хранит свои промпты, логи и порт."
+        )
+        header.setWordWrap(True)
+        header.setStyleSheet("QLabel{color:#94a3b8;font-size:12px;}")
+        layout.addWidget(header)
+
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+        layout.addWidget(splitter, 1)
+
+        left_panel = QtWidgets.QWidget()
+        left_layout = QtWidgets.QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(6)
+
+        self.lst_sessions = QtWidgets.QListWidget()
+        self.lst_sessions.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        self.lst_sessions.setAlternatingRowColors(True)
+        self.lst_sessions.setUniformItemSizes(True)
+        self.lst_sessions.setStyleSheet("QListWidget{border-radius:10px;border:1px solid #22314d;padding:6px;}")
+        left_layout.addWidget(self.lst_sessions, 1)
+
+        controls_row = QtWidgets.QHBoxLayout()
+        self.btn_session_add = QtWidgets.QPushButton("Добавить")
+        self.btn_session_duplicate = QtWidgets.QPushButton("Дублировать")
+        self.btn_session_remove = QtWidgets.QPushButton("Удалить")
+        for button in (self.btn_session_add, self.btn_session_duplicate, self.btn_session_remove):
+            button.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+            controls_row.addWidget(button)
+        left_layout.addLayout(controls_row)
+
+        splitter.addWidget(left_panel)
+
+        detail_area = QtWidgets.QScrollArea()
+        detail_area.setWidgetResizable(True)
+        detail_area.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        splitter.addWidget(detail_area)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 2)
+
+        detail_widget = QtWidgets.QWidget()
+        detail_area.setWidget(detail_widget)
+        detail_layout = QtWidgets.QVBoxLayout(detail_widget)
+        detail_layout.setContentsMargins(0, 0, 0, 0)
+        detail_layout.setSpacing(10)
+
+        form = QtWidgets.QFormLayout()
+        form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(10)
+
+        self.ed_session_name = QtWidgets.QLineEdit()
+        self.ed_session_name.setPlaceholderText("Например: Профиль #1")
+        form.addRow("Название:", self.ed_session_name)
+
+        self.cmb_session_prompt_profile = QtWidgets.QComboBox()
+        self.cmb_session_prompt_profile.setEditable(False)
+        form.addRow("Промпты:", self.cmb_session_prompt_profile)
+
+        self.cmb_session_chrome_profile = QtWidgets.QComboBox()
+        self.cmb_session_chrome_profile.setEditable(False)
+        form.addRow("Профиль Chrome:", self.cmb_session_chrome_profile)
+
+        self.sb_session_port = QtWidgets.QSpinBox()
+        self.sb_session_port.setRange(0, 65535)
+        self.sb_session_port.setSpecialValueText("Авто")
+        self.sb_session_port.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft)
+        form.addRow("CDP порт:", self.sb_session_port)
+
+        def make_path_field() -> Tuple[QtWidgets.QLineEdit, QtWidgets.QToolButton, QtWidgets.QWidget]:
+            container = QtWidgets.QWidget()
+            hl = QtWidgets.QHBoxLayout(container)
+            hl.setContentsMargins(0, 0, 0, 0)
+            hl.setSpacing(6)
+            line = QtWidgets.QLineEdit()
+            line.setClearButtonEnabled(True)
+            btn = QtWidgets.QToolButton()
+            btn.setText("…")
+            btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+            hl.addWidget(line, 1)
+            hl.addWidget(btn, 0)
+            return line, btn, container
+
+        self.ed_session_prompts, self.btn_session_prompts_browse, prompts_widget = make_path_field()
+        self.ed_session_prompts.setPlaceholderText("По умолчанию берётся из профиля")
+        form.addRow("Файл промптов:", prompts_widget)
+
+        self.ed_session_image_prompts, self.btn_session_image_prompts_browse, img_widget = make_path_field()
+        self.ed_session_image_prompts.setPlaceholderText("Наследуется из общих настроек")
+        form.addRow("Image-промпты:", img_widget)
+
+        self.ed_session_submitted, self.btn_session_submitted_browse, submitted_widget = make_path_field()
+        form.addRow("submitted.log:", submitted_widget)
+
+        self.ed_session_failed, self.btn_session_failed_browse, failed_widget = make_path_field()
+        form.addRow("failed.log:", failed_widget)
+
+        self.ed_session_download_dir, self.btn_session_download_dir_browse, download_widget = make_path_field()
+        self.ed_session_download_dir.setPlaceholderText("По умолчанию — отдельная папка RAW для сессии")
+        form.addRow("Папка RAW:", download_widget)
+
+        self.ed_session_titles_file, self.btn_session_titles_browse, titles_widget = make_path_field()
+        self.ed_session_titles_file.setPlaceholderText("Использовать общий список названий")
+        form.addRow("Названия:", titles_widget)
+
+        self.ed_session_cursor_file, self.btn_session_cursor_browse, cursor_widget = make_path_field()
+        self.ed_session_cursor_file.setPlaceholderText("Файл cursor для этой сессии")
+        form.addRow("Cursor:", cursor_widget)
+
+        self.sb_session_max_videos = QtWidgets.QSpinBox()
+        self.sb_session_max_videos.setRange(0, 999)
+        self.sb_session_max_videos.setSpecialValueText("Как в настройках")
+        form.addRow("Лимит скачки:", self.sb_session_max_videos)
+
+        detail_layout.addLayout(form)
+
+        self.chk_session_auto_chrome = QtWidgets.QCheckBox("Автоматически запускать Chrome при старте")
+        detail_layout.addWidget(self.chk_session_auto_chrome)
+
+        auto_row = QtWidgets.QHBoxLayout()
+        auto_row.setSpacing(10)
+        lbl_auto = QtWidgets.QLabel("Автозапуск автогена:")
+        self.cmb_session_autogen_mode = QtWidgets.QComboBox()
+        self.cmb_session_autogen_mode.addItem("Не запускать", "idle")
+        self.cmb_session_autogen_mode.addItem("Вставка промптов", "prompts")
+        self.cmb_session_autogen_mode.addItem("Только картинки", "images")
+        auto_row.addWidget(lbl_auto)
+        auto_row.addWidget(self.cmb_session_autogen_mode, 1)
+        detail_layout.addLayout(auto_row)
+
+        self.te_session_notes = QtWidgets.QPlainTextEdit()
+        self.te_session_notes.setPlaceholderText("Свободные заметки, чтобы не перепутать сессию…")
+        self.te_session_notes.setMaximumBlockCount(400)
+        detail_layout.addWidget(self.te_session_notes)
+
+        status_row = QtWidgets.QHBoxLayout()
+        status_row.setSpacing(12)
+        self.lbl_session_status = QtWidgets.QLabel("Выбери сессию слева, чтобы увидеть детали")
+        self.lbl_session_status.setObjectName("sessionStatusLabel")
+        status_row.addWidget(self.lbl_session_status, 1)
+        self.btn_session_open_window = QtWidgets.QPushButton("Отдельное окно")
+        self.btn_session_open_window.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        status_row.addWidget(self.btn_session_open_window)
+        detail_layout.addLayout(status_row)
+
+        actions_row = QtWidgets.QHBoxLayout()
+        actions_row.setSpacing(10)
+        self.btn_session_launch_chrome = QtWidgets.QPushButton("Запустить Chrome")
+        self.btn_session_run_prompts = QtWidgets.QPushButton("Autogen промптов")
+        self.btn_session_run_images = QtWidgets.QPushButton("Только картинки")
+        self.btn_session_run_download = QtWidgets.QPushButton("Скачать видео")
+        self.btn_session_open_downloads = QtWidgets.QPushButton("Открыть RAW")
+        self.btn_session_stop_runner = QtWidgets.QPushButton("Остановить")
+        for btn in (
+            self.btn_session_launch_chrome,
+            self.btn_session_run_prompts,
+            self.btn_session_run_images,
+            self.btn_session_run_download,
+            self.btn_session_open_downloads,
+            self.btn_session_stop_runner,
+        ):
+            btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+            actions_row.addWidget(btn)
+        detail_layout.addLayout(actions_row)
+
+        self.te_session_log = QtWidgets.QPlainTextEdit()
+        self.te_session_log.setReadOnly(True)
+        self.te_session_log.setMaximumBlockCount(500)
+        self.te_session_log.setPlaceholderText("Лог сессии появится здесь…")
+        detail_layout.addWidget(self.te_session_log, 1)
+
+        self._session_detail_widgets = [
+            self.ed_session_name,
+            self.cmb_session_prompt_profile,
+            self.cmb_session_chrome_profile,
+            self.sb_session_port,
+            self.ed_session_prompts,
+            self.btn_session_prompts_browse,
+            self.ed_session_image_prompts,
+            self.btn_session_image_prompts_browse,
+            self.ed_session_submitted,
+            self.btn_session_submitted_browse,
+            self.ed_session_failed,
+            self.btn_session_failed_browse,
+            self.ed_session_download_dir,
+            self.btn_session_download_dir_browse,
+            self.ed_session_titles_file,
+            self.btn_session_titles_browse,
+            self.ed_session_cursor_file,
+            self.btn_session_cursor_browse,
+            self.sb_session_max_videos,
+            self.chk_session_auto_chrome,
+            self.cmb_session_autogen_mode,
+            self.te_session_notes,
+            self.btn_session_open_window,
+            self.btn_session_launch_chrome,
+            self.btn_session_run_prompts,
+            self.btn_session_run_images,
+            self.btn_session_run_download,
+            self.btn_session_open_downloads,
+            self.btn_session_stop_runner,
+            self.te_session_log,
+        ]
+
+        self.lst_sessions.itemSelectionChanged.connect(self._on_session_selection_changed)
+        self.btn_session_add.clicked.connect(self._on_session_add)
+        self.btn_session_duplicate.clicked.connect(self._on_session_duplicate)
+        self.btn_session_remove.clicked.connect(self._on_session_remove)
+        self.btn_session_prompts_browse.clicked.connect(lambda: self._browse_file(self.ed_session_prompts, "Выбери файл промптов"))
+        self.btn_session_image_prompts_browse.clicked.connect(
+            lambda: self._browse_file(self.ed_session_image_prompts, "Выбери файл image-промптов")
+        )
+        self.btn_session_submitted_browse.clicked.connect(
+            lambda: self._browse_file(
+                self.ed_session_submitted,
+                "Выбери файл submitted.log",
+                "Логи (*.log *.txt);;Все файлы (*.*)",
+            )
+        )
+        self.btn_session_failed_browse.clicked.connect(
+            lambda: self._browse_file(
+                self.ed_session_failed,
+                "Выбери файл failed.log",
+                "Логи (*.log *.txt);;Все файлы (*.*)",
+            )
+        )
+        self.btn_session_download_dir_browse.clicked.connect(
+            lambda: self._browse_dir(self.ed_session_download_dir, "Выбери папку RAW для сессии")
+        )
+        self.btn_session_titles_browse.clicked.connect(
+            lambda: self._browse_file(
+                self.ed_session_titles_file,
+                "Выбери файл названий",
+                "Текстовые файлы (*.txt);;Все файлы (*.*)",
+            )
+        )
+        self.btn_session_cursor_browse.clicked.connect(
+            lambda: self._browse_file(
+                self.ed_session_cursor_file,
+                "Выбери файл cursor",
+                "Cursor (*.cursor *.txt *.log);;Все файлы (*.*)",
+            )
+        )
+        self.btn_session_launch_chrome.clicked.connect(self._on_session_launch_chrome)
+        self.btn_session_run_prompts.clicked.connect(self._on_session_run_prompts)
+        self.btn_session_run_images.clicked.connect(self._on_session_run_images)
+        self.btn_session_run_download.clicked.connect(self._on_session_run_download)
+        self.btn_session_open_downloads.clicked.connect(self._on_session_open_downloads)
+        self.btn_session_stop_runner.clicked.connect(self._on_session_stop)
+        self.btn_session_open_window.clicked.connect(self._on_session_open_window)
+        self.ed_session_name.textEdited.connect(self._on_session_name_changed)
+        self.cmb_session_prompt_profile.currentIndexChanged.connect(self._on_session_prompt_profile_changed)
+        self.cmb_session_chrome_profile.currentIndexChanged.connect(self._on_session_chrome_profile_changed)
+        self.sb_session_port.valueChanged.connect(self._on_session_port_changed)
+        self.ed_session_prompts.textEdited.connect(lambda: self._on_session_path_changed("prompts_file", self.ed_session_prompts))
+        self.ed_session_image_prompts.textEdited.connect(
+            lambda: self._on_session_path_changed("image_prompts_file", self.ed_session_image_prompts)
+        )
+        self.ed_session_submitted.textEdited.connect(
+            lambda: self._on_session_path_changed("submitted_log", self.ed_session_submitted)
+        )
+        self.ed_session_failed.textEdited.connect(
+            lambda: self._on_session_path_changed("failed_log", self.ed_session_failed)
+        )
+        self.ed_session_download_dir.textEdited.connect(
+            lambda: self._on_session_path_changed("download_dir", self.ed_session_download_dir)
+        )
+        self.ed_session_titles_file.textEdited.connect(
+            lambda: self._on_session_path_changed("titles_file", self.ed_session_titles_file)
+        )
+        self.ed_session_cursor_file.textEdited.connect(
+            lambda: self._on_session_path_changed("cursor_file", self.ed_session_cursor_file)
+        )
+        self.te_session_notes.textChanged.connect(self._on_session_notes_changed)
+        self.chk_session_auto_chrome.toggled.connect(self._on_session_auto_chrome_changed)
+        self.cmb_session_autogen_mode.currentIndexChanged.connect(self._on_session_autogen_mode_changed)
+        self.sb_session_max_videos.valueChanged.connect(self._on_session_max_videos_changed)
+
+        self._refresh_sessions_choices()
+        self._refresh_sessions_list()
+        self._on_session_selection_changed()
+
+        return tab
+
     def _wire(self):
         # статусы/лог — безопасные слоты GUI-потока
         self.sig_set_status.connect(self._slot_set_status)
@@ -3238,6 +6278,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.cmb_chrome_profile_top.currentIndexChanged.connect(self._on_top_chrome_profile_changed)
         self.btn_scan_profiles_top.clicked.connect(self._on_toolbar_scan_profiles)
+        if hasattr(self, "btn_toggle_commands"):
+            self.btn_toggle_commands.toggled.connect(self._on_toolbar_commands_toggle)
         self.btn_open_chrome.clicked.connect(self._open_chrome)
         self.btn_open_root.clicked.connect(lambda: open_in_finder(self.cfg.get("project_root", PROJECT_ROOT)))
         self.btn_open_raw.clicked.connect(lambda: open_in_finder(self.cfg.get("downloads_dir", DL_DIR)))
@@ -3250,6 +6292,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self.chk_activity_visible.toggled.connect(self._on_activity_toggle)
         self.ed_activity_filter.textChanged.connect(self._on_activity_filter_changed)
         self.btn_activity_export.clicked.connect(self._export_activity_log)
+        if hasattr(self, "lst_custom_commands"):
+            self.lst_custom_commands.itemSelectionChanged.connect(self._update_custom_command_buttons)
+        if hasattr(self, "btn_custom_add"):
+            self.btn_custom_add.clicked.connect(self._on_custom_command_add)
+        if hasattr(self, "btn_custom_edit"):
+            self.btn_custom_edit.clicked.connect(self._on_custom_command_edit)
+        if hasattr(self, "btn_custom_delete"):
+            self.btn_custom_delete.clicked.connect(self._on_custom_command_remove)
+        if hasattr(self, "btn_custom_up"):
+            self.btn_custom_up.clicked.connect(lambda _, direction=-1: self._on_custom_command_move(direction))
+        if hasattr(self, "btn_custom_down"):
+            self.btn_custom_down.clicked.connect(lambda _, direction=1: self._on_custom_command_move(direction))
+        if hasattr(self, "cb_quick_activity"):
+            self.cb_quick_activity.toggled.connect(lambda checked: self._apply_activity_visibility(bool(checked), persist=True))
+        if hasattr(self, "cmb_quick_density"):
+            self.cmb_quick_density.currentIndexChanged.connect(
+                lambda _: self._apply_activity_density(self.cmb_quick_density.currentData() or "compact", persist=True)
+            )
 
         self.btn_load_prompts.clicked.connect(self._load_prompts)
         self.btn_save_prompts.clicked.connect(self._save_prompts)
@@ -3279,6 +6339,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_maintenance_cleanup.clicked.connect(lambda: self._run_maintenance_cleanup(manual=True))
         self.btn_maintenance_sizes.clicked.connect(self._report_dir_sizes)
         self.cmb_ui_activity_density.currentIndexChanged.connect(self._on_activity_density_changed)
+        if hasattr(self, "cb_ui_show_context"):
+            self.cb_ui_show_context.toggled.connect(self._on_settings_show_context_changed)
         self.cmb_active_preset.currentTextChanged.connect(self._on_active_preset_changed)
         self.btn_preset_add.clicked.connect(self._on_preset_add)
         self.btn_preset_delete.clicked.connect(self._on_preset_delete)
@@ -3319,6 +6381,59 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_tt_set_active.clicked.connect(self._on_tiktok_set_active)
         self.btn_tt_secret.clicked.connect(lambda: self._browse_file(self.ed_tt_secret, "Выбери файл секретов", "JSON (*.json);;YAML (*.yaml *.yml);;Все файлы (*.*)"))
         self.btn_tt_secret_load.clicked.connect(self._load_tiktok_secret_file)
+        if hasattr(self, "btn_context_session_window"):
+            self.btn_context_session_window.clicked.connect(self._on_session_open_window)
+        if hasattr(self, "btn_context_session_prompts"):
+            self.btn_context_session_prompts.clicked.connect(self._on_session_run_prompts)
+        if hasattr(self, "btn_context_session_images"):
+            self.btn_context_session_images.clicked.connect(self._on_session_run_images)
+        if hasattr(self, "btn_context_session_download"):
+            self.btn_context_session_download.clicked.connect(self._on_session_run_download)
+        if hasattr(self, "btn_context_tg_test"):
+            self.btn_context_tg_test.clicked.connect(self._test_tg_settings)
+        if hasattr(self, "btn_context_tg_open"):
+            self.btn_context_tg_open.clicked.connect(lambda: self._select_section("telegram"))
+        if hasattr(self, "btn_context_refresh_queues"):
+            self.btn_context_refresh_queues.clicked.connect(self._update_youtube_queue_label)
+            self.btn_context_refresh_queues.clicked.connect(self._update_tiktok_queue_label)
+        if hasattr(self, "btn_context_open_project"):
+            self.btn_context_open_project.clicked.connect(
+                lambda: open_in_finder(self.cfg.get("project_root", str(PROJECT_ROOT)))
+            )
+        if hasattr(self, "btn_context_open_prompts"):
+            self.btn_context_open_prompts.clicked.connect(
+                lambda: open_in_finder(str(self._prompts_path()))
+            )
+        if hasattr(self, "btn_context_open_image_prompts"):
+            self.btn_context_open_image_prompts.clicked.connect(
+                lambda: open_in_finder(str(self._image_prompts_path()))
+            )
+        if hasattr(self, "btn_context_open_titles"):
+            self.btn_context_open_titles.clicked.connect(
+                lambda: open_in_finder(self.cfg.get("titles_file", str(TITLES_FILE)))
+            )
+        if hasattr(self, "cb_tg_enabled"):
+            self.cb_tg_enabled.toggled.connect(lambda _: self._refresh_telegram_context())
+        if hasattr(self, "btn_preset_full_cycle"):
+            self.btn_preset_full_cycle.clicked.connect(
+                lambda: self._apply_task_preset(
+                    "Полный цикл",
+                    ["images", "prompts", "download", "blur", "merge", "youtube", "tiktok"],
+                )
+            )
+        if hasattr(self, "btn_preset_generate"):
+            self.btn_preset_generate.clicked.connect(
+                lambda: self._apply_task_preset(
+                    "Генерация + постинг",
+                    ["images", "prompts", "youtube", "tiktok"],
+                )
+            )
+        if hasattr(self, "btn_preset_prompts_only"):
+            self.btn_preset_prompts_only.clicked.connect(
+                lambda: self._apply_task_preset("Только промпты", ["prompts"])
+            )
+        if hasattr(self, "btn_preset_clear"):
+            self.btn_preset_clear.clicked.connect(lambda: self._apply_task_preset("Сброс", []))
         self.cb_tiktok_schedule.toggled.connect(self._toggle_tiktok_schedule)
         self.cb_tiktok_schedule.toggled.connect(lambda _: self._update_tiktok_queue_label())
         self.cb_tiktok_draft.toggled.connect(lambda _: self._update_tiktok_queue_label())
@@ -3352,13 +6467,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_browse_merged.clicked.connect(lambda: self._browse_dir(self.ed_merged, "Выбери папку MERGED"))
         self.btn_browse_blur_src.clicked.connect(lambda: self._browse_dir(self.ed_blur_src, "Выбери ИСТОЧНИК для BLUR"))
         self.btn_browse_merge_src.clicked.connect(lambda: self._browse_dir(self.ed_merge_src, "Выбери ИСТОЧНИК для MERGE"))
-        if hasattr(self, "btn_browse_images_dir"):
-            self.btn_browse_images_dir.clicked.connect(lambda: self._browse_dir(self.ed_images_dir, "Выбери папку для изображений"))
         if hasattr(self, "btn_browse_history_path"):
             self.btn_browse_history_path.clicked.connect(lambda: self._browse_file(self.ed_history_path, "Выбери файл истории", "JSONL (*.jsonl);;Все файлы (*.*)"))
         if hasattr(self, "btn_browse_titles_path"):
             self.btn_browse_titles_path.clicked.connect(lambda: self._browse_file(self.ed_titles_path, "Выбери файл названий", "Текстовые файлы (*.txt);;Все файлы (*.*)"))
         self.btn_genai_output_browse.clicked.connect(lambda: self._browse_dir(self.ed_genai_output_dir, "Выбери папку для изображений"))
+        self.btn_genai_usage_browse.clicked.connect(
+            lambda: self._browse_file(
+                self.ed_genai_usage_file,
+                "Выбери файл статистики",
+                "JSON (*.json);;Все файлы (*.*)",
+            )
+        )
 
         for button_attr, line_attr in [
             ("btn_open_root_path", "ed_root"),
@@ -3367,7 +6487,6 @@ class MainWindow(QtWidgets.QMainWindow):
             ("btn_open_merged_path", "ed_merged"),
             ("btn_open_blur_src_path", "ed_blur_src"),
             ("btn_open_merge_src_path", "ed_merge_src"),
-            ("btn_open_images_dir", "ed_images_dir"),
             ("btn_open_history_path", "ed_history_path"),
             ("btn_open_titles_path", "ed_titles_path"),
             ("btn_youtube_src_open", "ed_youtube_src"),
@@ -3375,15 +6494,12 @@ class MainWindow(QtWidgets.QMainWindow):
             ("btn_tiktok_src_open", "ed_tiktok_src"),
             ("btn_tiktok_archive_open", "ed_tiktok_archive"),
             ("btn_genai_output_open", "ed_genai_output_dir"),
+            ("btn_genai_usage_open", "ed_genai_usage_file"),
         ]:
             button = getattr(self, button_attr, None)
             line = getattr(self, line_attr, None)
             if isinstance(button, QtWidgets.QAbstractButton) and isinstance(line, QtWidgets.QLineEdit):
                 button.clicked.connect(lambda _, l=line: self._open_path_from_edit(l))
-
-        if hasattr(self, "ed_images_dir") and hasattr(self, "ed_genai_output_dir"):
-            self.ed_images_dir.textEdited.connect(lambda _: self._sync_image_dirs(from_catalog=True))
-            self.ed_genai_output_dir.textEdited.connect(lambda _: self._sync_image_dirs(from_catalog=False))
 
     def _init_state(self):
         self.runner_autogen = ProcRunner("AUTOGEN")
@@ -3570,7 +6686,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _gather_used_prompts(self) -> List[Tuple[str, str, str]]:
         rows: List[Tuple[str, str, str]] = []
-        seen: set[Path] = set()
+        seen: Set[Path] = set()
 
         def collect(path_str: Optional[str], instance_name: str):
             if not path_str:
@@ -3589,9 +6705,22 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._append_activity(f"Не удалось прочитать {path}: {exc}", kind="error", card_text=False)
 
         auto_cfg = self.cfg.get("autogen", {}) or {}
-        collect(auto_cfg.get("submitted_log"), "Основной")
         for inst in auto_cfg.get("instances", []) or []:
             collect(inst.get("submitted_log"), inst.get("name") or "Instance")
+
+        profile_keys: List[str] = [PROMPTS_DEFAULT_KEY]
+        chrome_profiles = self.cfg.get("chrome", {}).get("profiles", []) or []
+        for prof in chrome_profiles:
+            if not isinstance(prof, dict):
+                continue
+            name = prof.get("name")
+            if name:
+                profile_keys.append(name)
+
+        for key in profile_keys:
+            label = self._prompt_profile_label(key)
+            log_path = self._profile_submitted_log_path(key)
+            collect(str(log_path), label)
 
         def _sort_key(row: Tuple[str, str, str]):
             ts, _, prompt = row
@@ -3622,13 +6751,23 @@ class MainWindow(QtWidgets.QMainWindow):
     def _clear_used_prompts(self):
         if not hasattr(self, "tbl_used_prompts"):
             return
-        paths = set()
+        paths: Set[Path] = set()
         auto_cfg = self.cfg.get("autogen", {}) or {}
-        if auto_cfg.get("submitted_log"):
-            paths.add(_project_path(auto_cfg.get("submitted_log")))
         for inst in auto_cfg.get("instances", []) or []:
             if inst.get("submitted_log"):
                 paths.add(_project_path(inst.get("submitted_log")))
+
+        profile_keys: List[str] = [PROMPTS_DEFAULT_KEY]
+        chrome_profiles = self.cfg.get("chrome", {}).get("profiles", []) or []
+        for prof in chrome_profiles:
+            if not isinstance(prof, dict):
+                continue
+            name = prof.get("name")
+            if name:
+                profile_keys.append(name)
+
+        for key in profile_keys:
+            paths.add(self._profile_submitted_log_path(key))
         if not paths:
             self._post_status("Журналов нет", state="idle")
             return
@@ -3658,7 +6797,15 @@ class MainWindow(QtWidgets.QMainWindow):
             self._update_current_event(display, kind)
 
         stamp = time.strftime("%H:%M:%S")
-        display_text = f"{stamp} · {text}"
+        emoji_map = {
+            "info": "ℹ️",
+            "running": "🔄",
+            "success": "✅",
+            "error": "❌",
+            "warn": "⚠️",
+        }
+        emoji = emoji_map.get(kind, "ℹ️")
+        display_text = f"{stamp} · {emoji} {text}"
         item = QtWidgets.QListWidgetItem(display_text)
         palette = {
             "info": ("#93c5fd", "#15223c"),
@@ -3673,14 +6820,6 @@ class MainWindow(QtWidgets.QMainWindow):
         item.setForeground(brush_fg)
         item.setBackground(brush_bg)
         item.setTextAlignment(int(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter))
-        icon_map = {
-            "info": QtWidgets.QStyle.StandardPixmap.SP_MessageBoxInformation,
-            "running": QtWidgets.QStyle.StandardPixmap.SP_BrowserReload,
-            "success": QtWidgets.QStyle.StandardPixmap.SP_DialogApplyButton,
-            "error": QtWidgets.QStyle.StandardPixmap.SP_MessageBoxCritical,
-            "warn": QtWidgets.QStyle.StandardPixmap.SP_MessageBoxWarning,
-        }
-        item.setIcon(self.style().standardIcon(icon_map.get(kind, QtWidgets.QStyle.StandardPixmap.SP_MessageBoxInformation)))
         item.setData(QtCore.Qt.ItemDataRole.UserRole, text.lower())
         self._style_activity_item(item)
         self.lst_activity.addItem(item)
@@ -3688,6 +6827,104 @@ class MainWindow(QtWidgets.QMainWindow):
             self.lst_activity.takeItem(0)
         self.lst_activity.scrollToBottom()
         self._apply_activity_filter()
+
+        if "telegram" in text.lower():
+            self._record_telegram_activity(display_text, kind)
+
+    def _ensure_telegram_cache(self) -> deque:
+        cache = getattr(self, "_telegram_activity_cache", None)
+        if cache is None:
+            cache = deque(maxlen=200)
+            self._telegram_activity_cache = cache
+        return cache
+
+    def _append_telegram_history_item(self, display: str, kind: str):
+        if not hasattr(self, "lst_tg_history") or self.lst_tg_history is None:
+            return
+        palette = {
+            "info": "#93c5fd",
+            "running": "#facc15",
+            "success": "#34d399",
+            "error": "#f87171",
+            "warn": "#facc15",
+        }
+        item = QtWidgets.QListWidgetItem(display)
+        item.setForeground(QtGui.QColor(palette.get(kind, palette["info"])))
+        item.setTextAlignment(int(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter))
+        self.lst_tg_history.addItem(item)
+        while self.lst_tg_history.count() > 120:
+            self.lst_tg_history.takeItem(0)
+        self.lst_tg_history.scrollToBottom()
+
+    def _record_telegram_activity(self, display: str, kind: str):
+        cache = self._ensure_telegram_cache()
+        cache.append((display, kind))
+        self._append_telegram_history_item(display, kind)
+
+    def _refresh_telegram_history(self):
+        if not hasattr(self, "lst_tg_history") or self.lst_tg_history is None:
+            return
+        cache = self._ensure_telegram_cache()
+        self.lst_tg_history.blockSignals(True)
+        self.lst_tg_history.clear()
+        for display, kind in list(cache)[-120:]:
+            self._append_telegram_history_item(display, kind)
+        self.lst_tg_history.blockSignals(False)
+
+    def _clear_telegram_history(self):
+        cache = self._ensure_telegram_cache()
+        cache.clear()
+        if hasattr(self, "lst_tg_history") and self.lst_tg_history is not None:
+            self.lst_tg_history.clear()
+
+    def _send_quick_telegram(self):
+        message = self.ed_tg_quick_message.toPlainText().strip()
+        if not message:
+            self.lbl_tg_status.setText("Введите текст сообщения перед отправкой")
+            self.lbl_tg_status.setStyleSheet("QLabel{color:#facc15;}")
+            return
+        delay = int(self.sb_tg_quick_delay.value()) if hasattr(self, "sb_tg_quick_delay") else 0
+        short = message if len(message) <= 60 else f"{message[:57]}…"
+        if delay > 0:
+            timer = QtCore.QTimer(self)
+            timer.setSingleShot(True)
+
+            def dispatch(msg: str = message, label: str = short, timer_ref: QtCore.QTimer = timer):
+                ok_inner = self._send_tg(msg)
+                color = "#34d399" if ok_inner else "#f87171"
+                status = "Сообщение отправлено" if ok_inner else "Не удалось отправить сообщение"
+                self.lbl_tg_status.setText(status)
+                self.lbl_tg_status.setStyleSheet(f"QLabel{{color:{color};}}")
+                entry = f"Telegram ⏱ {label}"
+                self._record_telegram_activity(entry, "success" if ok_inner else "error")
+                self._pending_tg_jobs = [job for job in self._pending_tg_jobs if job[0] is not timer_ref]
+
+            timer.timeout.connect(dispatch)
+            timer.start(int(delay) * 60 * 1000)
+            self._pending_tg_jobs.append((timer, message))
+            self.lbl_tg_status.setText(f"Запланировано через {delay} мин")
+            self.lbl_tg_status.setStyleSheet("QLabel{color:#38bdf8;}")
+            self._record_telegram_activity(
+                f"Telegram ⏱ через {delay} мин — {short}",
+                "running",
+            )
+            return
+
+        ok = self._send_tg(message)
+        if ok:
+            self.lbl_tg_status.setText("Сообщение отправлено")
+            self.lbl_tg_status.setStyleSheet("QLabel{color:#34d399;}")
+            self.ed_tg_quick_message.clear()
+            self._record_telegram_activity(f"Telegram ✓ {short}", "success")
+        else:
+            self.lbl_tg_status.setText("Не удалось отправить сообщение")
+            self.lbl_tg_status.setStyleSheet("QLabel{color:#f87171;}")
+            self._record_telegram_activity(f"Telegram ✗ {short}", "error")
+
+    def _clear_quick_telegram_message(self):
+        self.ed_tg_quick_message.clear()
+        self.lbl_tg_status.setText("Готово к отправке")
+        self.lbl_tg_status.setStyleSheet("QLabel{color:#94a3b8;}")
 
     @QtCore.pyqtSlot(str)
     def _slot_log(self, text: str):
@@ -3848,6 +7085,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.chk_activity_visible.blockSignals(True)
             self.chk_activity_visible.setChecked(bool(visible))
             self.chk_activity_visible.blockSignals(False)
+        if hasattr(self, "cb_quick_activity"):
+            self.cb_quick_activity.blockSignals(True)
+            self.cb_quick_activity.setChecked(bool(visible))
+            self.cb_quick_activity.blockSignals(False)
         if hasattr(self, "cb_ui_show_activity"):
             self.cb_ui_show_activity.blockSignals(True)
             self.cb_ui_show_activity.setChecked(bool(visible))
@@ -3855,6 +7096,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cfg.setdefault("ui", {})["show_activity"] = bool(visible)
         if persist:
             save_cfg(self.cfg)
+        self._refresh_overview_context()
 
     @QtCore.pyqtSlot(str)
     def _update_vcodec_ui(self, text: str):
@@ -3891,6 +7133,19 @@ class MainWindow(QtWidgets.QMainWindow):
             f"QListWidget::item{{margin:{margin};padding:{padding};border-radius:{radius};background:#172235;}}"
         )
 
+        if hasattr(self, "cmb_quick_density"):
+            self.cmb_quick_density.blockSignals(True)
+            idx = self.cmb_quick_density.findData(density)
+            if idx >= 0:
+                self.cmb_quick_density.setCurrentIndex(idx)
+            self.cmb_quick_density.blockSignals(False)
+        if hasattr(self, "cmb_ui_activity_density"):
+            self.cmb_ui_activity_density.blockSignals(True)
+            idx_ui = self.cmb_ui_activity_density.findData(density)
+            if idx_ui >= 0:
+                self.cmb_ui_activity_density.setCurrentIndex(idx_ui)
+            self.cmb_ui_activity_density.blockSignals(False)
+
         for idx in range(self.lst_activity.count()):
             item = self.lst_activity.item(idx)
             if item:
@@ -3899,6 +7154,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cfg.setdefault("ui", {})["activity_density"] = density
         if persist:
             save_cfg(self.cfg)
+        self._refresh_overview_context()
 
     def _style_activity_item(self, item: QtWidgets.QListWidgetItem, density: Optional[str] = None):
         density = density or self.cfg.get("ui", {}).get("activity_density", "compact")
@@ -3950,13 +7206,20 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._scenario_waiters[tag].set()
 
     # ----- Chrome (через тень профиля) -----
-    def _open_chrome(self):
-        try:
-            port = int(self.cfg.get("chrome", {}).get("cdp_port", 9222))
-        except Exception:
-            port = 9222
-
+    def _open_chrome(self, *, session: Optional[Dict[str, Any]] = None):
         ch = self.cfg.get("chrome", {})
+        if session:
+            try:
+                port = int(self._session_chrome_port(session))
+            except Exception:
+                port = 9222
+            override_profile = session.get("chrome_profile") or session.get("prompt_profile") or ""
+        else:
+            override_profile = None
+            try:
+                port = int(self._resolve_chrome_port(ch.get("active_profile", "")))
+            except Exception:
+                port = 9222
         if sys.platform == "darwin":
             default_chrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
         elif sys.platform.startswith("win"):
@@ -3965,7 +7228,7 @@ class MainWindow(QtWidgets.QMainWindow):
             default_chrome = "google-chrome"
         chrome_bin = os.path.expandvars(ch.get("binary") or default_chrome)
         profiles = ch.get("profiles", [])
-        active_name = ch.get("active_profile", "")
+        active_name = override_profile if session else ch.get("active_profile", "")
         fallback_userdir = os.path.expandvars(ch.get("user_data_dir", "") or "")
 
         # уже поднят CDP?
@@ -3975,7 +7238,18 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # активный профиль
         active = None
-        if active_name:
+        if session and active_name:
+            for p in profiles:
+                if p.get("name") == active_name:
+                    active = p
+                    break
+            if not active:
+                # если имя указано напрямую, пробуем искать по директории профиля
+                for p in profiles:
+                    if p.get("profile_directory") == active_name:
+                        active = p
+                        break
+        elif active_name:
             for p in profiles:
                 if p.get("name") == active_name:
                     active = p
@@ -4023,8 +7297,18 @@ class MainWindow(QtWidgets.QMainWindow):
             t0 = time.time()
             while time.time() - t0 < 10:
                 if cdp_ready(port):
-                    self._post_status(f"Chrome c CDP {port} (профиль: {active_name or 'shadow'})", state="ok")
-                    append_history(self.cfg, {"event": "chrome_launch", "port": port, "profile": active_name, "shadow": str(shadow_root)})
+                    profile_label = active_name or (session.get("name") if session else "shadow")
+                    self._post_status(f"Chrome c CDP {port} (профиль: {profile_label})", state="ok")
+                    append_history(
+                        self.cfg,
+                        {
+                            "event": "chrome_launch",
+                            "port": port,
+                            "profile": active_name,
+                            "session": session.get("id") if session else None,
+                            "shadow": str(shadow_root),
+                        },
+                    )
                     return
                 time.sleep(0.25)
 
@@ -4044,6 +7328,164 @@ class MainWindow(QtWidgets.QMainWindow):
         auto_cfg = self.cfg.get("autogen", {}) or {}
         raw = auto_cfg.get("image_prompts_file") or str(WORKERS_DIR / "autogen" / "image_prompts.txt")
         return _project_path(raw)
+
+    def _session_prompts_path(self, session: Dict[str, Any]) -> Path:
+        custom = session.get("prompts_file")
+        if custom:
+            return _project_path(custom)
+        profile_key = session.get("prompt_profile") or PROMPTS_DEFAULT_KEY
+        return self._prompts_path(profile_key)
+
+    def _session_image_prompts_path(self, session: Dict[str, Any]) -> Path:
+        custom = session.get("image_prompts_file")
+        if custom:
+            return _project_path(custom)
+        return self._image_prompts_path()
+
+    def _session_submitted_log_path(self, session: Dict[str, Any]) -> Path:
+        custom = session.get("submitted_log")
+        if custom:
+            return _project_path(custom)
+        profile_key = session.get("prompt_profile") or PROMPTS_DEFAULT_KEY
+        return self._profile_submitted_log_path(profile_key)
+
+    def _session_failed_log_path(self, session: Dict[str, Any]) -> Path:
+        custom = session.get("failed_log")
+        if custom:
+            return _project_path(custom)
+        profile_key = session.get("prompt_profile") or PROMPTS_DEFAULT_KEY
+        return self._profile_failed_log_path(profile_key)
+
+    def _session_chrome_port(self, session: Dict[str, Any]) -> int:
+        port = _coerce_int(session.get("cdp_port"))
+        profile_key = session.get("prompt_profile") or PROMPTS_DEFAULT_KEY
+        if port and port > 0:
+            return port
+        return self._resolve_chrome_port(profile_key)
+
+    def _session_instance_label(self, session: Dict[str, Any]) -> str:
+        name = str(session.get("name") or "").strip()
+        if name:
+            return name
+        profile_key = session.get("prompt_profile") or PROMPTS_DEFAULT_KEY
+        return self._prompt_profile_label(profile_key)
+
+    def _session_download_dir(self, session: Dict[str, Any], *, ensure: bool = False) -> Path:
+        custom = session.get("download_dir")
+        if custom:
+            path = _project_path(custom)
+        else:
+            base = _project_path(self.cfg.get("downloads_dir", str(DL_DIR)))
+            slug = slugify(self._session_instance_label(session))
+            path = base / "sessions" / slug
+        if ensure:
+            try:
+                path.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+        return path
+
+    def _session_titles_path(self, session: Dict[str, Any]) -> Path:
+        custom = session.get("titles_file")
+        if custom:
+            return _project_path(custom)
+        base_path = _project_path(self.cfg.get("titles_file", str(TITLES_FILE)))
+        slug = slugify(self._session_instance_label(session))
+        stem = base_path.stem or "titles"
+        suffix = base_path.suffix or ".txt"
+        return base_path.with_name(f"{stem}_{slug}{suffix}")
+
+    def _session_cursor_path(self, session: Dict[str, Any]) -> Path:
+        custom = session.get("cursor_file")
+        if custom:
+            return _project_path(custom)
+        titles_path = self._session_titles_path(session)
+        return Path(os.path.splitext(str(titles_path))[0] + ".cursor")
+
+    def _session_download_limit(self, session: Dict[str, Any]) -> int:
+        limit = _coerce_int(session.get("max_videos")) or 0
+        if limit and limit > 0:
+            return int(limit)
+        dl_cfg = self.cfg.get("downloader", {}) or {}
+        return int(dl_cfg.get("max_videos", 0) or 0)
+
+    def _session_download_limit_label(self, session: Dict[str, Any]) -> str:
+        limit = _coerce_int(session.get("max_videos")) or 0
+        if limit and limit > 0:
+            return f"{limit}"
+        global_limit = int((self.cfg.get("downloader", {}) or {}).get("max_videos", 0) or 0)
+        if global_limit > 0:
+            return f"{global_limit} (глобально)"
+        return "без лимита"
+
+    def _session_env(self, session_id: str, *, force_images: Optional[bool] = None, images_only: bool = False) -> dict:
+        session = self._session_cache.get(session_id)
+        if not session:
+            return self._autogen_env(force_images=force_images, images_only=images_only)
+
+        profile_key = session.get("prompt_profile") or PROMPTS_DEFAULT_KEY
+        prompts_path = self._session_prompts_path(session)
+        submitted_log = self._session_submitted_log_path(session)
+        failed_log = self._session_failed_log_path(session)
+        image_prompts = self._session_image_prompts_path(session)
+        port = self._session_chrome_port(session)
+        label = self._session_instance_label(session)
+        env = self._autogen_env(
+            force_images=force_images,
+            images_only=images_only,
+            profile_key=profile_key,
+            prompts_path=prompts_path,
+            chrome_port=port,
+            submitted_log=submitted_log,
+            failed_log=failed_log,
+            image_prompts_path=image_prompts,
+            instance_name=label,
+        )
+        env["SORA_SESSION_ID"] = session_id
+        return env
+
+    def _chrome_profile_by_name(self, name: Optional[str]) -> Optional[Dict[str, Any]]:
+        if not name:
+            return None
+        chrome_cfg = self.cfg.get("chrome", {}) or {}
+        for prof in chrome_cfg.get("profiles", []) or []:
+            if not isinstance(prof, dict):
+                continue
+            if prof.get("name") == name:
+                return prof
+        return None
+
+    def _resolve_chrome_port(self, profile_name: Optional[str] = None) -> int:
+        chrome_cfg = self.cfg.get("chrome", {}) or {}
+        fallback = _coerce_int(chrome_cfg.get("cdp_port")) or 9222
+        target = profile_name
+        if not target or target == PROMPTS_DEFAULT_KEY:
+            target = chrome_cfg.get("active_profile", "") or ""
+        if target and target != PROMPTS_DEFAULT_KEY:
+            prof = self._chrome_profile_by_name(target)
+            if prof:
+                port = _coerce_int(prof.get("cdp_port"))
+                if port and port > 0:
+                    return port
+        return fallback
+
+    def _profile_log_path(self, base_value: Optional[str], profile_key: Optional[str], default_filename: str) -> Path:
+        base_raw = base_value or str(WORKERS_DIR / "autogen" / default_filename)
+        base_path = _project_path(base_raw)
+        if not profile_key or profile_key == PROMPTS_DEFAULT_KEY:
+            return base_path
+        slug = slugify(str(profile_key)) or "profile"
+        suffix = base_path.suffix or Path(default_filename).suffix or ".log"
+        stem = base_path.stem or Path(default_filename).stem or "log"
+        return base_path.with_name(f"{stem}_{slug}{suffix}")
+
+    def _profile_submitted_log_path(self, profile_key: Optional[str]) -> Path:
+        auto_cfg = self.cfg.get("autogen", {}) or {}
+        return self._profile_log_path(auto_cfg.get("submitted_log"), profile_key, "submitted.log")
+
+    def _profile_failed_log_path(self, profile_key: Optional[str]) -> Path:
+        auto_cfg = self.cfg.get("autogen", {}) or {}
+        return self._profile_log_path(auto_cfg.get("failed_log"), profile_key, "failed.log")
 
     def _load_prompts(self):
         path = self._prompts_path()
@@ -4088,10 +7530,38 @@ class MainWindow(QtWidgets.QMainWindow):
         if path:
             open_in_finder(path)
 
-    def _autogen_env(self, force_images: Optional[bool] = None, *, images_only: bool = False) -> dict:
+    def _autogen_env(
+        self,
+        force_images: Optional[bool] = None,
+        *,
+        images_only: bool = False,
+        profile_key: Optional[str] = None,
+        prompts_path: Optional[Union[str, Path]] = None,
+        chrome_port: Optional[int] = None,
+        submitted_log: Optional[Union[str, Path]] = None,
+        failed_log: Optional[Union[str, Path]] = None,
+        image_prompts_path: Optional[Union[str, Path]] = None,
+        instance_name: Optional[str] = None,
+    ) -> dict:
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
-        env["SORA_PROMPTS_FILE"] = str(self._prompts_path())
+        if profile_key is None:
+            profile_key = getattr(self, "_current_prompt_profile_key", PROMPTS_DEFAULT_KEY) or PROMPTS_DEFAULT_KEY
+        prompts_file = prompts_path or self._prompts_path(profile_key)
+        env["SORA_PROMPTS_FILE"] = str(_project_path(prompts_file))
+        instance_label = instance_name or self._prompt_profile_label(profile_key)
+        env["SORA_INSTANCE_NAME"] = instance_label
+        submitted_path = submitted_log or self._profile_submitted_log_path(profile_key)
+        failed_path = failed_log or self._profile_failed_log_path(profile_key)
+        try:
+            Path(submitted_path).parent.mkdir(parents=True, exist_ok=True)
+            Path(failed_path).parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        env["SORA_SUBMITTED_LOG"] = str(_project_path(submitted_path))
+        env["SORA_FAILED_LOG"] = str(_project_path(failed_path))
+        port = chrome_port or self._resolve_chrome_port(profile_key)
+        env["SORA_CDP_ENDPOINT"] = f"http://127.0.0.1:{int(port)}"
         genai_cfg = self.cfg.get("google_genai", {}) or {}
         genai_enabled = bool(genai_cfg.get("enabled"))
         if force_images is True:
@@ -4112,11 +7582,29 @@ class MainWindow(QtWidgets.QMainWindow):
         env["GENAI_MAX_RETRIES"] = str(int(genai_cfg.get("max_retries", 3) or 0))
         env["GENAI_OUTPUT_DIR"] = str(_project_path(genai_cfg.get("output_dir", str(IMAGES_DIR))))
         env["GENAI_BASE_DIR"] = str(_project_path(self.cfg.get("project_root", PROJECT_ROOT)))
-        env["GENAI_PROMPTS_DIR"] = str(self._prompts_path().parent.resolve())
-        env["GENAI_IMAGE_PROMPTS_FILE"] = str(self._image_prompts_path())
+        env["GENAI_PROMPTS_DIR"] = str(Path(env["SORA_PROMPTS_FILE"]).parent.resolve())
+        image_prompts = image_prompts_path or self._image_prompts_path()
+        env["GENAI_IMAGE_PROMPTS_FILE"] = str(_project_path(image_prompts))
         env["GENAI_ATTACH_TO_SORA"] = "1" if bool(genai_cfg.get("attach_to_sora", True)) else "0"
         manifest_raw = genai_cfg.get("manifest_file") or (Path(genai_cfg.get("output_dir", str(IMAGES_DIR))) / "manifest.json")
         env["GENAI_MANIFEST_FILE"] = str(_project_path(manifest_raw))
+        seeds_value = genai_cfg.get("seeds", "")
+        if isinstance(seeds_value, (list, tuple)):
+            seeds_text = ",".join(str(item).strip() for item in seeds_value if str(item).strip())
+        else:
+            seeds_text = str(seeds_value or "").strip()
+        env["GENAI_SEEDS"] = seeds_text
+        env["GENAI_CONSISTENT_CHARACTER"] = "1" if bool(genai_cfg.get("consistent_character_design")) else "0"
+        env["GENAI_LENS_TYPE"] = str(genai_cfg.get("lens_type", "")).strip()
+        env["GENAI_COLOR_PALETTE"] = str(genai_cfg.get("color_palette", "")).strip()
+        env["GENAI_STYLE_PRESET"] = str(genai_cfg.get("style", "")).strip()
+        env["GENAI_REFERENCE_HINT"] = str(genai_cfg.get("reference_prompt", "")).strip()
+        env["GENAI_QUOTA_ENABLED"] = "1" if bool(genai_cfg.get("notifications_enabled", True)) else "0"
+        env["GENAI_DAILY_QUOTA"] = str(int(genai_cfg.get("daily_quota", 0) or 0))
+        env["GENAI_QUOTA_WARNING_LEFT"] = str(int(genai_cfg.get("quota_warning_prompts", 0) or 0))
+        env["GENAI_QUOTA_ENFORCE"] = "1" if bool(genai_cfg.get("quota_enforce", False)) else "0"
+        usage_raw = genai_cfg.get("usage_file") or str(Path(genai_cfg.get("output_dir", str(IMAGES_DIR))) / "usage.json")
+        env["GENAI_USAGE_FILE"] = str(_project_path(usage_raw))
         env["GENAI_IMAGES_ONLY"] = "1" if images_only else "0"
         return env
 
@@ -5850,19 +9338,30 @@ class MainWindow(QtWidgets.QMainWindow):
         tg_cfg["enabled"] = bool(self.cb_tg_enabled.isChecked())
         tg_cfg["bot_token"] = self.ed_tg_token.text().strip()
         tg_cfg["chat_id"] = self.ed_tg_chat.text().strip()
+        tg_cfg["templates"] = list(self._telegram_templates)
+        if hasattr(self, "cmb_tg_templates"):
+            data = self.cmb_tg_templates.currentData()
+            if data is not None:
+                try:
+                    tg_cfg["last_template"] = self._telegram_templates[int(data)].get("name", "")
+                except (IndexError, ValueError, TypeError):
+                    pass
+        tg_cfg["quick_delay_minutes"] = int(self.sb_tg_quick_delay.value()) if hasattr(self, "sb_tg_quick_delay") else tg_cfg.get("quick_delay_minutes", 0)
 
         dl_cfg = self.cfg.setdefault("downloader", {})
         dl_cfg["max_videos"] = int(self.sb_max_videos.value())
 
         ui_cfg = self.cfg.setdefault("ui", {})
         ui_cfg["show_activity"] = bool(self.cb_ui_show_activity.isChecked())
+        ui_cfg["show_context"] = bool(self.cb_ui_show_context.isChecked()) if hasattr(self, "cb_ui_show_context") else ui_cfg.get("show_context", True)
         ui_cfg["activity_density"] = self.cmb_ui_activity_density.currentData() or "compact"
+        ui_cfg["custom_commands"] = list(self._custom_commands)
 
         genai_cfg = self.cfg.setdefault("google_genai", {})
         genai_cfg["enabled"] = bool(self.cb_genai_enabled.isChecked())
         genai_cfg["attach_to_sora"] = bool(self.cb_genai_attach.isChecked())
         genai_cfg["api_key"] = self.ed_genai_api_key.text().strip()
-        genai_cfg["model"] = self.ed_genai_model.text().strip() or "models/imagen-4.0-generate-001"
+        genai_cfg["model"] = self.cmb_genai_model.currentText().strip() or "models/imagen-4.0-generate-001"
         current_person = self.cmb_genai_person.currentData()
         if isinstance(current_person, str) and current_person:
             value = current_person
@@ -5875,17 +9374,30 @@ class MainWindow(QtWidgets.QMainWindow):
         genai_cfg["number_of_images"] = int(self.sb_genai_images.value())
         genai_cfg["rate_limit_per_minute"] = int(self.sb_genai_rpm.value())
         genai_cfg["max_retries"] = int(self.sb_genai_retries.value())
-        images_dir_value = self.ed_genai_output_dir.text().strip() or self.ed_images_dir.text().strip() or str(IMAGES_DIR)
+        images_dir_value = self.ed_genai_output_dir.text().strip() or str(IMAGES_DIR)
         genai_cfg["output_dir"] = images_dir_value
-        if hasattr(self, "ed_images_dir"):
-            self.ed_images_dir.blockSignals(True)
-            self.ed_images_dir.setText(images_dir_value)
-            self.ed_images_dir.blockSignals(False)
         if hasattr(self, "ed_genai_output_dir"):
             self.ed_genai_output_dir.blockSignals(True)
             self.ed_genai_output_dir.setText(images_dir_value)
             self.ed_genai_output_dir.blockSignals(False)
         genai_cfg["manifest_file"] = str(Path(genai_cfg["output_dir"]) / "manifest.json")
+        genai_cfg["seeds"] = self.ed_genai_seeds.text().strip()
+        genai_cfg["consistent_character_design"] = bool(self.cb_genai_consistent.isChecked())
+        genai_cfg["lens_type"] = self.ed_genai_lens.text().strip()
+        genai_cfg["color_palette"] = self.ed_genai_palette.text().strip()
+        genai_cfg["style"] = self.ed_genai_style.text().strip()
+        genai_cfg["reference_prompt"] = self.te_genai_reference.toPlainText().strip()
+        genai_cfg["notifications_enabled"] = bool(self.cb_genai_notifications.isChecked())
+        genai_cfg["daily_quota"] = int(self.sb_genai_daily_quota.value())
+        genai_cfg["quota_warning_prompts"] = int(self.sb_genai_quota_warning.value())
+        genai_cfg["quota_enforce"] = bool(self.cb_genai_quota_enforce.isChecked())
+        usage_value = self.ed_genai_usage_file.text().strip()
+        if not usage_value:
+            usage_value = str(Path(images_dir_value) / "usage.json")
+        genai_cfg["usage_file"] = usage_value
+        self.ed_genai_usage_file.blockSignals(True)
+        self.ed_genai_usage_file.setText(usage_value)
+        self.ed_genai_usage_file.blockSignals(False)
 
         maint_cfg = self.cfg.setdefault("maintenance", {})
         maint_cfg["auto_cleanup_on_start"] = bool(self.cb_maintenance_auto.isChecked())
@@ -5893,6 +9405,8 @@ class MainWindow(QtWidgets.QMainWindow):
         retention["downloads"] = int(self.sb_maint_downloads.value())
         retention["blurred"] = int(self.sb_maint_blurred.value())
         retention["merged"] = int(self.sb_maint_merged.value())
+
+        self.cfg.setdefault("autogen", {})["sessions"] = self._session_config_snapshot()
 
         save_cfg(self.cfg)
         ensure_dirs(self.cfg)
@@ -5910,6 +9424,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.lbl_settings_status.setStyleSheet("color:#1b9c5d;")
             self.lbl_settings_status.setText(f"Настройки сохранены ({mode} {stamp})")
             self._append_activity(f"Настройки сохранены ({mode})", kind="success")
+        self._refresh_settings_context()
 
         if not silent:
             self._post_status("Настройки сохранены", state="ok")
@@ -6246,20 +9761,43 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"[STAT] RAW={raw} BLURRED={blur} MERGED={merg} YT={upload_src} TT={tiktok_src} IMG={images_count}"
             )
 
+            dash_values = getattr(self, "_dashboard_stat_values", {})
+            dash_desc = getattr(self, "_dashboard_stat_desc", {})
+
             fmt = lambda value: format(value, ",").replace(",", " ")
-            self.lbl_stat_raw.setText(fmt(raw))
-            self.lbl_stat_blur.setText(fmt(blur))
-            self.lbl_stat_merge.setText(fmt(merg))
-            self.lbl_stat_upload.setText(fmt(upload_src))
-            if hasattr(self, "lbl_stat_tiktok"):
-                self.lbl_stat_tiktok.setText(fmt(tiktok_src))
-            if hasattr(self, "lbl_stat_images"):
-                self.lbl_stat_images.setText(fmt(images_count))
+
+            stat_widgets = {
+                "raw": getattr(self, "lbl_stat_raw", None),
+                "blur": getattr(self, "lbl_stat_blur", None),
+                "merge": getattr(self, "lbl_stat_merge", None),
+                "youtube": getattr(self, "lbl_stat_upload", None),
+                "tiktok": getattr(self, "lbl_stat_tiktok", None),
+                "images": getattr(self, "lbl_stat_images", None),
+            }
+            stat_values = {
+                "raw": raw,
+                "blur": blur,
+                "merge": merg,
+                "youtube": upload_src,
+                "tiktok": tiktok_src,
+                "images": images_count,
+            }
+            for key, value in stat_values.items():
+                text_value = fmt(value)
+                widget = stat_widgets.get(key)
+                if widget:
+                    widget.setText(text_value)
+                dash_label = dash_values.get(key)
+                if dash_label:
+                    dash_label.setText(text_value)
 
             def _set_desc(key: str, text: str):
                 label = self._stat_desc_labels.get(key)
                 if label:
                     label.setText(text)
+                dash_label = dash_desc.get(key)
+                if dash_label:
+                    dash_label.setText(text)
 
             _set_desc("raw", f"{_human_size(raw_size)} · {raw_path.name or raw_path}")
             _set_desc("blur", f"{_human_size(blur_size)} · {blur_path.name or blur_path}")
@@ -6302,6 +9840,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_prompts_active_label()
         if reload:
             self._load_prompts()
+        self._refresh_content_context()
 
     def _refresh_prompt_profiles_ui(self):
         if not hasattr(self, "lst_prompt_profiles"):
@@ -6337,6 +9876,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.lst_prompt_profiles.blockSignals(False)
 
         self._set_active_prompt_profile(target_key, persist=False, reload=True)
+        self._refresh_sessions_choices()
 
     def _on_prompt_profile_selection(self):
         if not hasattr(self, "lst_prompt_profiles"):
@@ -6358,6 +9898,19 @@ class MainWindow(QtWidgets.QMainWindow):
             item = QtWidgets.QListWidgetItem(p.get("name", ""))
             self.lst_profiles.addItem(item)
         self.lbl_prof_active.setText(active if active else "—")
+        if active:
+            for row in range(self.lst_profiles.count()):
+                item = self.lst_profiles.item(row)
+                if item and item.text() == active:
+                    self.lst_profiles.blockSignals(True)
+                    self.lst_profiles.setCurrentRow(row)
+                    self.lst_profiles.blockSignals(False)
+                    break
+        else:
+            self.lst_profiles.blockSignals(True)
+            self.lst_profiles.clearSelection()
+            self.lst_profiles.blockSignals(False)
+        self._on_profile_selected()
         self._refresh_prompt_profiles_ui()
 
         if hasattr(self, "cmb_chrome_profile_top"):
@@ -6382,6 +9935,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ed_prof_name.clear()
             self.ed_prof_root.clear()
             self.ed_prof_dir.clear()
+            if hasattr(self, "sb_prof_port"):
+                self.sb_prof_port.blockSignals(True)
+                self.sb_prof_port.setValue(0)
+                self.sb_prof_port.blockSignals(False)
             return
         name = items[0].text()
         for p in self.cfg.get("chrome", {}).get("profiles", []):
@@ -6389,6 +9946,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.ed_prof_name.setText(p.get("name", ""))
                 self.ed_prof_root.setText(p.get("user_data_dir", ""))
                 self.ed_prof_dir.setText(p.get("profile_directory", ""))
+                port = _coerce_int(p.get("cdp_port"))
+                if hasattr(self, "sb_prof_port"):
+                    self.sb_prof_port.blockSignals(True)
+                    self.sb_prof_port.setValue(int(port) if port and port > 0 else 0)
+                    self.sb_prof_port.blockSignals(False)
                 break
 
     def _on_profile_add_update(self):
@@ -6405,9 +9967,18 @@ class MainWindow(QtWidgets.QMainWindow):
             if p.get("name") == name:
                 p["user_data_dir"] = root
                 p["profile_directory"] = prof
+                port_val = int(self.sb_prof_port.value()) if hasattr(self, "sb_prof_port") else 0
+                if port_val > 0:
+                    p["cdp_port"] = port_val
+                else:
+                    p.pop("cdp_port", None)
                 break
         else:
-            profiles.append({"name": name, "user_data_dir": root, "profile_directory": prof})
+            entry = {"name": name, "user_data_dir": root, "profile_directory": prof}
+            port_val = int(self.sb_prof_port.value()) if hasattr(self, "sb_prof_port") else 0
+            if port_val > 0:
+                entry["cdp_port"] = port_val
+            profiles.append(entry)
 
         self._ensure_profile_prompt_files(name)
         save_cfg(self.cfg)
@@ -6441,7 +10012,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_profiles_ui()
         if notify:
             label = name or "—"
-            self._post_status(f"Активный профиль: {label}", state="ok")
+            port = self._resolve_chrome_port(name or None)
+            port_hint = f" (CDP {port})" if port else ""
+            self._post_status(f"Активный профиль: {label}{port_hint}", state="ok")
 
     def _on_profile_set_active(self):
         items = self.lst_profiles.selectedItems()
@@ -6679,6 +10252,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         if count == 0:
             self.lbl_youtube_queue.setText("Очередь: нет видео в папке")
+            self._refresh_autopost_context()
             return
 
         parts = [f"найдено {count}"]
@@ -6687,6 +10261,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self.cb_youtube_draft_only.isChecked() and self.cb_youtube_schedule.isChecked() and interval > 0 and effective > 1:
             parts.append(f"шаг {interval} мин")
         self.lbl_youtube_queue.setText("Очередь: " + ", ".join(parts))
+        self._refresh_autopost_context()
 
     def _on_youtube_selected(self):
         items = self.lst_youtube_channels.selectedItems()
@@ -6781,12 +10356,14 @@ class MainWindow(QtWidgets.QMainWindow):
         src = _project_path(src_text)
         if not src.exists():
             self.lbl_tiktok_queue.setText("Очередь: папка не найдена")
+            self._refresh_autopost_context()
             return
 
         videos = self._iter_videos(src)
         count = len(videos)
         if count == 0:
             self.lbl_tiktok_queue.setText("Очередь: нет видео в папке")
+            self._refresh_autopost_context()
             return
 
         limit = int(self.sb_tiktok_batch_limit.value()) if hasattr(self, "sb_tiktok_batch_limit") else 0
@@ -6800,6 +10377,7 @@ class MainWindow(QtWidgets.QMainWindow):
         elif self.cb_tiktok_schedule.isChecked() and interval > 0 and effective > 1:
             parts.append(f"шаг {interval} мин")
         self.lbl_tiktok_queue.setText("Очередь: " + ", ".join(parts))
+        self._refresh_autopost_context()
 
     def _toggle_tiktok_schedule(self):
         enable = self.cb_tiktok_schedule.isChecked() and not self.cb_tiktok_draft.isChecked()
