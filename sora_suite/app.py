@@ -1238,10 +1238,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.resize(1500, 950)
         self.setMinimumSize(1024, 720)
 
+        self._app_icon = self._load_app_icon()
+        self.setWindowIcon(self._app_icon)
+
         # tray notifications
         self.tray = QtWidgets.QSystemTrayIcon(self)
-        icon = self._mono_icon(QtWidgets.QStyle.StandardPixmap.SP_ComputerIcon)
-        self.tray.setIcon(icon)
+        self.tray.setIcon(self._app_icon)
         self.tray.setToolTip("Sora Suite")
         self.tray.show()
 
@@ -1325,6 +1327,40 @@ class MainWindow(QtWidgets.QMainWindow):
         icon = QtGui.QIcon(QtGui.QPixmap.fromImage(image))
         self._icon_cache[key] = icon
         return icon
+
+    def _load_app_icon(self) -> QtGui.QIcon:
+        icon_path = APP_DIR / "app_icon.png"
+        if icon_path.exists():
+            return QtGui.QIcon(str(icon_path))
+
+        size = 256
+        pixmap = QtGui.QPixmap(size, size)
+        pixmap.fill(QtCore.Qt.GlobalColor.transparent)
+
+        painter = QtGui.QPainter(pixmap)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+
+        gradient = QtGui.QLinearGradient(0, 0, size, size)
+        gradient.setColorAt(0.0, QtGui.QColor("#38bdf8"))
+        gradient.setColorAt(1.0, QtGui.QColor("#6366f1"))
+        painter.setBrush(QtGui.QBrush(gradient))
+        painter.setPen(QtCore.Qt.PenStyle.NoPen)
+        painter.drawRoundedRect(0, 0, size, size, 56, 56)
+
+        inner_rect = QtCore.QRectF(size * 0.2, size * 0.2, size * 0.6, size * 0.6)
+        painter.setBrush(QtGui.QBrush(QtGui.QColor("#0f172a")))
+        painter.drawRoundedRect(inner_rect, 42, 42)
+
+        painter.setPen(QtGui.QPen(QtGui.QColor("#f8fafc")))
+        font = QtGui.QFont("Inter", int(size * 0.46))
+        if not font.family():
+            font = QtGui.QFont("Segoe UI", int(size * 0.46))
+        font.setBold(True)
+        painter.setFont(font)
+        painter.drawText(QtCore.QRectF(0, 0, size, size), int(QtCore.Qt.AlignmentFlag.AlignCenter), "S")
+        painter.end()
+
+        return QtGui.QIcon(pixmap)
 
     def _ensure_path_exists(self, raw: Union[str, Path]) -> Path:
         """Create file/dir for path within project if missing and return Path."""
@@ -2230,9 +2266,20 @@ class MainWindow(QtWidgets.QMainWindow):
             "QFrame#topToolbar{background:rgba(15,23,42,0.92);border:1px solid #1e293b;"
             "border-radius:12px;}"
             "QComboBox#chromeProfileTop{min-width:150px;}"
-            "QToolButton#topFolderButton{padding:2px 8px;border-radius:8px;"
-            "background:#1e293b;color:#e2e8f0;font-size:11px;}"
+            "QToolButton#topFolderButton{padding:4px 10px;border-radius:10px;"
+            "background:#1e293b;color:#e2e8f0;font-size:11px;font-weight:600;}"
             "QToolButton#topFolderButton::hover{background:#27364d;}"
+            "QToolButton#topCommandButton{padding:6px 14px;border-radius:10px;background:rgba(99,102,241,0.15);"
+            "color:#cbd5f5;font-weight:600;}"
+            "QToolButton#topCommandButton::hover{background:rgba(129,140,248,0.25);}"
+            "QPushButton#chromeLaunchBtn, QPushButton#topActionButton{padding:8px 22px;border-radius:12px;"
+            "background:qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #2563eb, stop:1 #7c3aed);"
+            "border:1px solid #3b82f6;font-weight:600;letter-spacing:0.3px;}"
+            "QPushButton#chromeLaunchBtn:hover, QPushButton#topActionButton:hover{border-color:#a855f7;"
+            "background:qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #1d4ed8, stop:1 #6d28d9);}"
+            "QPushButton#chromeLaunchBtn:disabled, QPushButton#topActionButton:disabled{background:#1e293b;border-color:#27364d;color:#64748b;}"
+            "QPushButton#topActionButton[theme=\"danger\"]{background:#dc2626;border-color:#f87171;}"
+            "QPushButton#topActionButton[theme=\"danger\"]:hover{background:#b91c1c;border-color:#fca5a5;}"
         )
         tb = QtWidgets.QHBoxLayout(toolbar)
         tb.setContentsMargins(12, 6, 12, 6)
@@ -2249,7 +2296,7 @@ class MainWindow(QtWidgets.QMainWindow):
         chrome_block = QtWidgets.QHBoxLayout(chrome_frame)
         chrome_block.setContentsMargins(4, 0, 4, 0)
         chrome_block.setSpacing(6)
-        lbl_chrome = QtWidgets.QLabel("Chrome")
+        lbl_chrome = QtWidgets.QLabel("🌐 Chrome")
         lbl_chrome.setStyleSheet("QLabel{color:#cbd5f5;font-weight:600;}")
         chrome_block.addWidget(lbl_chrome)
         self.cmb_chrome_profile_top = QtWidgets.QComboBox()
@@ -2262,26 +2309,36 @@ class MainWindow(QtWidgets.QMainWindow):
         chrome_block.addWidget(self.cmb_chrome_profile_top)
         self.btn_scan_profiles_top = QtWidgets.QToolButton()
         self.btn_scan_profiles_top.setObjectName("chromeScanBtn")
-        self.btn_scan_profiles_top.setIcon(
-            self._mono_icon(QtWidgets.QStyle.StandardPixmap.SP_BrowserReload)
+        self.btn_scan_profiles_top.setToolButtonStyle(
+            QtCore.Qt.ToolButtonStyle.ToolButtonTextOnly
         )
+        self.btn_scan_profiles_top.setText("🔄")
+        self.btn_scan_profiles_top.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
         self.btn_scan_profiles_top.setToolTip("Автообнаружение профилей Chrome в системе")
         chrome_block.addWidget(self.btn_scan_profiles_top)
-        self.btn_open_chrome = QtWidgets.QPushButton("Запустить Chrome")
+        self.btn_open_chrome = QtWidgets.QPushButton("🚀 Запустить Chrome")
         self.btn_open_chrome.setObjectName("chromeLaunchBtn")
+        self.btn_open_chrome.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
         chrome_block.addWidget(self.btn_open_chrome)
         tb.addWidget(chrome_frame)
 
         tb.addSpacing(12)
 
-        icon_dir = self._mono_icon(QtWidgets.QStyle.StandardPixmap.SP_DirOpenIcon)
+        folder_emojis = {
+            "Проект": "📁",
+            "RAW": "🧾",
+            "BLURRED": "🌫️",
+            "MERGED": "🎬",
+            "Images": "🖼️",
+        }
 
         def make_folder_button(text: str) -> QtWidgets.QToolButton:
             btn = QtWidgets.QToolButton()
             btn.setObjectName("topFolderButton")
-            btn.setIcon(icon_dir)
-            btn.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-            btn.setText(text)
+            btn.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextOnly)
+            emoji = folder_emojis.get(text, "📁")
+            btn.setText(f"{emoji} {text}")
+            btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
             return btn
 
         folders_frame = QtWidgets.QFrame()
@@ -2293,7 +2350,7 @@ class MainWindow(QtWidgets.QMainWindow):
         folders_block = QtWidgets.QHBoxLayout(folders_frame)
         folders_block.setContentsMargins(4, 0, 4, 0)
         folders_block.setSpacing(6)
-        lbl_folders = QtWidgets.QLabel("Каталоги")
+        lbl_folders = QtWidgets.QLabel("🗂️ Каталоги")
         lbl_folders.setObjectName("foldersTopLabel")
         folders_block.addWidget(lbl_folders)
         folders_block.addSpacing(4)
@@ -2314,10 +2371,12 @@ class MainWindow(QtWidgets.QMainWindow):
         tb.addWidget(folders_frame)
 
         self.btn_command_palette_toolbar = QtWidgets.QToolButton()
+        self.btn_command_palette_toolbar.setObjectName("topCommandButton")
         self.btn_command_palette_toolbar.setText("🧭 Команды")
         self.btn_command_palette_toolbar.setToolButtonStyle(
             QtCore.Qt.ToolButtonStyle.ToolButtonTextOnly
         )
+        self.btn_command_palette_toolbar.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
         self.btn_command_palette_toolbar.clicked.connect(self._open_command_palette)
         tb.addWidget(self.btn_command_palette_toolbar)
 
@@ -2328,18 +2387,28 @@ class MainWindow(QtWidgets.QMainWindow):
             QtCore.Qt.ToolButtonStyle.ToolButtonTextOnly
         )
         self.btn_toggle_commands.setText("🧩 Панель")
+        self.btn_toggle_commands.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
         tb.addWidget(self.btn_toggle_commands)
 
         tb.addStretch(1)
 
-        self.btn_start_selected = QtWidgets.QPushButton("Старт выбранного")
-        self.btn_stop_all = QtWidgets.QPushButton("Стоп все")
+        self.btn_start_selected = QtWidgets.QPushButton("⚡ Старт выбранного")
+        self.btn_start_selected.setObjectName("topActionButton")
+        self.btn_start_selected.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        self.btn_stop_all = QtWidgets.QPushButton("⛔ Стоп все")
+        self.btn_stop_all.setObjectName("topActionButton")
+        self.btn_stop_all.setProperty("theme", "danger")
+        self.btn_stop_all.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
         action_block = QtWidgets.QHBoxLayout()
         action_block.setContentsMargins(0, 0, 0, 0)
         action_block.setSpacing(6)
         action_block.addWidget(self.btn_start_selected)
         action_block.addWidget(self.btn_stop_all)
         tb.addLayout(action_block)
+
+        for themed in (self.btn_stop_all,):
+            themed.style().unpolish(themed)
+            themed.style().polish(themed)
 
         v.addWidget(toolbar)
 
@@ -2704,8 +2773,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.chk_activity_visible = QtWidgets.QCheckBox("Показывать журнал")
         self.chk_activity_visible.setChecked(bool(self.cfg.get("ui", {}).get("show_activity", True)))
         self.chk_activity_visible.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
-        self.btn_activity_clear = QtWidgets.QPushButton("Очистить")
-        self.btn_activity_clear.setIcon(self._mono_icon(QtWidgets.QStyle.StandardPixmap.SP_DialogResetButton))
+        self.btn_activity_clear = QtWidgets.QPushButton("🧹 Очистить")
         activity_header.addWidget(self.chk_activity_visible)
         activity_header.addWidget(self.btn_activity_clear)
         activity_layout.addLayout(activity_header)
@@ -4604,11 +4672,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_custom_delete = QtWidgets.QPushButton("Удалить")
         self.btn_custom_up = QtWidgets.QToolButton()
         self.btn_custom_up.setObjectName("customCommandMove")
-        self.btn_custom_up.setIcon(self._mono_icon(QtWidgets.QStyle.StandardPixmap.SP_ArrowUp))
+        self.btn_custom_up.setText("⬆️")
         self.btn_custom_up.setToolTip("Переместить вверх")
         self.btn_custom_down = QtWidgets.QToolButton()
         self.btn_custom_down.setObjectName("customCommandMove")
-        self.btn_custom_down.setIcon(self._mono_icon(QtWidgets.QStyle.StandardPixmap.SP_ArrowDown))
+        self.btn_custom_down.setText("⬇️")
         self.btn_custom_down.setToolTip("Переместить вниз")
         for btn in (
             self.btn_custom_add,
@@ -6473,7 +6541,15 @@ class MainWindow(QtWidgets.QMainWindow):
             self._update_current_event(display, kind)
 
         stamp = time.strftime("%H:%M:%S")
-        display_text = f"{stamp} · {text}"
+        emoji_map = {
+            "info": "ℹ️",
+            "running": "🔄",
+            "success": "✅",
+            "error": "❌",
+            "warn": "⚠️",
+        }
+        emoji = emoji_map.get(kind, "ℹ️")
+        display_text = f"{stamp} · {emoji} {text}"
         item = QtWidgets.QListWidgetItem(display_text)
         palette = {
             "info": ("#93c5fd", "#15223c"),
@@ -6488,16 +6564,6 @@ class MainWindow(QtWidgets.QMainWindow):
         item.setForeground(brush_fg)
         item.setBackground(brush_bg)
         item.setTextAlignment(int(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter))
-        icon_map = {
-            "info": QtWidgets.QStyle.StandardPixmap.SP_MessageBoxInformation,
-            "running": QtWidgets.QStyle.StandardPixmap.SP_BrowserReload,
-            "success": QtWidgets.QStyle.StandardPixmap.SP_DialogApplyButton,
-            "error": QtWidgets.QStyle.StandardPixmap.SP_MessageBoxCritical,
-            "warn": QtWidgets.QStyle.StandardPixmap.SP_MessageBoxWarning,
-        }
-        item.setIcon(
-            self._mono_icon(icon_map.get(kind, QtWidgets.QStyle.StandardPixmap.SP_MessageBoxInformation))
-        )
         item.setData(QtCore.Qt.ItemDataRole.UserRole, text.lower())
         self._style_activity_item(item)
         self.lst_activity.addItem(item)
