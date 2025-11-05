@@ -1752,6 +1752,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_command_palette_sessions()
         self._refresh_workspace_context()
         self._refresh_automator_list()
+        self._refresh_session_log_panel()
 
     def _session_config_snapshot(self) -> List[Dict[str, Any]]:
         snapshot: List[Dict[str, Any]] = []
@@ -2852,19 +2853,18 @@ class MainWindow(QtWidgets.QMainWindow):
         toolbar.setStyleSheet(
             "QFrame#topToolbar{background:rgba(15,23,42,0.92);border:1px solid #1e293b;"
             "border-radius:12px;}"
-            "QComboBox#chromeProfileTop{min-width:150px;}"
-            "QToolButton#topFolderButton{padding:4px 10px;border-radius:10px;"
+            "QToolButton#topFolderButton{padding:4px 12px;border-radius:10px;"
             "background:#1e293b;color:#e2e8f0;font-size:11px;font-weight:600;}"
             "QToolButton#topFolderButton::hover{background:#27364d;}"
             "QToolButton#topCommandButton{padding:6px 14px;border-radius:10px;background:rgba(99,102,241,0.15);"
             "color:#cbd5f5;font-weight:600;}"
-            "QToolButton#topCommandButton::hover{background:rgba(129,140,248,0.25);}"
-            "QPushButton#chromeLaunchBtn, QPushButton#topActionButton{padding:8px 22px;border-radius:12px;"
+            "QToolButton#topCommandButton::hover{background:rgba(129,140,248,0.25);}" 
+            "QPushButton#topActionButton{padding:8px 22px;border-radius:12px;"
             "background:qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #2563eb, stop:1 #7c3aed);"
             "border:1px solid #3b82f6;font-weight:600;letter-spacing:0.3px;}"
-            "QPushButton#chromeLaunchBtn:hover, QPushButton#topActionButton:hover{border-color:#a855f7;"
+            "QPushButton#topActionButton:hover{border-color:#a855f7;"
             "background:qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #1d4ed8, stop:1 #6d28d9);}"
-            "QPushButton#chromeLaunchBtn:disabled, QPushButton#topActionButton:disabled{background:#1e293b;border-color:#27364d;color:#64748b;}"
+            "QPushButton#topActionButton:disabled{background:#1e293b;border-color:#27364d;color:#64748b;}"
             "QPushButton#topActionButton[theme=\"danger\"]{background:#dc2626;border-color:#f87171;}"
             "QPushButton#topActionButton[theme=\"danger\"]:hover{background:#b91c1c;border-color:#fca5a5;}"
         )
@@ -2872,59 +2872,20 @@ class MainWindow(QtWidgets.QMainWindow):
         tb.setContentsMargins(12, 6, 12, 6)
         tb.setSpacing(6)
 
-        chrome_frame = QtWidgets.QFrame()
-        chrome_frame.setObjectName("chromeTopFrame")
-        chrome_frame.setStyleSheet(
-            "QFrame#chromeTopFrame{background:rgba(30,41,59,0.85);border-radius:10px;padding:4px 8px;}"
-            "QPushButton#chromeLaunchBtn{padding:4px 10px;}"
-            "QToolButton#chromeScanBtn{padding:4px;border-radius:8px;}"
-            "QToolButton#chromeScanBtn::hover{background:#27364d;}"
-        )
-        chrome_block = QtWidgets.QHBoxLayout(chrome_frame)
-        chrome_block.setContentsMargins(4, 0, 4, 0)
-        chrome_block.setSpacing(6)
-        lbl_chrome = QtWidgets.QLabel("🌐 Chrome")
-        lbl_chrome.setStyleSheet("QLabel{color:#cbd5f5;font-weight:600;}")
-        chrome_block.addWidget(lbl_chrome)
-        self.cmb_chrome_profile_top = QtWidgets.QComboBox()
-        self.cmb_chrome_profile_top.setObjectName("chromeProfileTop")
-        self.cmb_chrome_profile_top.setPlaceholderText("Профиль…")
-        self.cmb_chrome_profile_top.setSizeAdjustPolicy(
-            QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToContents
-        )
-        self.cmb_chrome_profile_top.setMaximumWidth(220)
-        chrome_block.addWidget(self.cmb_chrome_profile_top)
-        self.btn_scan_profiles_top = QtWidgets.QToolButton()
-        self.btn_scan_profiles_top.setObjectName("chromeScanBtn")
-        self.btn_scan_profiles_top.setToolButtonStyle(
-            QtCore.Qt.ToolButtonStyle.ToolButtonTextOnly
-        )
-        self.btn_scan_profiles_top.setText("🔄")
-        self.btn_scan_profiles_top.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
-        self.btn_scan_profiles_top.setToolTip("Автообнаружение профилей Chrome в системе")
-        chrome_block.addWidget(self.btn_scan_profiles_top)
-        self.btn_open_chrome = QtWidgets.QPushButton("🚀 Запустить Chrome")
-        self.btn_open_chrome.setObjectName("chromeLaunchBtn")
-        self.btn_open_chrome.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
-        chrome_block.addWidget(self.btn_open_chrome)
-        tb.addWidget(chrome_frame)
+        folder_shortcuts = [
+            ("📁", "PRJ"),
+            ("🧾", "RAW"),
+            ("🌫️", "BLR"),
+            ("🎬", "MRG"),
+            ("🖼️", "IMG"),
+            ("🧼", "RST"),
+        ]
 
-        tb.addSpacing(12)
-
-        folder_emojis = {
-            "Проект": "📁",
-            "RAW": "🧾",
-            "BLURRED": "🌫️",
-            "MERGED": "🎬",
-            "Images": "🖼️",
-        }
-
-        def make_folder_button(text: str) -> QtWidgets.QToolButton:
+        def make_folder_button(symbol: str, label: str) -> QtWidgets.QToolButton:
             btn = QtWidgets.QToolButton()
             btn.setObjectName("topFolderButton")
             btn.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextOnly)
-            emoji = folder_emojis.get(text, "📁")
-            btn.setText(f"{emoji} {text}")
+            btn.setText(f"{symbol} {label}")
             btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
             return btn
 
@@ -2942,17 +2903,19 @@ class MainWindow(QtWidgets.QMainWindow):
         lbl_folders.setObjectName("foldersTopLabel")
         folders_block.addWidget(lbl_folders)
         folders_block.addSpacing(4)
-        self.btn_open_root = make_folder_button("Проект")
-        self.btn_open_raw = make_folder_button("RAW")
-        self.btn_open_blur = make_folder_button("BLURRED")
-        self.btn_open_merge = make_folder_button("MERGED")
-        self.btn_open_images_top = make_folder_button("Images")
+        self.btn_open_root = make_folder_button(*folder_shortcuts[0][:2])
+        self.btn_open_raw = make_folder_button(*folder_shortcuts[1][:2])
+        self.btn_open_blur = make_folder_button(*folder_shortcuts[2][:2])
+        self.btn_open_merge = make_folder_button(*folder_shortcuts[3][:2])
+        self.btn_open_images_top = make_folder_button(*folder_shortcuts[4][:2])
+        self.btn_open_restored_top = make_folder_button(*folder_shortcuts[5][:2])
         for btn in (
             self.btn_open_root,
             self.btn_open_raw,
             self.btn_open_blur,
             self.btn_open_merge,
             self.btn_open_images_top,
+            self.btn_open_restored_top,
         ):
             btn.setSizePolicy(
                 QtWidgets.QSizePolicy.Policy.Expanding,
@@ -3028,6 +2991,7 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QSizePolicy.Policy.Preferred,
             QtWidgets.QSizePolicy.Policy.Expanding,
         )
+        self.section_nav.itemClicked.connect(self._on_nav_item_clicked)
         body_layout.addWidget(self.section_nav)
 
         self.section_stack = QtWidgets.QStackedWidget()
@@ -3116,6 +3080,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._section_nav_items: Dict[str, QtWidgets.QListWidgetItem] = {}
         self._section_meta: Dict[str, Dict[str, Any]] = {}
         self._nav_group_rows: Dict[str, QtWidgets.QListWidgetItem] = {}
+        self._nav_category_members: Dict[str, List[QtWidgets.QListWidgetItem]] = {}
+        self._nav_category_collapsed: Dict[str, bool] = dict(self.cfg.get("ui", {}).get("nav_collapsed", {}))
 
         context_placeholder = QtWidgets.QWidget()
         placeholder_layout = QtWidgets.QVBoxLayout(context_placeholder)
@@ -3153,11 +3119,18 @@ class MainWindow(QtWidgets.QMainWindow):
                 font.setPointSize(max(font.pointSize() - 1, 9))
                 group_item.setFont(font)
                 group_item.setForeground(QtGui.QColor("#64748b"))
+                group_item.setBackground(QtGui.QColor("#0f172a"))
                 group_item.setSizeHint(QtCore.QSize(220, 30))
                 group_item.setData(QtCore.Qt.ItemDataRole.UserRole, None)
                 group_item.setData(QtCore.Qt.ItemDataRole.UserRole + 1, "header")
+                group_item.setData(QtCore.Qt.ItemDataRole.UserRole + 2, category)
                 self.section_nav.addItem(group_item)
                 self._nav_group_rows[category] = group_item
+                self._nav_category_members.setdefault(category, [])
+                if self._nav_category_collapsed.get(category):
+                    group_item.setText(f"▶ {category.upper()}")
+                else:
+                    group_item.setText(f"▼ {category.upper()}")
             item = QtWidgets.QListWidgetItem(icon, title) if icon else QtWidgets.QListWidgetItem(title)
             item.setData(QtCore.Qt.ItemDataRole.UserRole, key)
             item.setData(QtCore.Qt.ItemDataRole.UserRole + 1, category)
@@ -3171,6 +3144,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 "category": category,
                 "description": description,
             }
+            self._nav_category_members.setdefault(category, []).append(item)
+            if self._nav_category_collapsed.get(category):
+                item.setHidden(True)
             self._register_command(
                 f"section:{key}",
                 f"Раздел — {title}",
@@ -3214,141 +3190,65 @@ class MainWindow(QtWidgets.QMainWindow):
                 layout.addWidget(lbl_sub)
             return card, layout
 
+
         overview_root = QtWidgets.QWidget()
         overview_layout = QtWidgets.QVBoxLayout(overview_root)
         overview_layout.setContentsMargins(12, 12, 12, 12)
-        overview_layout.setSpacing(16)
+        overview_layout.setSpacing(18)
 
-        overview_header = QtWidgets.QFrame()
-        overview_header.setObjectName("dashboardHeader")
-        header_layout = QtWidgets.QVBoxLayout(overview_header)
-        header_layout.setContentsMargins(18, 18, 18, 18)
-        header_layout.setSpacing(6)
-        lbl_dash_title = QtWidgets.QLabel("Центр управления")
+        hero = QtWidgets.QFrame()
+        hero.setObjectName("overviewHero")
+        hero_layout = QtWidgets.QVBoxLayout(hero)
+        hero_layout.setContentsMargins(18, 18, 18, 18)
+        hero_layout.setSpacing(6)
+        lbl_dash_title = QtWidgets.QLabel("Sora Suite — рабочая студия")
         lbl_dash_title.setObjectName("dashboardTitle")
         lbl_dash_sub = QtWidgets.QLabel(
-            "Следи за прогрессом процессов, журналом событий и статистикой рабочих папок в одном месте."
+            "Открой приложение, выбери нужные процессы и управляй всем циклом — от генерации и скачки до очистки и публикации."
         )
         lbl_dash_sub.setObjectName("dashboardSubtitle")
         lbl_dash_sub.setWordWrap(True)
-        header_layout.addWidget(lbl_dash_title)
-        header_layout.addWidget(lbl_dash_sub)
-        overview_layout.addWidget(overview_header)
+        hero_layout.addWidget(lbl_dash_title)
+        hero_layout.addWidget(lbl_dash_sub)
+        overview_layout.addWidget(hero)
 
-        quick_panel = QtWidgets.QFrame()
-        quick_panel.setObjectName("dashboardQuickActions")
-        quick_layout = QtWidgets.QHBoxLayout(quick_panel)
-        quick_layout.setContentsMargins(16, 14, 16, 14)
-        quick_layout.setSpacing(12)
-        btn_quick_run = QtWidgets.QPushButton("▶️ Старт сценария")
-        btn_quick_run.clicked.connect(self._run_scenario)
-        btn_quick_images = QtWidgets.QPushButton("🖼️ Генерация картинок")
-        btn_quick_images.clicked.connect(self._save_and_run_autogen_images)
-        btn_quick_chrome = QtWidgets.QPushButton("🌐 Запустить Chrome")
-        btn_quick_chrome.clicked.connect(self._open_chrome)
-        btn_quick_sessions = QtWidgets.QPushButton("🗂️ Рабочие пространства")
-        btn_quick_sessions.clicked.connect(lambda: self._select_section("workspaces"))
-        btn_quick_settings = QtWidgets.QPushButton("⚙️ Настройки")
-        btn_quick_settings.clicked.connect(lambda: self._select_section("settings"))
-        for btn in (
-            btn_quick_run,
-            btn_quick_images,
-            btn_quick_chrome,
-            btn_quick_sessions,
-            btn_quick_settings,
-        ):
-            btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
-            btn.setMinimumHeight(38)
-            btn.setSizePolicy(
-                QtWidgets.QSizePolicy.Policy.Expanding,
-                QtWidgets.QSizePolicy.Policy.Fixed,
-            )
-        quick_layout.addWidget(btn_quick_run)
-        quick_layout.addWidget(btn_quick_images)
-        quick_layout.addWidget(btn_quick_chrome)
-        quick_layout.addWidget(btn_quick_sessions)
-        quick_layout.addWidget(btn_quick_settings)
-        quick_layout.addStretch(1)
-        overview_layout.addWidget(quick_panel)
-
-        self._register_command(
-            "app:command_palette",
-            "Командная палитра",
-            self._open_command_palette,
-            category="Приложение",
-            subtitle="Быстрый поиск действий и разделов",
-            shortcut="Ctrl+K",
-            keywords=["поиск", "palette"],
-        )
-        self._register_command(
-            "action:run_scenario",
-            "Запустить сценарий",
-            self._run_scenario,
-            category="Автоматизация",
-            subtitle="Старт сценария по выбранным шагам",
-            keywords=["start", "automation"],
-        )
-        self._register_command(
-            "action:run_images",
-            "Генерация картинок",
-            self._save_and_run_autogen_images,
-            category="Автоматизация",
-            subtitle="Запустить генерацию в Google AI Studio",
-            keywords=["images", "google"],
-        )
-        self._register_command(
-            "action:open_chrome",
-            "Запустить Chrome",
-            self._open_chrome,
-            category="Рабочие пространства",
-            subtitle="Открыть активный профиль Chrome",
-            keywords=["browser", "cdp"],
-        )
-
-        quick_settings = QtWidgets.QFrame()
-        quick_settings.setObjectName("dashboardQuickSettings")
-        quick_settings_layout = QtWidgets.QHBoxLayout(quick_settings)
-        quick_settings_layout.setContentsMargins(16, 12, 16, 12)
-        quick_settings_layout.setSpacing(12)
-        self.cb_quick_activity = QtWidgets.QCheckBox("Журнал на обзоре")
-        self.cb_quick_activity.setChecked(bool(self.cfg.get("ui", {}).get("show_activity", True)))
-        quick_settings_layout.addWidget(self.cb_quick_activity)
-        lbl_density = QtWidgets.QLabel("Вид списка:")
-        quick_settings_layout.addWidget(lbl_density)
-        self.cmb_quick_density = QtWidgets.QComboBox()
-        self.cmb_quick_density.addItem("Компактная", "compact")
-        self.cmb_quick_density.addItem("Стандартная", "cozy")
-        density_pref = self.cfg.get("ui", {}).get("activity_density", "compact")
-        idx_density = self.cmb_quick_density.findData(density_pref)
-        if idx_density < 0:
-            idx_density = 0
-        self.cmb_quick_density.setCurrentIndex(idx_density)
-        quick_settings_layout.addWidget(self.cmb_quick_density)
-        quick_settings_layout.addStretch(1)
-
-        def open_ui_settings():
-            self._focus_section_from_command("settings")
-            if hasattr(self, "settings_tabs") and hasattr(self, "page_ui_settings"):
-                idx = self.settings_tabs.indexOf(self.page_ui_settings)
-                if idx >= 0:
-                    self.settings_tabs.setCurrentIndex(idx)
-
-        btn_open_ui_settings = QtWidgets.QPushButton("Настройки интерфейса…")
-        btn_open_ui_settings.clicked.connect(open_ui_settings)
-        quick_settings_layout.addWidget(btn_open_ui_settings)
-        overview_layout.addWidget(quick_settings)
+        info_cards = QtWidgets.QFrame()
+        info_cards.setObjectName("overviewInfo")
+        info_layout = QtWidgets.QHBoxLayout(info_cards)
+        info_layout.setContentsMargins(16, 12, 16, 12)
+        info_layout.setSpacing(12)
+        for emoji, title, text_body in [
+            ("🗂️", "Рабочие пространства", "Параллельные сессии Chrome со своими портами, промптами и логами."),
+            ("⚙️", "Пайплайн", "Настрой порядок скачки, блюра, склейки и публикации прямо на одной панели."),
+            ("🔔", "Уведомления", "Получай статус выполнения в командной панели и в системных уведомлениях."),
+        ]:
+            card = QtWidgets.QFrame()
+            card.setObjectName("overviewInfoCard")
+            card_layout = QtWidgets.QVBoxLayout(card)
+            card_layout.setContentsMargins(16, 12, 16, 12)
+            card_layout.setSpacing(4)
+            lbl_icon = QtWidgets.QLabel(emoji)
+            lbl_icon.setStyleSheet("font-size:18px")
+            lbl_text = QtWidgets.QLabel(title)
+            lbl_text.setStyleSheet("font-weight:600;color:#e2e8f0;")
+            lbl_desc = QtWidgets.QLabel(text_body)
+            lbl_desc.setStyleSheet("color:#94a3b8;")
+            lbl_desc.setWordWrap(True)
+            card_layout.addWidget(lbl_icon)
+            card_layout.addWidget(lbl_text)
+            card_layout.addWidget(lbl_desc)
+            card_layout.addStretch(1)
+            info_layout.addWidget(card, 1)
+        overview_layout.addWidget(info_cards)
 
         stats_panel = QtWidgets.QFrame()
         stats_panel.setObjectName("dashboardStats")
         stats_layout = QtWidgets.QVBoxLayout(stats_panel)
         stats_layout.setContentsMargins(16, 16, 16, 16)
         stats_layout.setSpacing(12)
-        stats_header = QtWidgets.QHBoxLayout()
         lbl_stats_title = QtWidgets.QLabel("Мониторинг папок")
         lbl_stats_title.setObjectName("dashboardSectionTitle")
-        stats_header.addWidget(lbl_stats_title)
-        stats_header.addStretch(1)
-        stats_layout.addLayout(stats_header)
+        stats_layout.addWidget(lbl_stats_title)
         stats_grid = QtWidgets.QGridLayout()
         stats_grid.setHorizontalSpacing(16)
         stats_grid.setVerticalSpacing(12)
@@ -3362,9 +3262,7 @@ class MainWindow(QtWidgets.QMainWindow):
             card.setStyleSheet(
                 (
                     "QFrame#dashStat_{key}{background:rgba(15,23,42,0.92);border-radius:16px;"
-                    "border:1px solid rgba(148,163,184,0.22);}"
-                    "QLabel#dashStatTitle_{key}{color:#cbd5f5;font-size:11px;text-transform:uppercase;letter-spacing:0.6px;}"
-                    "QLabel#dashStatDesc_{key}{color:#94a3b8;font-size:11px;}"
+                    "border:1px solid rgba(148,163,184,0.22);}"                     "QLabel#dashStatTitle_{key}{color:#cbd5f5;font-size:11px;text-transform:uppercase;letter-spacing:0.6px;}"                     "QLabel#dashStatDesc_{key}{color:#94a3b8;font-size:11px;}"
                 ).replace("{key}", key)
             )
             layout = QtWidgets.QVBoxLayout(card)
@@ -3401,501 +3299,107 @@ class MainWindow(QtWidgets.QMainWindow):
         add_dashboard_card(1, 2, "images", "IMAGES", "Сгенерированные изображения", "#60a5fa")
         overview_layout.addWidget(stats_panel)
 
-        activity_panel = QtWidgets.QFrame()
-        activity_panel.setObjectName("dashboardActivity")
-        activity_layout = QtWidgets.QVBoxLayout(activity_panel)
-        activity_layout.setContentsMargins(16, 16, 16, 16)
-        activity_layout.setSpacing(12)
-        activity_header = QtWidgets.QHBoxLayout()
-        self.lbl_activity = QtWidgets.QLabel("Журнал процессов")
-        activity_header.addWidget(self.lbl_activity)
-        activity_header.addStretch(1)
-        self.chk_activity_visible = QtWidgets.QCheckBox("Показывать журнал")
-        self.chk_activity_visible.setChecked(bool(self.cfg.get("ui", {}).get("show_activity", True)))
-        self.chk_activity_visible.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
-        self.btn_activity_clear = QtWidgets.QPushButton("🧹 Очистить")
-        activity_header.addWidget(self.chk_activity_visible)
-        activity_header.addWidget(self.btn_activity_clear)
-        activity_layout.addLayout(activity_header)
-
-        self.activity_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
-        self.activity_splitter.setChildrenCollapsible(False)
-        self.activity_splitter.setHandleWidth(8)
-        self._activity_sizes_cache = []
-
-        current_wrap = QtWidgets.QWidget()
-        current_wrap.setObjectName("currentEventWrapper")
-        current_layout = QtWidgets.QVBoxLayout(current_wrap)
-        current_layout.setContentsMargins(0, 0, 0, 0)
-        current_layout.setSpacing(6)
-        self.current_event_card = QtWidgets.QFrame()
-        self.current_event_card.setObjectName("currentEventCard")
-        self.current_event_card.setStyleSheet(
-            "QFrame#currentEventCard{background:transparent;border:1px solid #27364d;border-radius:14px;padding:0;}"
-            "QLabel#currentEventTitle{color:#9fb7ff;font-size:11px;letter-spacing:1px;text-transform:uppercase;}"
-            "QFrame#currentEventBodyFrame{background:transparent;border:1px solid #1f2a40;border-radius:10px;}"
-            "QLabel#currentEventBody{color:#f8fafc;font-size:15px;font-weight:600;background:transparent;}"
-        )
-        card_layout = QtWidgets.QVBoxLayout(self.current_event_card)
-        card_layout.setContentsMargins(14, 12, 14, 12)
-        self.lbl_current_event_title = QtWidgets.QLabel("Сейчас")
-        self.lbl_current_event_title.setObjectName("currentEventTitle")
-        body_wrap = QtWidgets.QFrame()
-        body_wrap.setObjectName("currentEventBodyFrame")
-        body_layout = QtWidgets.QVBoxLayout(body_wrap)
-        body_layout.setContentsMargins(12, 8, 12, 8)
-        body_layout.setSpacing(0)
-        self.lbl_current_event_body = QtWidgets.QLabel("—")
-        self.lbl_current_event_body.setObjectName("currentEventBody")
-        self.lbl_current_event_body.setWordWrap(True)
-        body_layout.addWidget(self.lbl_current_event_body)
-        self.lbl_current_event_timer = QtWidgets.QLabel("—")
-        self.lbl_current_event_timer.setObjectName("currentEventTimer")
-        self.lbl_current_event_timer.setStyleSheet("color:#94a3b8;font-size:11px;")
-        card_layout.addWidget(self.lbl_current_event_title)
-        card_layout.addWidget(body_wrap)
-        card_layout.addWidget(self.lbl_current_event_timer)
-        current_layout.addWidget(self.current_event_card)
-        self.activity_splitter.addWidget(current_wrap)
-        self.activity_current_wrap = current_wrap
-
-        self.history_panel = QtWidgets.QWidget()
-        history_layout = QtWidgets.QVBoxLayout(self.history_panel)
-        history_layout.setContentsMargins(0, 0, 0, 0)
-        history_layout.setSpacing(6)
-        filter_row = QtWidgets.QHBoxLayout()
-        self.ed_activity_filter = QtWidgets.QLineEdit()
-        self.ed_activity_filter.setPlaceholderText("Фильтр по тексту или тегу…")
-        self.ed_activity_filter.setClearButtonEnabled(True)
-        self.btn_activity_export = QtWidgets.QPushButton("Экспорт")
-        filter_row.addWidget(self.ed_activity_filter, 1)
-        filter_row.addWidget(self.btn_activity_export)
-        history_layout.addLayout(filter_row)
-        self.lst_activity = QtWidgets.QListWidget()
-        self.lst_activity.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
-        self.lst_activity.setUniformItemSizes(False)
-        self.lst_activity.setWordWrap(True)
-        self.lst_activity.setAlternatingRowColors(False)
-        self.lst_activity.setSpacing(2)
-        self._apply_activity_density(persist=False)
-        history_layout.addWidget(self.lst_activity, 1)
-        self.lbl_activity_hint = QtWidgets.QLabel(
-            "Журнал объединяет статусы скачки, блюра, склейки, загрузки и автогена."
-        )
-        self.lbl_activity_hint.setWordWrap(True)
-        self.lbl_activity_hint.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
-        history_layout.addWidget(self.lbl_activity_hint)
-        self.activity_splitter.addWidget(self.history_panel)
-        self.activity_splitter.setStretchFactor(0, 0)
-        self.activity_splitter.setStretchFactor(1, 1)
-        activity_layout.addWidget(self.activity_splitter, 1)
-        overview_layout.addWidget(activity_panel)
+        quick_links = QtWidgets.QFrame()
+        quick_links.setObjectName("overviewLinks")
+        link_layout = QtWidgets.QHBoxLayout(quick_links)
+        link_layout.setContentsMargins(16, 12, 16, 12)
+        link_layout.setSpacing(10)
+        btn_to_workflow = QtWidgets.QPushButton("🧠 К рабочему потоку")
+        btn_to_workflow.clicked.connect(lambda: self._select_section("workflow"))
+        btn_to_automator = QtWidgets.QPushButton("🤖 Открыть автоматизатор")
+        btn_to_automator.clicked.connect(lambda: self._select_section("automator"))
+        btn_to_logs = QtWidgets.QPushButton("📜 Журналы")
+        btn_to_logs.clicked.connect(lambda: self._select_section("logs"))
+        for btn in (btn_to_workflow, btn_to_automator, btn_to_logs):
+            btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+            link_layout.addWidget(btn)
+        link_layout.addStretch(1)
+        overview_layout.addWidget(quick_links)
 
         overview_context, overview_ctx_layout = make_context_card(
-            "Обзор",
-            "Быстрая настройка панели активности и доступ к глобальным действиям.",
+            "Главная", "Краткое описание возможностей и быстрые ссылки на ключевые разделы."
         )
-        stats_form = QtWidgets.QFormLayout()
-        stats_form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignLeft)
-        stats_form.setHorizontalSpacing(8)
-        stats_form.setVerticalSpacing(6)
-        self.lbl_context_overview_activity = QtWidgets.QLabel("—")
-        self.lbl_context_overview_density = QtWidgets.QLabel("—")
-        stats_form.addRow("Журнал:", self.lbl_context_overview_activity)
-        stats_form.addRow("Формат списка:", self.lbl_context_overview_density)
-        overview_ctx_layout.addLayout(stats_form)
-
-        btn_palette = QtWidgets.QPushButton("Командная палитра…")
-        btn_palette.setObjectName("contextPaletteButton")
-        btn_palette.clicked.connect(self._open_command_palette)
-        overview_ctx_layout.addWidget(btn_palette)
+        overview_ctx_layout.addWidget(QtWidgets.QLabel("Используй рабочие пространства и пайплайн, чтобы запускать процессы батчами."))
         overview_ctx_layout.addStretch(1)
         register_context("overview", overview_context)
 
         add_section(
             "overview",
-            "🏠 Обзор",
+            "🏠 Главная",
             overview_root,
             scrollable=True,
             category="Главная",
-            description="Центр управления и статистики приложения",
+            description="Стартовая панель, статистика и краткие ссылки на основные разделы",
         )
 
         self.tab_sessions = self._build_sessions_tab()
-        workspace_context, workspace_ctx_layout = make_context_card(
-            "Рабочее пространство",
-            "Следи за активной сессией и управляй действиями без перехода в раздел.",
+        workflow_context, workflow_ctx_layout = make_context_card(
+            "Рабочий поток",
+            "Редактируй сессии и запускай пайплайн в одном месте."
         )
-        session_form = QtWidgets.QFormLayout()
-        session_form.setHorizontalSpacing(8)
-        session_form.setVerticalSpacing(6)
-        self.lbl_context_session_name = QtWidgets.QLabel("—")
-        self.lbl_context_session_profiles = QtWidgets.QLabel("—")
-        self.lbl_context_session_status = QtWidgets.QLabel("—")
-        session_form.addRow("Сессия:", self.lbl_context_session_name)
-        session_form.addRow("Профили:", self.lbl_context_session_profiles)
-        session_form.addRow("Статус:", self.lbl_context_session_status)
-        workspace_ctx_layout.addLayout(session_form)
-
-        session_buttons = QtWidgets.QHBoxLayout()
-        self.btn_context_session_window = QtWidgets.QPushButton("Окно")
-        self.btn_context_session_prompts = QtWidgets.QPushButton("Автоген")
-        self.btn_context_session_images = QtWidgets.QPushButton("Картинки")
-        self.btn_context_session_download = QtWidgets.QPushButton("Скачивание")
-        self.btn_context_session_watermark = QtWidgets.QPushButton("Замена знака")
-        for btn in (
-            self.btn_context_session_window,
-            self.btn_context_session_prompts,
-            self.btn_context_session_images,
-            self.btn_context_session_download,
-            self.btn_context_session_watermark,
-        ):
-            btn.setSizePolicy(
-                QtWidgets.QSizePolicy.Policy.Expanding,
-                QtWidgets.QSizePolicy.Policy.Fixed,
-            )
-            session_buttons.addWidget(btn, 1)
-        workspace_ctx_layout.addLayout(session_buttons)
-        workspace_ctx_layout.addStretch(1)
-        register_context("workspaces", workspace_context)
+        workflow_ctx_layout.addWidget(QtWidgets.QLabel("В левой панели — управление сессиями. Ниже — настройка этапов."))
+        workflow_ctx_layout.addStretch(1)
+        register_context("workflow", workflow_context)
+        workflow_root = self._build_workflow_page()
         add_section(
-            "workspaces",
-            "🗂️ Рабочие пространства",
-            self.tab_sessions,
+            "workflow",
+            "🧠 Рабочий поток",
+            workflow_root,
             scrollable=True,
             category="Рабочие процессы",
-            description="Настройка параллельных профилей Chrome и промптов",
+            description="Сессии и пайплайн на одной странице",
         )
 
-        self.tab_tasks, lt = make_scroll_tab(margins=(0, 0, 0, 0))
-        tasks_intro = QtWidgets.QLabel(
-            "Основная панель запуска: отметь нужные этапы, нажми старт и следи за прогрессом и статистикой."
+        automator_root = self._build_automator_page()
+        automator_context, automator_ctx_layout = make_context_card(
+            "Автоматизация",
+            "Сохраняй готовые последовательности шагов для повторного запуска."
         )
-        tasks_intro.setWordWrap(True)
-        tasks_intro.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;padding:0 12px 8px 12px;}")
-        lt.addWidget(tasks_intro)
-
-        self.task_tabs = QtWidgets.QTabWidget()
-        self.task_tabs.setTabPosition(QtWidgets.QTabWidget.TabPosition.North)
-        lt.addWidget(self.task_tabs, 1)
-
-        grp_choose = QtWidgets.QGroupBox("Что выполнить")
-        f = QtWidgets.QFormLayout(grp_choose)
-        f.setVerticalSpacing(6)
-        self.cb_do_images = QtWidgets.QCheckBox("Генерация картинок (Google)")
-        self.cb_do_autogen = QtWidgets.QCheckBox("Вставка промптов в Sora")
-        self.cb_do_download = QtWidgets.QCheckBox("Авто-скачка видео")
-        self.cb_do_blur = QtWidgets.QCheckBox("Блюр водяного знака (ffmpeg, пресеты 9:16 / 16:9)")
-        self.cb_do_watermark = QtWidgets.QCheckBox("Замена водяного знака (по шаблону)")
-        self.cb_do_merge = QtWidgets.QCheckBox("Склейка группами N")
-        self.cb_do_upload = QtWidgets.QCheckBox("Загрузка на YouTube (отложенный постинг)")
-        self.cb_do_tiktok = QtWidgets.QCheckBox("Загрузка в TikTok")
-        for box in (
-            self.cb_do_images,
-            self.cb_do_autogen,
-            self.cb_do_download,
-            self.cb_do_blur,
-            self.cb_do_watermark,
-            self.cb_do_merge,
-            self.cb_do_upload,
-            self.cb_do_tiktok,
-        ):
-            box.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
-        f.addRow(self.cb_do_images)
-        f.addRow(self.cb_do_autogen)
-        f.addRow(self.cb_do_download)
-        f.addRow(self.cb_do_blur)
-        f.addRow(self.cb_do_watermark)
-        f.addRow(self.cb_do_merge)
-        f.addRow(self.cb_do_upload)
-        f.addRow(self.cb_do_tiktok)
-
-        grp_run = QtWidgets.QGroupBox("Запуск")
-        hb2 = QtWidgets.QHBoxLayout(grp_run)
-        self.btn_run_scenario = QtWidgets.QPushButton("Старт сценария (галочки сверху)")
-        self.btn_run_autogen_images = QtWidgets.QPushButton("Генерация картинок (Google)")
-        self.btn_open_genai_output = QtWidgets.QPushButton("Открыть папку картинок")
-        self.btn_run_watermark = QtWidgets.QPushButton("Замена водяного знака")
-        hb2.addWidget(self.btn_run_scenario)
-        hb2.addWidget(self.btn_run_autogen_images)
-        hb2.addWidget(self.btn_run_watermark)
-        hb2.addWidget(self.btn_open_genai_output)
-        hb2.addStretch(1)
-
-        grp_stat = QtWidgets.QGroupBox("Статистика / статус")
-        vb = QtWidgets.QVBoxLayout(grp_stat)
-        vb.setSpacing(12)
-
-        status_row = QtWidgets.QHBoxLayout()
-        status_row.setSpacing(12)
-        self.lbl_status = QtWidgets.QLabel("—")
-        self.lbl_status.setObjectName("statsStatusLabel")
-        self.pb_global = QtWidgets.QProgressBar()
-        self.pb_global.setMinimum(0)
-        self.pb_global.setMaximum(1)
-        self.pb_global.setValue(1)
-        self.pb_global.setFormat("—")
-        self.pb_global.setTextVisible(False)
-        self.pb_global.setFixedHeight(8)
-        self.pb_global.setStyleSheet("QProgressBar{background:#0f172a;border-radius:4px;}QProgressBar::chunk{background:#4c6ef5;border-radius:4px;}")
-        status_row.addWidget(self.lbl_status, 2)
-        status_row.addWidget(self.pb_global, 3)
-        vb.addLayout(status_row)
-
-        stats_strip = QtWidgets.QFrame()
-        stats_strip.setObjectName("statsStrip")
-        stats_strip.setStyleSheet(
-            "QFrame#statsStrip{background:rgba(15,23,42,0.92);border:1px solid #1f2a40;border-radius:16px;}"
-        )
-        strip = QtWidgets.QHBoxLayout(stats_strip)
-        strip.setContentsMargins(18, 14, 18, 14)
-        strip.setSpacing(16)
-
-        self._stat_desc_labels = {}
-
-        def make_stat_card(key: str, title: str, desc: str, tooltip: str, accent: str) -> QtWidgets.QLabel:
-            card = QtWidgets.QFrame()
-            card.setObjectName(f"statCard_{key}")
-            card.setStyleSheet(
-                (
-                    "QFrame#statCard_{key}{background:#0f172a;border:1px solid rgba(148,163,184,0.28);border-radius:14px;}"
-                    "QLabel#statTitle_{key}{color:#cbd5f5;font-size:11px;letter-spacing:0.5px;text-transform:uppercase;}"
-                    "QLabel#statDesc_{key}{color:#8aa2c7;font-size:11px;}"
-                ).replace("{key}", key)
-            )
-            layout = QtWidgets.QVBoxLayout(card)
-            layout.setContentsMargins(14, 12, 14, 12)
-            layout.setSpacing(6)
-
-            accent_bar = QtWidgets.QFrame()
-            accent_bar.setFixedHeight(4)
-            accent_bar.setStyleSheet(f"QFrame{{background:{accent};border-radius:2px;}}")
-            layout.addWidget(accent_bar)
-
-            title_lbl = QtWidgets.QLabel(title)
-            title_lbl.setObjectName(f"statTitle_{key}")
-            value_lbl = QtWidgets.QLabel("0")
-            value_lbl.setStyleSheet(
-                f"QLabel{{font:700 24px 'JetBrains Mono','Menlo','Consolas';color:{accent};padding-top:2px;}}"
-            )
-            value_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-            desc_lbl = QtWidgets.QLabel(desc)
-            desc_lbl.setObjectName(f"statDesc_{key}")
-            desc_lbl.setWordWrap(True)
-            desc_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-
-            layout.addWidget(title_lbl, 0, QtCore.Qt.AlignmentFlag.AlignCenter)
-            layout.addWidget(value_lbl, 0, QtCore.Qt.AlignmentFlag.AlignCenter)
-            layout.addWidget(desc_lbl, 0, QtCore.Qt.AlignmentFlag.AlignCenter)
-
-            card.setToolTip(tooltip)
-            strip.addWidget(card, 1)
-            self._stat_desc_labels[key] = desc_lbl
-            return value_lbl
-
-        self.lbl_stat_raw = make_stat_card(
-            "raw",
-            "RAW",
-            "Скачанные черновики",
-            "Количество видеофайлов в папке RAW",
-            "#38bdf8",
-        )
-        self.lbl_stat_blur = make_stat_card(
-            "blur",
-            "BLURRED",
-            "Готовы к блюру",
-            "Сколько клипов ждут обработки блюром",
-            "#a855f7",
-        )
-        self.lbl_stat_merge = make_stat_card(
-            "merge",
-            "MERGED",
-            "Склеенные ролики",
-            "Готовые склейки в итоговой папке",
-            "#f97316",
-        )
-        self.lbl_stat_upload = make_stat_card(
-            "youtube",
-            "YOUTUBE",
-            "Очередь YouTube",
-            "Сколько файлов попадёт в очередь YouTube",
-            "#4ade80",
-        )
-        self.lbl_stat_tiktok = make_stat_card(
-            "tiktok",
-            "TIKTOK",
-            "Очередь TikTok",
-            "Сколько файлов ожидают выгрузку в TikTok",
-            "#f472b6",
-        )
-
-        self.lbl_stat_images = make_stat_card(
-            "images",
-            "IMAGES",
-            "Сгенерированные картинки",
-            "Количество файлов в каталоге generated_images",
-            "#60a5fa",
-        )
-
-        strip.addStretch(1)
-        vb.addWidget(stats_strip)
-
-        pipeline_tab, pipeline_layout = make_scroll_tab()
-        pipeline_layout.addWidget(grp_choose)
-        pipeline_layout.addWidget(grp_run)
-        pipeline_layout.addWidget(grp_stat)
-        pipeline_layout.addStretch(1)
-        self.task_tabs.addTab(pipeline_tab, "Пайплайн")
-
-        # --- Скачка: лимит N ---
-        grp_dl = QtWidgets.QGroupBox("Скачка")
-        hb = QtWidgets.QHBoxLayout(grp_dl)
-        hb.addWidget(QtWidgets.QLabel("Скачать N последних:"))
-        self.sb_max_videos = QtWidgets.QSpinBox()
-        self.sb_max_videos.setRange(0, 10000)
-        self.sb_max_videos.setValue(int(self.cfg.get("downloader", {}).get("max_videos", 0)))
-        hb.addWidget(self.sb_max_videos)
-        self.btn_apply_dl = QtWidgets.QPushButton("Применить")
-        hb.addWidget(self.btn_apply_dl)
-        hb.addStretch(1)
-
-        tab_download, download_layout = make_scroll_tab()
-        dl_hint = QtWidgets.QLabel("Галочку \"Авто-скачка видео\" можно оставить включённой для сценария или запускать скачку отдельно.")
-        dl_hint.setWordWrap(True)
-        dl_hint.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
-        download_layout.addWidget(dl_hint)
-        download_layout.addWidget(grp_dl)
-        download_layout.addStretch(1)
-        self.task_tabs.addTab(tab_download, "Скачка")
-
-        # --- Переименование файлов ---
-        grp_ren = QtWidgets.QGroupBox("Переименование файлов")
-        ren_l = QtWidgets.QGridLayout(grp_ren)
-        self.ed_ren_dir = QtWidgets.QLineEdit(self.cfg.get("downloads_dir", str(DL_DIR)))
-        self.btn_ren_browse = QtWidgets.QPushButton("…")
-        self.rb_ren_from_titles = QtWidgets.QRadioButton("По списку из titles.txt")
-        self.rb_ren_from_titles.setChecked(True)
-        self.rb_ren_sequential = QtWidgets.QRadioButton("Последовательно (1,2,3…)")
-        self.ed_ren_prefix = QtWidgets.QLineEdit("")
-        self.ed_ren_start = QtWidgets.QSpinBox(); self.ed_ren_start.setRange(1, 1_000_000); self.ed_ren_start.setValue(1)
-        self.btn_ren_run = QtWidgets.QPushButton("Переименовать")
-        row = 0
-        ren_l.addWidget(QtWidgets.QLabel("Папка:"), row, 0)
-        ren_l.addWidget(self.ed_ren_dir, row, 1)
-        ren_l.addWidget(self.btn_ren_browse, row, 2)
-        row += 1
-        ren_l.addWidget(self.rb_ren_from_titles, row, 0, 1, 3); row += 1
-        ren_l.addWidget(self.rb_ren_sequential, row, 0, 1, 3); row += 1
-        ren_l.addWidget(QtWidgets.QLabel("Префикс (для нумерации):"), row, 0)
-        ren_l.addWidget(self.ed_ren_prefix, row, 1, 1, 2); row += 1
-        ren_l.addWidget(QtWidgets.QLabel("Начать с №:"), row, 0)
-        ren_l.addWidget(self.ed_ren_start, row, 1)
-        ren_l.addWidget(self.btn_ren_run, row, 2); row += 1
-
-        rename_tab, rename_layout = make_scroll_tab()
-        ren_hint = QtWidgets.QLabel("Переименуй ролики перед блюром: можно тянуть названия из titles.txt или нумеровать автоматически.")
-        ren_hint.setWordWrap(True)
-        ren_hint.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
-        rename_layout.addWidget(ren_hint)
-        rename_layout.addWidget(grp_ren)
-        rename_layout.addStretch(1)
-        self.task_tabs.addTab(rename_tab, "Переименование")
-
-        # --- Склейка: сколько клипов в один ---
-        grp_merge = QtWidgets.QGroupBox("Склейка (merge)")
-        mg = QtWidgets.QHBoxLayout(grp_merge)
-        mg.addWidget(QtWidgets.QLabel("Склеивать по N клипов:"))
-        self.sb_merge_group = QtWidgets.QSpinBox(); self.sb_merge_group.setRange(1, 1000)
-        self.sb_merge_group.setValue(int(self.cfg.get("merge",{}).get("group_size",3)))
-        self.btn_apply_merge = QtWidgets.QPushButton("Применить")
-        mg.addWidget(self.sb_merge_group)
-        mg.addWidget(self.btn_apply_merge)
-        mg.addStretch(1)
-
-        merge_tab, merge_layout = make_scroll_tab()
-        merge_hint = QtWidgets.QLabel("После блюра можно склеить клипы в ленты — выбери размер группы и нажми применить.")
-        merge_hint.setWordWrap(True)
-        merge_hint.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
-        merge_layout.addWidget(merge_hint)
-        merge_layout.addWidget(grp_merge)
-        merge_layout.addStretch(1)
-        self.task_tabs.addTab(merge_tab, "Склейка")
-
-        automator_tab, automator_layout = make_scroll_tab()
-        automator_intro = QtWidgets.QLabel(
-            "Собери последовательность действий: выбери шаг, отметь сессии и запусти цепочку одним кликом."
-        )
-        automator_intro.setWordWrap(True)
-        automator_intro.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
-        automator_layout.addWidget(automator_intro)
-
-        self.lst_automator = QtWidgets.QListWidget()
-        self.lst_automator.setObjectName("automatorStepList")
-        self.lst_automator.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
-        self.lst_automator.setAlternatingRowColors(True)
-        self.lst_automator.setSpacing(2)
-        automator_layout.addWidget(self.lst_automator, 1)
-
-        automator_controls = QtWidgets.QHBoxLayout()
-        automator_controls.setSpacing(8)
-        self.btn_automator_add = QtWidgets.QPushButton("Добавить шаг")
-        self.btn_automator_edit = QtWidgets.QPushButton("Изменить")
-        self.btn_automator_remove = QtWidgets.QPushButton("Удалить")
-        self.btn_automator_up = QtWidgets.QPushButton("▲")
-        self.btn_automator_down = QtWidgets.QPushButton("▼")
-        self.btn_automator_clear = QtWidgets.QPushButton("Очистить")
-        for btn in (
-            self.btn_automator_add,
-            self.btn_automator_edit,
-            self.btn_automator_remove,
-            self.btn_automator_up,
-            self.btn_automator_down,
-            self.btn_automator_clear,
-        ):
-            btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
-        automator_controls.addWidget(self.btn_automator_add)
-        automator_controls.addWidget(self.btn_automator_edit)
-        automator_controls.addWidget(self.btn_automator_remove)
-        automator_controls.addWidget(self.btn_automator_up)
-        automator_controls.addWidget(self.btn_automator_down)
-        automator_controls.addWidget(self.btn_automator_clear)
-        automator_controls.addStretch(1)
-        automator_layout.addLayout(automator_controls)
-
-        self.btn_run_automator = QtWidgets.QPushButton("🚀 Запустить автоматизацию")
-        self.btn_run_automator.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
-        automator_layout.addWidget(self.btn_run_automator)
-        automator_layout.addStretch(1)
-        self.task_tabs.addTab(automator_tab, "Автоматизатор")
-
-        automation_context, automation_ctx_layout = make_context_card(
-            "Пресеты запуска",
-            "Готовые сценарии отмечают нужные этапы и помогают переключаться между режимами работы.",
-        )
-        preset_hint = QtWidgets.QLabel("Выбери набор шагов или собери свой вручную в разделе «Автоматизация».")
-        preset_hint.setWordWrap(True)
-        automation_ctx_layout.addWidget(preset_hint)
-        preset_buttons = QtWidgets.QVBoxLayout()
-        self.btn_preset_full_cycle = QtWidgets.QPushButton("Полный цикл")
-        self.btn_preset_generate = QtWidgets.QPushButton("Генерация + постинг")
-        self.btn_preset_prompts_only = QtWidgets.QPushButton("Только промпты")
-        self.btn_preset_clear = QtWidgets.QPushButton("Сбросить выбор")
-        preset_buttons.addWidget(self.btn_preset_full_cycle)
-        preset_buttons.addWidget(self.btn_preset_generate)
-        preset_buttons.addWidget(self.btn_preset_prompts_only)
-        preset_buttons.addWidget(self.btn_preset_clear)
-        automation_ctx_layout.addLayout(preset_buttons)
-        automation_ctx_layout.addStretch(1)
-        register_context("automation", automation_context)
-
+        automator_ctx_layout.addWidget(QtWidgets.QLabel("Собери цепочки под разные проекты и запускай их когда угодно."))
+        automator_ctx_layout.addStretch(1)
+        register_context("automator", automator_context)
         add_section(
-            "automation",
-            "🤖 Автоматизация",
-            self.tab_tasks,
+            "automator",
+            "🤖 Автоматизатор",
+            automator_root,
+            scrollable=True,
             category="Рабочие процессы",
-            description="Пошаговый запуск: генерация, скачивание, блюр, склейка и загрузка",
+            description="Конструктор цепочек действий по сессиям",
         )
 
+        logs_root = self._build_global_log_page()
+        logs_context, logs_ctx_layout = make_context_card(
+            "Журнал",
+            "Просматривай историю операций и очищай её при необходимости."
+        )
+        logs_ctx_layout.addWidget(QtWidgets.QLabel("Журнал синхронизируется с панелью статусов и уведомлениями."))
+        logs_ctx_layout.addStretch(1)
+        register_context("logs", logs_context)
+        add_section(
+            "logs",
+            "📜 Журнал процессов",
+            logs_root,
+            scrollable=True,
+            category="Мониторинг",
+            description="Глобальные логи и состояние текущих задач",
+        )
+
+        session_logs_root = self._build_session_log_page()
+        session_logs_context, session_logs_ctx_layout = make_context_card(
+            "Логи сессий",
+            "Анализируй индивидуальные журналы Chrome-сессий и проверяй ошибки."
+        )
+        session_logs_ctx_layout.addWidget(QtWidgets.QLabel("Доступ к submitted/failed логам и лентам скачки по каждой сессии."))
+        session_logs_ctx_layout.addStretch(1)
+        register_context("session_logs", session_logs_context)
+        add_section(
+            "session_logs",
+            "🗒️ Логи сессий",
+            session_logs_root,
+            scrollable=True,
+            category="Мониторинг",
+            description="Подробные журналы по каждому рабочему пространству",
+        )
         wm_cfg = self.cfg.get("watermark_cleaner", {}) or {}
         self.tab_watermark, wm_layout = make_scroll_tab()
         wm_intro = QtWidgets.QLabel(
@@ -4878,7 +4382,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.activateWindow()
 
     def _focus_session_from_command(self, session_id: str) -> None:
-        self._focus_section_from_command("workspaces")
+        self._focus_section_from_command("workflow")
         if not hasattr(self, "lst_sessions"):
             return
         for row in range(self.lst_sessions.count()):
@@ -5119,8 +4623,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.context_stack.setCurrentIndex(idx)
         refresher = {
             "overview": self._refresh_overview_context,
-            "workspaces": self._refresh_workspace_context,
-            "automation": self._refresh_automation_context,
+            "workflow": self._refresh_workspace_context,
+            "automator": self._refresh_automation_context,
+            "logs": self._refresh_logs_context,
+            "session_logs": self._refresh_session_logs_context,
             "watermark": self._refresh_watermark_context,
             "content": self._refresh_content_context,
             "telegram": self._refresh_telegram_context,
@@ -6729,6 +6235,189 @@ class MainWindow(QtWidgets.QMainWindow):
 
         return root
 
+    def _build_pipeline_panel(self) -> QtWidgets.QWidget:
+        panel = QtWidgets.QFrame()
+        panel.setObjectName("pipelinePanel")
+        layout = QtWidgets.QVBoxLayout(panel)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
+
+        header = QtWidgets.QHBoxLayout()
+        header.setSpacing(8)
+        lbl_title = QtWidgets.QLabel("Пайплайн")
+        lbl_title.setObjectName("pipelineTitle")
+        lbl_title.setStyleSheet("QLabel#pipelineTitle{font-size:16px;font-weight:600;color:#e2e8f0;}")
+        header.addWidget(lbl_title)
+        header.addStretch(1)
+
+        chrome_box = QtWidgets.QFrame()
+        chrome_layout = QtWidgets.QHBoxLayout(chrome_box)
+        chrome_layout.setContentsMargins(0, 0, 0, 0)
+        chrome_layout.setSpacing(6)
+        chrome_label = QtWidgets.QLabel("🌐 Chrome:")
+        chrome_layout.addWidget(chrome_label)
+        self.cmb_chrome_profile_top = QtWidgets.QComboBox()
+        self.cmb_chrome_profile_top.setObjectName("chromeProfileTop")
+        self.cmb_chrome_profile_top.setPlaceholderText("Профиль…")
+        self.cmb_chrome_profile_top.setSizeAdjustPolicy(
+            QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToContents
+        )
+        self.cmb_chrome_profile_top.setMaximumWidth(200)
+        chrome_layout.addWidget(self.cmb_chrome_profile_top)
+        self.btn_scan_profiles_top = QtWidgets.QToolButton()
+        self.btn_scan_profiles_top.setObjectName("chromeScanBtn")
+        self.btn_scan_profiles_top.setText("🔄")
+        self.btn_scan_profiles_top.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        chrome_layout.addWidget(self.btn_scan_profiles_top)
+        self.btn_open_chrome = QtWidgets.QPushButton("🚀 Chrome")
+        self.btn_open_chrome.setObjectName("pipelineChromeBtn")
+        self.btn_open_chrome.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        chrome_layout.addWidget(self.btn_open_chrome)
+        header.addWidget(chrome_box)
+        layout.addLayout(header)
+
+        stages_group = QtWidgets.QGroupBox("Этапы")
+        stages_layout = QtWidgets.QGridLayout(stages_group)
+        stages_layout.setHorizontalSpacing(12)
+        stages_layout.setVerticalSpacing(8)
+        self.cb_do_images = QtWidgets.QCheckBox("🖼️ Генерация картинок (Google)")
+        self.cb_do_autogen = QtWidgets.QCheckBox("✍️ Вставка промптов")
+        self.cb_do_download = QtWidgets.QCheckBox("⬇️ Скачка видео")
+        self.cb_do_blur = QtWidgets.QCheckBox("🌫️ Блюр водяного знака")
+        self.cb_do_watermark = QtWidgets.QCheckBox("🧼 Замена водяного знака")
+        self.cb_do_merge = QtWidgets.QCheckBox("🧵 Склейка лент")
+        self.cb_do_upload = QtWidgets.QCheckBox("📤 YouTube загрузка")
+        self.cb_do_tiktok = QtWidgets.QCheckBox("🎵 TikTok загрузка")
+        stage_boxes = [
+            self.cb_do_images,
+            self.cb_do_autogen,
+            self.cb_do_download,
+            self.cb_do_blur,
+            self.cb_do_watermark,
+            self.cb_do_merge,
+            self.cb_do_upload,
+            self.cb_do_tiktok,
+        ]
+        for idx, box in enumerate(stage_boxes):
+            box.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+            row = idx // 2
+            col = idx % 2
+            stages_layout.addWidget(box, row, col)
+        layout.addWidget(stages_group)
+
+        settings_group = QtWidgets.QGroupBox("Настройки этапов")
+        settings_form = QtWidgets.QFormLayout(settings_group)
+        settings_form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
+        settings_form.setHorizontalSpacing(10)
+        settings_form.setVerticalSpacing(8)
+
+        dl_row = QtWidgets.QHBoxLayout()
+        dl_row.setSpacing(6)
+        self.sb_max_videos = QtWidgets.QSpinBox()
+        self.sb_max_videos.setRange(0, 10000)
+        self.sb_max_videos.setValue(int(self.cfg.get("downloader", {}).get("max_videos", 0)))
+        self.sb_max_videos.setSuffix(" видео")
+        dl_row.addWidget(self.sb_max_videos)
+        self.btn_apply_dl = QtWidgets.QPushButton("Применить")
+        self.btn_apply_dl.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        dl_row.addWidget(self.btn_apply_dl)
+        dl_row.addStretch(1)
+        settings_form.addRow("Лимит скачки:", dl_row)
+
+        merge_row = QtWidgets.QHBoxLayout()
+        merge_row.setSpacing(6)
+        self.sb_merge_group = QtWidgets.QSpinBox()
+        self.sb_merge_group.setRange(1, 1000)
+        self.sb_merge_group.setValue(int(self.cfg.get("merge", {}).get("group_size", 3)))
+        self.sb_merge_group.setSuffix(" клипа")
+        merge_row.addWidget(self.sb_merge_group)
+        self.btn_apply_merge = QtWidgets.QPushButton("Применить")
+        self.btn_apply_merge.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        merge_row.addWidget(self.btn_apply_merge)
+        merge_row.addStretch(1)
+        settings_form.addRow("Склейка по:", merge_row)
+
+        layout.addWidget(settings_group)
+
+        run_group = QtWidgets.QGroupBox("Управление")
+        run_layout = QtWidgets.QHBoxLayout(run_group)
+        run_layout.setSpacing(8)
+        self.btn_run_scenario = QtWidgets.QPushButton("▶️ Старт")
+        self.btn_run_scenario.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        self.btn_run_autogen_images = QtWidgets.QPushButton("🖼️ Картинки")
+        self.btn_run_autogen_images.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        self.btn_run_watermark = QtWidgets.QPushButton("🧼 Водяной знак")
+        self.btn_run_watermark.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        self.btn_open_genai_output = QtWidgets.QPushButton("📁 Галерея")
+        self.btn_open_genai_output.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        for btn in (
+            self.btn_run_scenario,
+            self.btn_run_autogen_images,
+            self.btn_run_watermark,
+            self.btn_open_genai_output,
+        ):
+            btn.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Expanding,
+                QtWidgets.QSizePolicy.Policy.Fixed,
+            )
+            run_layout.addWidget(btn)
+        layout.addWidget(run_group)
+
+        status_group = QtWidgets.QGroupBox("Текущий прогресс")
+        status_layout = QtWidgets.QVBoxLayout(status_group)
+        status_layout.setSpacing(10)
+        self.lbl_status = QtWidgets.QLabel("—")
+        self.lbl_status.setObjectName("pipelineStatusLabel")
+        self.pb_global = QtWidgets.QProgressBar()
+        self.pb_global.setMinimum(0)
+        self.pb_global.setMaximum(1)
+        self.pb_global.setValue(1)
+        self.pb_global.setTextVisible(False)
+        self.pb_global.setFixedHeight(8)
+        self.pb_global.setStyleSheet(
+            "QProgressBar{background:#0f172a;border-radius:4px;}"
+            "QProgressBar::chunk{background:#4c6ef5;border-radius:4px;}"
+        )
+        status_layout.addWidget(self.lbl_status)
+        status_layout.addWidget(self.pb_global)
+        layout.addWidget(status_group)
+
+        rename_group = QtWidgets.QGroupBox("Переименование файлов")
+        rename_layout = QtWidgets.QGridLayout(rename_group)
+        rename_layout.setHorizontalSpacing(8)
+        rename_layout.setVerticalSpacing(6)
+        self.ed_ren_dir = QtWidgets.QLineEdit(self.cfg.get("downloads_dir", str(DL_DIR)))
+        self.ed_ren_dir.setClearButtonEnabled(True)
+        self.btn_ren_browse = QtWidgets.QPushButton("…")
+        self.btn_ren_browse.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        self.rb_ren_from_titles = QtWidgets.QRadioButton("По списку titles.txt")
+        self.rb_ren_from_titles.setChecked(True)
+        self.rb_ren_sequential = QtWidgets.QRadioButton("Последовательно (1,2,3…)")
+        self.ed_ren_prefix = QtWidgets.QLineEdit("")
+        self.ed_ren_start = QtWidgets.QSpinBox()
+        self.ed_ren_start.setRange(1, 1_000_000)
+        self.ed_ren_start.setValue(1)
+        self.btn_ren_run = QtWidgets.QPushButton("Переименовать")
+        row = 0
+        rename_layout.addWidget(QtWidgets.QLabel("Папка:"), row, 0)
+        rename_layout.addWidget(self.ed_ren_dir, row, 1)
+        rename_layout.addWidget(self.btn_ren_browse, row, 2)
+        row += 1
+        rename_layout.addWidget(self.rb_ren_from_titles, row, 0, 1, 3)
+        row += 1
+        rename_layout.addWidget(self.rb_ren_sequential, row, 0, 1, 3)
+        row += 1
+        rename_layout.addWidget(QtWidgets.QLabel("Префикс:"), row, 0)
+        rename_layout.addWidget(self.ed_ren_prefix, row, 1, 1, 2)
+        row += 1
+        rename_layout.addWidget(QtWidgets.QLabel("Начать с №:"), row, 0)
+        rename_layout.addWidget(self.ed_ren_start, row, 1)
+        rename_layout.addWidget(self.btn_ren_run, row, 2)
+        layout.addWidget(rename_group)
+
+        layout.addStretch(1)
+        return panel
+
     def _build_sessions_tab(self) -> QtWidgets.QWidget:
         tab = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(tab)
@@ -7035,6 +6724,304 @@ class MainWindow(QtWidgets.QMainWindow):
 
         return tab
 
+    def _build_workflow_page(self) -> QtWidgets.QWidget:
+        root = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(root)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(16)
+
+        header = QtWidgets.QLabel(
+            "Настрой рабочие пространства для каждого профиля Chrome, а затем запусти пайплайн прямо отсюда."
+        )
+        header.setWordWrap(True)
+        header.setStyleSheet("QLabel{color:#94a3b8;font-size:12px;}")
+        layout.addWidget(header)
+
+        layout.addWidget(self.tab_sessions)
+
+        pipeline_panel = self._build_pipeline_panel()
+        layout.addWidget(pipeline_panel)
+        layout.addStretch(1)
+        return root
+
+    def _build_automator_page(self) -> QtWidgets.QWidget:
+        container = QtWidgets.QWidget()
+        outer = QtWidgets.QVBoxLayout(container)
+        outer.setContentsMargins(18, 18, 18, 18)
+        outer.setSpacing(12)
+
+        intro = QtWidgets.QLabel(
+            "Собери последовательность действий: выбирай шаги, отмечай сессии и запускай цепочку в один клик."
+        )
+        intro.setWordWrap(True)
+        intro.setStyleSheet("QLabel{color:#94a3b8;font-size:12px;}")
+        outer.addWidget(intro)
+
+        self.lst_automator = QtWidgets.QListWidget()
+        self.lst_automator.setObjectName("automatorStepList")
+        self.lst_automator.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        self.lst_automator.setAlternatingRowColors(True)
+        self.lst_automator.setSpacing(2)
+        outer.addWidget(self.lst_automator, 1)
+
+        controls = QtWidgets.QHBoxLayout()
+        controls.setSpacing(8)
+        self.btn_automator_add = QtWidgets.QPushButton("Добавить шаг")
+        self.btn_automator_edit = QtWidgets.QPushButton("Изменить")
+        self.btn_automator_remove = QtWidgets.QPushButton("Удалить")
+        self.btn_automator_up = QtWidgets.QPushButton("▲")
+        self.btn_automator_down = QtWidgets.QPushButton("▼")
+        self.btn_automator_clear = QtWidgets.QPushButton("Очистить")
+        for btn in (
+            self.btn_automator_add,
+            self.btn_automator_edit,
+            self.btn_automator_remove,
+            self.btn_automator_up,
+            self.btn_automator_down,
+            self.btn_automator_clear,
+        ):
+            btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+            controls.addWidget(btn)
+        controls.addStretch(1)
+        outer.addLayout(controls)
+
+        self.btn_run_automator = QtWidgets.QPushButton("🚀 Запустить автоматизацию")
+        self.btn_run_automator.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        outer.addWidget(self.btn_run_automator)
+        outer.addStretch(1)
+        return container
+
+    def _build_global_log_page(self) -> QtWidgets.QWidget:
+        panel = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(panel)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(14)
+
+        header = QtWidgets.QLabel("Журнал объединяет статусы скачки, блюра, склейки, загрузки и автогена.")
+        header.setWordWrap(True)
+        header.setStyleSheet("QLabel{color:#94a3b8;font-size:12px;}")
+        layout.addWidget(header)
+
+        self.activity_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
+        self.activity_splitter.setChildrenCollapsible(False)
+        self.activity_splitter.setHandleWidth(8)
+        layout.addWidget(self.activity_splitter, 1)
+
+        current_wrap = QtWidgets.QWidget()
+        current_layout = QtWidgets.QVBoxLayout(current_wrap)
+        current_layout.setContentsMargins(0, 0, 0, 0)
+        current_layout.setSpacing(6)
+        self.current_event_card = QtWidgets.QFrame()
+        self.current_event_card.setObjectName("currentEventCard")
+        self.current_event_card.setStyleSheet(
+            "QFrame#currentEventCard{background:transparent;border:1px solid #27364d;border-radius:14px;padding:0;}"
+            "QLabel#currentEventTitle{color:#9fb7ff;font-size:11px;letter-spacing:1px;text-transform:uppercase;}"
+            "QFrame#currentEventBodyFrame{background:transparent;border:1px solid #1f2a40;border-radius:10px;}"
+            "QLabel#currentEventBody{color:#f8fafc;font-size:15px;font-weight:600;background:transparent;}"
+        )
+        card_layout = QtWidgets.QVBoxLayout(self.current_event_card)
+        card_layout.setContentsMargins(14, 12, 14, 12)
+        self.lbl_current_event_title = QtWidgets.QLabel("Сейчас")
+        self.lbl_current_event_title.setObjectName("currentEventTitle")
+        body_wrap = QtWidgets.QFrame()
+        body_wrap.setObjectName("currentEventBodyFrame")
+        body_layout = QtWidgets.QVBoxLayout(body_wrap)
+        body_layout.setContentsMargins(12, 8, 12, 8)
+        body_layout.setSpacing(0)
+        self.lbl_current_event_body = QtWidgets.QLabel("—")
+        self.lbl_current_event_body.setObjectName("currentEventBody")
+        self.lbl_current_event_body.setWordWrap(True)
+        body_layout.addWidget(self.lbl_current_event_body)
+        self.lbl_current_event_timer = QtWidgets.QLabel("—")
+        self.lbl_current_event_timer.setObjectName("currentEventTimer")
+        self.lbl_current_event_timer.setStyleSheet("color:#94a3b8;font-size:11px;")
+        card_layout.addWidget(self.lbl_current_event_title)
+        card_layout.addWidget(body_wrap)
+        card_layout.addWidget(self.lbl_current_event_timer)
+        current_layout.addWidget(self.current_event_card)
+        self.activity_splitter.addWidget(current_wrap)
+        self.activity_current_wrap = current_wrap
+
+        history_panel = QtWidgets.QWidget()
+        history_layout = QtWidgets.QVBoxLayout(history_panel)
+        history_layout.setContentsMargins(0, 0, 0, 0)
+        history_layout.setSpacing(6)
+        filter_row = QtWidgets.QHBoxLayout()
+        self.ed_activity_filter = QtWidgets.QLineEdit()
+        self.ed_activity_filter.setPlaceholderText("Фильтр по тексту или тегу…")
+        self.ed_activity_filter.setClearButtonEnabled(True)
+        self.btn_activity_export = QtWidgets.QPushButton("Экспорт")
+        filter_row.addWidget(self.ed_activity_filter, 1)
+        filter_row.addWidget(self.btn_activity_export)
+        history_layout.addLayout(filter_row)
+        self.lst_activity = QtWidgets.QListWidget()
+        self.lst_activity.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
+        self.lst_activity.setUniformItemSizes(False)
+        self.lst_activity.setWordWrap(True)
+        self.lst_activity.setAlternatingRowColors(False)
+        self.lst_activity.setSpacing(2)
+        self._apply_activity_density(persist=False)
+        history_layout.addWidget(self.lst_activity, 1)
+        self.lbl_activity_hint = QtWidgets.QLabel(
+            "История событий пополняется автоматически при выполнении операций."
+        )
+        self.lbl_activity_hint.setWordWrap(True)
+        self.lbl_activity_hint.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
+        history_layout.addWidget(self.lbl_activity_hint)
+        self.activity_splitter.addWidget(history_panel)
+        self.activity_splitter.setStretchFactor(0, 0)
+        self.activity_splitter.setStretchFactor(1, 1)
+
+        toolbar = QtWidgets.QHBoxLayout()
+        toolbar.setSpacing(8)
+        self.chk_activity_visible = QtWidgets.QCheckBox("Показывать журнал")
+        self.chk_activity_visible.setChecked(bool(self.cfg.get("ui", {}).get("show_activity", True)))
+        self.chk_activity_visible.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        self.btn_activity_clear = QtWidgets.QPushButton("🧹 Очистить")
+        toolbar.addWidget(self.chk_activity_visible)
+        toolbar.addWidget(self.btn_activity_clear)
+        toolbar.addStretch(1)
+        layout.addLayout(toolbar)
+
+        return panel
+
+    def _build_session_log_page(self) -> QtWidgets.QWidget:
+        panel = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(panel)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
+
+        intro = QtWidgets.QLabel(
+            "Выбери сессию, чтобы увидеть последние строки из журналов вставки промптов, скачки и загрузки."
+        )
+        intro.setWordWrap(True)
+        intro.setStyleSheet("QLabel{color:#94a3b8;font-size:12px;}")
+        layout.addWidget(intro)
+
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+        splitter.setChildrenCollapsible(False)
+        splitter.setHandleWidth(6)
+        layout.addWidget(splitter, 1)
+
+        self.lst_session_logs = QtWidgets.QListWidget()
+        self.lst_session_logs.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        self.lst_session_logs.setAlternatingRowColors(True)
+        splitter.addWidget(self.lst_session_logs)
+
+        self.txt_session_logs = QtWidgets.QPlainTextEdit()
+        self.txt_session_logs.setReadOnly(True)
+        self.txt_session_logs.setLineWrapMode(QtWidgets.QPlainTextEdit.LineWrapMode.NoWrap)
+        splitter.addWidget(self.txt_session_logs)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+
+        self.lst_session_logs.itemSelectionChanged.connect(self._on_session_log_selected)
+
+        return panel
+
+    def _toggle_nav_category(self, category: str) -> None:
+        collapsed = not self._nav_category_collapsed.get(category, False)
+        self._nav_category_collapsed[category] = collapsed
+        for item in self._nav_category_members.get(category, []):
+            item.setHidden(collapsed)
+        ui_cfg = self.cfg.setdefault("ui", {})
+        ui_cfg["nav_collapsed"] = dict(self._nav_category_collapsed)
+        save_cfg(self.cfg)
+        header = self._nav_group_rows.get(category)
+        if header:
+            arrow = "▶" if collapsed else "▼"
+            header.setText(f"{arrow} {category.upper()}")
+
+    def _on_nav_item_clicked(self, item: QtWidgets.QListWidgetItem) -> None:
+        marker = item.data(QtCore.Qt.ItemDataRole.UserRole + 1)
+        if marker == "header":
+            category = item.data(QtCore.Qt.ItemDataRole.UserRole + 2) or ""
+            if category:
+                self._toggle_nav_category(str(category))
+        else:
+            key = item.data(QtCore.Qt.ItemDataRole.UserRole)
+            if key:
+                self._focus_section_from_command(str(key))
+
+    def _refresh_session_log_panel(self) -> None:
+        if not hasattr(self, "lst_session_logs"):
+            return
+        current = getattr(self, "_current_session_log_id", "")
+        self.lst_session_logs.blockSignals(True)
+        self.lst_session_logs.clear()
+        target_row = 0
+        for idx, session_id in enumerate(self._session_order):
+            session = self._session_cache.get(session_id)
+            if not session:
+                continue
+            item = QtWidgets.QListWidgetItem(self._session_display_label(session_id))
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, session_id)
+            self.lst_session_logs.addItem(item)
+            if session_id == current:
+                target_row = idx
+        if self.lst_session_logs.count():
+            self.lst_session_logs.setCurrentRow(target_row)
+        self.lst_session_logs.blockSignals(False)
+        self._on_session_log_selected()
+
+    def _session_log_text(self, session_id: str) -> str:
+        session = self._session_cache.get(session_id)
+        if not session:
+            return "Сессия не найдена"
+
+        def tail(path: Path, limit: int = 200) -> str:
+            if not path.exists():
+                return ""
+            try:
+                lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+            except Exception:
+                return ""
+            return "\n".join(lines[-limit:])
+
+        parts = []
+        state = self._ensure_session_state(session_id)
+        if state.get("last_message"):
+            parts.append(f"⚙️ Статус: {state['last_message']}")
+
+        submitted = self._session_submitted_log_path(session)
+        submitted_text = tail(submitted)
+        if submitted_text:
+            parts.append(f"📄 submitted.log ({submitted}):\n{submitted_text}")
+
+        failed = self._session_failed_log_path(session)
+        failed_text = tail(failed)
+        if failed_text:
+            parts.append(f"⚠️ failed.log ({failed}):\n{failed_text}")
+
+        download_dir = self._session_download_dir(session)
+        dl_log = download_dir / "download.log"
+        dl_text = tail(dl_log)
+        if dl_text:
+            parts.append(f"⬇️ download.log ({dl_log}):\n{dl_text}")
+
+        return "\n\n".join(parts) if parts else "Журналы отсутствуют"
+
+    def _on_session_log_selected(self) -> None:
+        if not hasattr(self, "lst_session_logs"):
+            return
+        items = self.lst_session_logs.selectedItems()
+        if not items:
+            self.txt_session_logs.setPlainText("Выбери сессию слева")
+            self._current_session_log_id = ""
+            return
+        session_id = items[0].data(QtCore.Qt.ItemDataRole.UserRole) or ""
+        self._current_session_log_id = str(session_id)
+        text = self._session_log_text(self._current_session_log_id)
+        self.txt_session_logs.setPlainText(text)
+
+    def _refresh_logs_context(self) -> None:
+        # контекст обновляется автоматически через ленту статусов
+        return
+
+    def _refresh_session_logs_context(self) -> None:
+        # дополнительного состояния не требуется
+        return
+
     def _wire(self):
         # статусы/лог — безопасные слоты GUI-потока
         self.sig_set_status.connect(self._slot_set_status)
@@ -7050,6 +7037,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_open_blur.clicked.connect(lambda: open_in_finder(self.cfg.get("blurred_dir", BLUR_DIR)))
         self.btn_open_merge.clicked.connect(lambda: open_in_finder(self.cfg.get("merged_dir", MERG_DIR)))
         self.btn_open_images_top.clicked.connect(self._open_genai_output_dir)
+        self.btn_open_restored_top.clicked.connect(
+            lambda: open_in_finder(
+                _project_path(
+                    self.cfg.get("watermark_cleaner", {}).get("output_dir", str(PROJECT_ROOT / "restored"))
+                )
+            )
+        )
         self.btn_stop_all.clicked.connect(self._stop_all)
         self.btn_start_selected.clicked.connect(self._run_scenario)
         self.btn_activity_clear.clicked.connect(self._clear_activity)

@@ -19,6 +19,9 @@ DEFAULT_SOURCE_DIR = PROJECT_ROOT / "downloads"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "restored"
 DEFAULT_TEMPLATE = PROJECT_ROOT / "watermark.png"
 
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 LogRecord = Dict[str, object]
 BBox = Tuple[int, int, int, int]
 
@@ -127,7 +130,7 @@ def _build_detection_map(
     detect_cfg: Dict[str, object],
     per_frame: bool,
 ) -> Dict[int, List[BBox]]:
-    from watermark_detector import detect_watermark  # type: ignore[import]
+    from .watermark_detector import detect_watermark
 
     kwargs = dict(detect_cfg)
     kwargs.update({
@@ -309,7 +312,7 @@ def _process_video(
 
 
 def main() -> int:
-    from watermark_detector import prepare_template  # type: ignore[import]
+    from .watermark_detector import prepare_template
 
     env = os.environ
     source_dir = Path(env.get("WMR_SOURCE_DIR", str(DEFAULT_SOURCE_DIR)))
@@ -331,7 +334,8 @@ def main() -> int:
     scale_max = _coerce_float(env.get("WMR_SCALE_MAX"), 1.2)
     scale_steps = max(3, _coerce_int(env.get("WMR_SCALE_STEPS"), 9))
     mask_threshold = max(0, _coerce_int(env.get("WMR_MASK_THRESHOLD"), 8))
-    donor_per_frame = env.get("WMR_FULL_SCAN", "0") not in {"0", "false", "False", "no"}
+    full_scan_flag = env.get("WMR_FULL_SCAN")
+    donor_per_frame = True if full_scan_flag is None else full_scan_flag not in {"0", "false", "False", "no"}
 
     detect_cfg = {
         "threshold": threshold,
