@@ -1502,13 +1502,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self._section_index: Dict[str, int] = {}
         self._section_order: List[str] = []
         self._current_section_key: str = ""
+        self._context_saved_size: int = 320
+        self._nav_saved_size: int = 260
 
         self._build_ui()
         self._wire()
         self._refresh_automator_list()
         self._init_state()
         self._refresh_update_buttons()
+        self._refresh_pipeline_context()
 
+        QtCore.QTimer.singleShot(0, self._init_splitter_sizes)
         QtCore.QTimer.singleShot(0, self._perform_delayed_startup)
 
         # дать раннеру ffmpeg доступ к self для логов
@@ -1702,7 +1706,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_sessions_list()
         if getattr(self, "_current_session_id", None) == session_id:
             self._update_session_status_panel(session_id)
-        self._refresh_workspace_context()
+        self._refresh_sessions_context()
         window = self._session_windows.get(session_id)
         if window:
             window.update_status(status, message, rc)
@@ -1750,7 +1754,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.lst_sessions.setCurrentRow(target_row)
         self.lst_sessions.blockSignals(False)
         self._refresh_command_palette_sessions()
-        self._refresh_workspace_context()
+        self._refresh_sessions_context()
         self._refresh_automator_list()
         self._refresh_session_log_panel()
 
@@ -1954,7 +1958,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._current_session_id = session_id
         self._load_session_into_editor(session_id)
-        self._refresh_workspace_context()
+        self._refresh_sessions_context()
 
     def _create_session(self, name: Optional[str] = None) -> Dict[str, Any]:
         session_id = uuid.uuid4().hex[:8]
@@ -2612,6 +2616,42 @@ class MainWindow(QtWidgets.QMainWindow):
                 background: rgba(99,102,241,0.25);
                 border-color: #8ba8ff;
             }
+            QSplitter#mainSplitter::handle {
+                background: rgba(148,163,184,0.18);
+                width: 8px;
+                border-radius: 3px;
+            }
+            QSplitter#mainSplitter::handle:hover {
+                background: rgba(129,140,248,0.38);
+            }
+            QFrame#navFrame {
+                background: rgba(15,23,42,0.82);
+                border: 1px solid #1f2a40;
+                border-radius: 18px;
+                padding: 6px 0;
+            }
+            QFrame#sectionContainer {
+                background: transparent;
+            }
+            QFrame#sectionSurface {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 rgba(15,23,42,0.94), stop:1 rgba(17,24,39,0.92));
+                border: 1px solid rgba(148,163,184,0.18);
+                border-radius: 20px;
+                padding: 12px;
+            }
+            QScrollArea#sectionScrollArea {
+                background: transparent;
+                border: none;
+            }
+            QWidget#sectionScrollWidget {
+                background: transparent;
+            }
+            QFrame#contextContainer {
+                background: rgba(15,23,42,0.88);
+                border: 1px solid #1e293b;
+                border-radius: 18px;
+                padding: 12px 0;
+            }
             QPushButton {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #1f2d4a, stop:1 #16213a);
                 border: 1px solid #314365;
@@ -2974,9 +3014,21 @@ class MainWindow(QtWidgets.QMainWindow):
 
         body = QtWidgets.QFrame()
         body.setObjectName("mainBody")
-        body_layout = QtWidgets.QHBoxLayout(body)
+        body_layout = QtWidgets.QVBoxLayout(body)
         body_layout.setContentsMargins(0, 0, 0, 0)
-        body_layout.setSpacing(16)
+        body_layout.setSpacing(0)
+
+        self.body_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+        self.body_splitter.setObjectName("mainSplitter")
+        self.body_splitter.setChildrenCollapsible(False)
+        self.body_splitter.setHandleWidth(8)
+        body_layout.addWidget(self.body_splitter, 1)
+
+        nav_frame = QtWidgets.QFrame()
+        nav_frame.setObjectName("navFrame")
+        nav_layout = QtWidgets.QVBoxLayout(nav_frame)
+        nav_layout.setContentsMargins(0, 0, 0, 0)
+        nav_layout.setSpacing(0)
 
         self.section_nav = QtWidgets.QListWidget()
         self.section_nav.setObjectName("sectionNav")
@@ -2992,11 +3044,19 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QSizePolicy.Policy.Expanding,
         )
         self.section_nav.itemClicked.connect(self._on_nav_item_clicked)
-        body_layout.addWidget(self.section_nav)
+        nav_layout.addWidget(self.section_nav)
+        self.body_splitter.addWidget(nav_frame)
+
+        self.section_stack_container = QtWidgets.QFrame()
+        self.section_stack_container.setObjectName("sectionContainer")
+        section_container_layout = QtWidgets.QVBoxLayout(self.section_stack_container)
+        section_container_layout.setContentsMargins(0, 0, 0, 0)
+        section_container_layout.setSpacing(0)
 
         self.section_stack = QtWidgets.QStackedWidget()
         self.section_stack.setObjectName("sectionStack")
-        body_layout.addWidget(self.section_stack, 1)
+        section_container_layout.addWidget(self.section_stack, 1)
+        self.body_splitter.addWidget(self.section_stack_container)
 
         self.context_container = QtWidgets.QFrame()
         self.context_container.setObjectName("contextContainer")
@@ -3067,11 +3127,10 @@ class MainWindow(QtWidgets.QMainWindow):
         custom_panel_layout.addWidget(self.custom_command_button_host)
         context_layout.addWidget(self.custom_command_panel)
 
-        body_layout.addWidget(self.context_container)
-
-        body_layout.setStretch(0, 0)
-        body_layout.setStretch(1, 1)
-        body_layout.setStretch(2, 0)
+        self.body_splitter.addWidget(self.context_container)
+        self.body_splitter.setStretchFactor(0, 0)
+        self.body_splitter.setStretchFactor(1, 1)
+        self.body_splitter.setStretchFactor(2, 0)
 
         v.addWidget(body, 1)
 
@@ -3108,7 +3167,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 area.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
                 area.setWidget(widget)
                 container = area
-            idx = self.section_stack.addWidget(container)
+            surface = QtWidgets.QFrame()
+            surface.setObjectName("sectionSurface")
+            surface_layout = QtWidgets.QVBoxLayout(surface)
+            surface_layout.setContentsMargins(0, 0, 0, 0)
+            surface_layout.setSpacing(0)
+            surface_layout.addWidget(container)
+            idx = self.section_stack.addWidget(surface)
             self._section_index[key] = idx
             self._section_order.append(key)
             if category not in self._nav_group_rows:
@@ -3119,7 +3184,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 font.setPointSize(max(font.pointSize() - 1, 9))
                 group_item.setFont(font)
                 group_item.setForeground(QtGui.QColor("#64748b"))
-                group_item.setBackground(QtGui.QColor("#0f172a"))
+                group_item.setBackground(QtGui.QColor("#16233f"))
                 group_item.setSizeHint(QtCore.QSize(220, 30))
                 group_item.setData(QtCore.Qt.ItemDataRole.UserRole, None)
                 group_item.setData(QtCore.Qt.ItemDataRole.UserRole + 1, "header")
@@ -3159,11 +3224,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
         def make_scroll_tab(margins=(12, 12, 12, 12), spacing=10):
             area = QtWidgets.QScrollArea()
+            area.setObjectName("sectionScrollArea")
             area.setWidgetResizable(True)
             area.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
             area.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
             area.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
             body_widget = QtWidgets.QWidget()
+            body_widget.setObjectName("sectionScrollWidget")
             layout = QtWidgets.QVBoxLayout(body_widget)
             layout.setContentsMargins(*margins)
             layout.setSpacing(spacing)
@@ -3304,8 +3371,8 @@ class MainWindow(QtWidgets.QMainWindow):
         link_layout = QtWidgets.QHBoxLayout(quick_links)
         link_layout.setContentsMargins(16, 12, 16, 12)
         link_layout.setSpacing(10)
-        btn_to_workflow = QtWidgets.QPushButton("🧠 К рабочему потоку")
-        btn_to_workflow.clicked.connect(lambda: self._select_section("workflow"))
+        btn_to_workflow = QtWidgets.QPushButton("🧠 К пайплайну")
+        btn_to_workflow.clicked.connect(lambda: self._select_section("pipeline"))
         btn_to_automator = QtWidgets.QPushButton("🤖 Открыть автоматизатор")
         btn_to_automator.clicked.connect(lambda: self._select_section("automator"))
         btn_to_logs = QtWidgets.QPushButton("📜 Журналы")
@@ -3333,21 +3400,78 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
         self.tab_sessions = self._build_sessions_tab()
-        workflow_context, workflow_ctx_layout = make_context_card(
-            "Рабочий поток",
-            "Редактируй сессии и запускай пайплайн в одном месте."
+        sessions_context, sessions_ctx_layout = make_context_card(
+            "Рабочие пространства",
+            "Выбирай сессию, управляй портами и быстрыми действиями."
         )
-        workflow_ctx_layout.addWidget(QtWidgets.QLabel("В левой панели — управление сессиями. Ниже — настройка этапов."))
-        workflow_ctx_layout.addStretch(1)
-        register_context("workflow", workflow_context)
-        workflow_root = self._build_workflow_page()
+        sessions_form = QtWidgets.QFormLayout()
+        sessions_form.setHorizontalSpacing(8)
+        sessions_form.setVerticalSpacing(6)
+        self.lbl_context_session_name = QtWidgets.QLabel("—")
+        self.lbl_context_session_profiles = QtWidgets.QLabel("—")
+        self.lbl_context_session_profiles.setWordWrap(True)
+        self.lbl_context_session_status = QtWidgets.QLabel("—")
+        self.lbl_context_session_status.setWordWrap(True)
+        sessions_form.addRow("Активная:", self.lbl_context_session_name)
+        sessions_form.addRow("Ресурсы:", self.lbl_context_session_profiles)
+        sessions_form.addRow("Статус:", self.lbl_context_session_status)
+        sessions_ctx_layout.addLayout(sessions_form)
+        sessions_buttons = QtWidgets.QHBoxLayout()
+        sessions_buttons.setSpacing(6)
+        self.btn_context_session_window = QtWidgets.QPushButton("🗔 Окно")
+        self.btn_context_session_prompts = QtWidgets.QPushButton("✍️ Промпты")
+        self.btn_context_session_images = QtWidgets.QPushButton("🖼️ Картинки")
+        self.btn_context_session_download = QtWidgets.QPushButton("⬇️ Скачка")
+        self.btn_context_session_watermark = QtWidgets.QPushButton("🧼 Очистка")
+        for btn in (
+            self.btn_context_session_window,
+            self.btn_context_session_prompts,
+            self.btn_context_session_images,
+            self.btn_context_session_download,
+            self.btn_context_session_watermark,
+        ):
+            btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+            sessions_buttons.addWidget(btn)
+        sessions_buttons.addStretch(1)
+        sessions_ctx_layout.addLayout(sessions_buttons)
+        sessions_ctx_layout.addStretch(1)
+        register_context("sessions", sessions_context)
         add_section(
-            "workflow",
-            "🧠 Рабочий поток",
-            workflow_root,
+            "sessions",
+            "🗂️ Рабочие пространства",
+            self.tab_sessions,
             scrollable=True,
             category="Рабочие процессы",
-            description="Сессии и пайплайн на одной странице",
+            description="Настройки отдельных Chrome-сессий и связанных файлов",
+        )
+
+        pipeline_context, pipeline_ctx_layout = make_context_card(
+            "Пайплайн",
+            "Собери нужные этапы и контролируй лимиты перед запуском."
+        )
+        self.lbl_context_pipeline_profile = QtWidgets.QLabel("—")
+        self.lbl_context_pipeline_profile.setWordWrap(True)
+        self.lbl_context_pipeline_steps = QtWidgets.QLabel("—")
+        self.lbl_context_pipeline_steps.setWordWrap(True)
+        self.lbl_context_pipeline_limits = QtWidgets.QLabel("—")
+        self.lbl_context_pipeline_limits.setWordWrap(True)
+        pipeline_form = QtWidgets.QFormLayout()
+        pipeline_form.setHorizontalSpacing(8)
+        pipeline_form.setVerticalSpacing(6)
+        pipeline_form.addRow("Chrome:", self.lbl_context_pipeline_profile)
+        pipeline_form.addRow("Этапы:", self.lbl_context_pipeline_steps)
+        pipeline_form.addRow("Лимиты:", self.lbl_context_pipeline_limits)
+        pipeline_ctx_layout.addLayout(pipeline_form)
+        pipeline_ctx_layout.addStretch(1)
+        register_context("pipeline", pipeline_context)
+        pipeline_root = self._build_pipeline_page()
+        add_section(
+            "pipeline",
+            "🧠 Пайплайн",
+            pipeline_root,
+            scrollable=True,
+            category="Рабочие процессы",
+            description="Настройка последовательности действий и лимитов",
         )
 
         automator_root = self._build_automator_page()
@@ -4382,7 +4506,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.activateWindow()
 
     def _focus_session_from_command(self, session_id: str) -> None:
-        self._focus_section_from_command("workflow")
+        self._focus_section_from_command("sessions")
         if not hasattr(self, "lst_sessions"):
             return
         for row in range(self.lst_sessions.count()):
@@ -4431,7 +4555,28 @@ class MainWindow(QtWidgets.QMainWindow):
             )
 
     def _set_context_visible(self, visible: bool, *, persist: bool = True) -> None:
-        if hasattr(self, "context_container"):
+        if hasattr(self, "body_splitter") and hasattr(self, "context_container"):
+            sizes = self.body_splitter.sizes()
+            if not isinstance(sizes, list) or len(sizes) < 3:
+                sizes = [self._nav_saved_size, self.width(), self._context_saved_size]
+            total = sum(sizes) or max(self.width(), 1)
+            nav = sizes[0] or self._nav_saved_size
+            self._nav_saved_size = max(nav, 220)
+            if visible:
+                context_target = max(self._context_saved_size, 260)
+                middle = max(total - nav - context_target, 320)
+                self.body_splitter.blockSignals(True)
+                self.body_splitter.setSizes([nav, middle, context_target])
+                self.body_splitter.blockSignals(False)
+                self.context_container.show()
+            else:
+                self._context_saved_size = sizes[2] or max(self.context_container.width(), 260)
+                middle = max(total - nav, 320)
+                self.body_splitter.blockSignals(True)
+                self.body_splitter.setSizes([nav, middle, 0])
+                self.body_splitter.blockSignals(False)
+                self.context_container.hide()
+        elif hasattr(self, "context_container"):
             self.context_container.setVisible(bool(visible))
         if hasattr(self, "btn_toggle_commands"):
             self.btn_toggle_commands.blockSignals(True)
@@ -4450,6 +4595,17 @@ class MainWindow(QtWidgets.QMainWindow):
         if persist:
             self.cfg.setdefault("ui", {})["show_context"] = bool(visible)
             self._mark_settings_dirty()
+
+    def _init_splitter_sizes(self) -> None:
+        if not hasattr(self, "body_splitter"):
+            return
+        sizes = self.body_splitter.sizes()
+        if not sizes or sum(sizes) == 0:
+            self.body_splitter.setSizes([
+                max(self._nav_saved_size, 240),
+                max(self.width() - self._nav_saved_size - self._context_saved_size, 480),
+                max(self._context_saved_size, 280),
+            ])
 
     def _rebuild_custom_command_panel(self) -> None:
         if not hasattr(self, "custom_command_button_layout"):
@@ -4623,7 +4779,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.context_stack.setCurrentIndex(idx)
         refresher = {
             "overview": self._refresh_overview_context,
-            "workflow": self._refresh_workspace_context,
+            "sessions": self._refresh_sessions_context,
+            "pipeline": self._refresh_pipeline_context,
             "automator": self._refresh_automation_context,
             "logs": self._refresh_logs_context,
             "session_logs": self._refresh_session_logs_context,
@@ -4645,7 +4802,7 @@ class MainWindow(QtWidgets.QMainWindow):
             mapping = {"compact": "компактная", "cozy": "стандартная"}
             self.lbl_context_overview_density.setText(mapping.get(density, density))
 
-    def _refresh_workspace_context(self) -> None:
+    def _refresh_sessions_context(self) -> None:
         if not hasattr(self, "lbl_context_session_name"):
             return
         session = self._session_cache.get(self._current_session_id)
@@ -4669,6 +4826,39 @@ class MainWindow(QtWidgets.QMainWindow):
         message = state.get("last_message", "")
         icon = self._session_status_icon(status)
         self.lbl_context_session_status.setText(message or f"{icon} {status}")
+
+    def _refresh_pipeline_context(self) -> None:
+        if not hasattr(self, "lbl_context_pipeline_profile"):
+            return
+        profile = self.cmb_chrome_profile_top.currentText() if hasattr(self, "cmb_chrome_profile_top") else ""
+        profile = profile or "по умолчанию"
+        self.lbl_context_pipeline_profile.setText(profile)
+        stages = []
+        stage_labels = [
+            (getattr(self, "cb_do_images", None), "Картинки"),
+            (getattr(self, "cb_do_autogen", None), "Промпты"),
+            (getattr(self, "cb_do_download", None), "Скачка"),
+            (getattr(self, "cb_do_blur", None), "Блюр"),
+            (getattr(self, "cb_do_watermark", None), "Очистка"),
+            (getattr(self, "cb_do_merge", None), "Склейка"),
+            (getattr(self, "cb_do_upload", None), "YouTube"),
+            (getattr(self, "cb_do_tiktok", None), "TikTok"),
+        ]
+        for checkbox, label in stage_labels:
+            if checkbox is not None and checkbox.isChecked():
+                stages.append(label)
+        self.lbl_context_pipeline_steps.setText(
+            ", ".join(stages) if stages else "этапы не выбраны"
+        )
+        limit_parts = []
+        if hasattr(self, "sb_max_videos"):
+            max_videos = self.sb_max_videos.value()
+            limit_parts.append("нет ограничения" if max_videos <= 0 else f"до {max_videos} видео")
+        if hasattr(self, "sb_merge_group"):
+            limit_parts.append(f"склейка по {self.sb_merge_group.value()} клипа")
+        self.lbl_context_pipeline_limits.setText(
+            ", ".join(limit_parts) if limit_parts else "—"
+        )
 
     def _refresh_automation_context(self) -> None:
         # Контекстная панель основана на статических пресетах, динамических данных нет
@@ -6303,6 +6493,8 @@ class MainWindow(QtWidgets.QMainWindow):
             row = idx // 2
             col = idx % 2
             stages_layout.addWidget(box, row, col)
+        for box in stage_boxes:
+            box.stateChanged.connect(lambda *_: self._refresh_pipeline_context())
         layout.addWidget(stages_group)
 
         settings_group = QtWidgets.QGroupBox("Настройки этапов")
@@ -6724,23 +6916,20 @@ class MainWindow(QtWidgets.QMainWindow):
 
         return tab
 
-    def _build_workflow_page(self) -> QtWidgets.QWidget:
+    def _build_pipeline_page(self) -> QtWidgets.QWidget:
         root = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(root)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(16)
 
         header = QtWidgets.QLabel(
-            "Настрой рабочие пространства для каждого профиля Chrome, а затем запусти пайплайн прямо отсюда."
+            "Собери последовательность шагов: выбери этапы, лимиты и действия перед запуском." 
         )
         header.setWordWrap(True)
         header.setStyleSheet("QLabel{color:#94a3b8;font-size:12px;}")
         layout.addWidget(header)
 
-        layout.addWidget(self.tab_sessions)
-
-        pipeline_panel = self._build_pipeline_panel()
-        layout.addWidget(pipeline_panel)
+        layout.addWidget(self._build_pipeline_panel())
         layout.addStretch(1)
         return root
 
@@ -7028,6 +7217,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sig_log.connect(self._slot_log)
 
         self.cmb_chrome_profile_top.currentIndexChanged.connect(self._on_top_chrome_profile_changed)
+        self.cmb_chrome_profile_top.currentIndexChanged.connect(lambda *_: self._refresh_pipeline_context())
         self.btn_scan_profiles_top.clicked.connect(self._on_toolbar_scan_profiles)
         if hasattr(self, "btn_toggle_commands"):
             self.btn_toggle_commands.toggled.connect(self._on_toolbar_commands_toggle)
@@ -7099,6 +7289,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_reset_titles_cursor.clicked.connect(self._reset_titles_cursor)
 
         self.btn_apply_dl.clicked.connect(self._apply_dl_limit)
+        if hasattr(self, "sb_max_videos"):
+            self.sb_max_videos.valueChanged.connect(lambda *_: self._refresh_pipeline_context())
+        if hasattr(self, "sb_merge_group"):
+            self.sb_merge_group.valueChanged.connect(lambda *_: self._refresh_pipeline_context())
         self.btn_run_scenario.clicked.connect(self._run_scenario)
         self.btn_run_autogen_images.clicked.connect(self._save_and_run_autogen_images)
         self.btn_run_watermark.clicked.connect(self._run_watermark)
