@@ -223,8 +223,36 @@ def _wait_for_new_cards(page, previous_total: int, timeout_ms: int) -> bool:
         return False
 
 
+def _smooth_scroll(page, *, distance: int = 1400, pulses: int = 6, pause: tuple[float, float] = (0.1, 0.22)) -> None:
+    """Плавно прокручивает страницу небольшими импульсами."""
+
+    if pulses <= 0:
+        pulses = 1
+    step = max(int(distance / pulses), 120)
+    for _ in range(pulses):
+        try:
+            page.mouse.wheel(0, step)
+        except Exception:
+            try:
+                page.evaluate("window.scrollBy(0, arguments[0])", step)
+            except Exception:
+                break
+        page.wait_for_timeout(int(random.uniform(pause[0], pause[1]) * 1000))
+
+
+def _is_near_bottom(page) -> bool:
+    try:
+        return bool(
+            page.evaluate(
+                "() => (window.innerHeight + window.scrollY + 120) >= (document.body ? document.body.scrollHeight : 0)"
+            )
+        )
+    except Exception:
+        return False
+
+
 def collect_card_links(page, desired: int) -> list[str]:
-    """Собирает уникальные ссылки карточек, аккуратно прокручивая список."""
+    """Собирает уникальные ссылки карточек плавной прокруткой ленты."""
 
     print("[i] Сканирую карточки Sora…")
     links: list[str] = []
@@ -273,35 +301,30 @@ def collect_card_links(page, desired: int) -> list[str]:
         else:
             satisfied_rounds = 0
 
-        stagnation_limit = 10 if target_only else 5
+        stagnation_limit = 12 if target_only else 6
         if (
             (target_only and satisfied_rounds >= settle_rounds)
             or stagnation >= stagnation_limit
-            or rounds >= (160 if target_only else 90)
+            or rounds >= (220 if target_only else 120)
         ):
             break
 
         rounds += 1
 
-        scroll_attempts = 3 if target_only else 1
-        waited = False
-        for _ in range(scroll_attempts):
-            prev_total = dom_count
-            try:
-                page.mouse.wheel(0, 900)
-            except Exception:
-                try:
-                    idx = max(cards.count() - 1, 0)
-                    cards.nth(idx).scroll_into_view_if_needed()
-                except Exception:
-                    pass
-            page.wait_for_timeout(280 if target_only else 220)
-            if _wait_for_new_cards(page, prev_total, 1600 if target_only else 900):
-                waited = True
-                break
-        if not waited and target_only:
-            # последняя попытка — небольшая пауза перед следующим проходом
-            page.wait_for_timeout(400)
+        prev_total = dom_count
+        pulses = 8 if target_only else 5
+        distance = 1800 if target_only else 1200
+        _smooth_scroll(page, distance=distance, pulses=pulses)
+
+        waited = _wait_for_new_cards(page, prev_total, 2200 if target_only else 1400)
+        if not waited:
+            long_jitter(0.9, 1.4 if target_only else 1.0)
+        if target_only and _is_near_bottom(page):
+            # если дошли до конца, ждём возможной догрузки и завершаем
+            page.wait_for_timeout(700)
+            _wait_for_new_cards(page, len(current), 1400)
+            break
+
         long_jitter(1.05, 1.55 if target_only else 1.2)
 
     print(f"[i] Итого уникальных карточек: {len(links)}")

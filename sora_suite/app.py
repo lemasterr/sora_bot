@@ -2301,6 +2301,16 @@ class MainWindow(QtWidgets.QMainWindow):
             QLabel#sessionWindowHint { color: #94a3b8; font-size: 11px; }
             QLabel#sessionWindowLogTitle { font-size: 12px; font-weight: 600; color: #cbd5f5; }
             QFrame#contextCard { background: rgba(15,23,42,0.6); border:1px solid rgba(148,163,184,0.24); border-radius:16px; }
+            QFrame#contextStatusCard { background: rgba(15,23,42,0.78); border:1px solid rgba(148,163,184,0.28); border-radius:16px; }
+            QLabel#contextStatusTitle { color:#cbd5f5; font-weight:600; letter-spacing:0.3px; }
+            QLabel#contextStatusText { color:#e2e8f0; font-size:12px; }
+            QProgressBar#contextStatusProgress {
+                background:#0f172a;
+                border:1px solid rgba(148,163,184,0.16);
+                border-radius:6px;
+                height:12px;
+            }
+            QProgressBar#contextStatusProgress::chunk { background:#4c6ef5; border-radius:6px; }
             QLabel#contextTitle { font-size:14px; font-weight:600; color:#cbd5f5; }
             QLabel#contextSubtitle { color:#94a3b8; font-size:12px; }
             QDialog#commandPalette { background: transparent; }
@@ -2538,6 +2548,7 @@ class MainWindow(QtWidgets.QMainWindow):
         folders_block = QtWidgets.QHBoxLayout(folders_frame)
         folders_block.setContentsMargins(4, 0, 4, 0)
         folders_block.setSpacing(6)
+        folders_block.setStretch(0, 0)
         lbl_folders = QtWidgets.QLabel("🗂️ Каталоги")
         lbl_folders.setObjectName("foldersTopLabel")
         folders_block.addWidget(lbl_folders)
@@ -2554,8 +2565,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self.btn_open_merge,
             self.btn_open_images_top,
         ):
-            btn.setMaximumWidth(110)
-            folders_block.addWidget(btn)
+            btn.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Expanding,
+                QtWidgets.QSizePolicy.Policy.Fixed,
+            )
+            folders_block.addWidget(btn, 1)
+        folders_block.addStretch(1)
         tb.addWidget(folders_frame)
 
         self.btn_command_palette_toolbar = QtWidgets.QToolButton()
@@ -2587,11 +2602,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_stop_all.setObjectName("topActionButton")
         self.btn_stop_all.setProperty("theme", "danger")
         self.btn_stop_all.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        for btn in (self.btn_start_selected, self.btn_stop_all):
+            btn.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Expanding,
+                QtWidgets.QSizePolicy.Policy.Fixed,
+            )
         action_block = QtWidgets.QHBoxLayout()
         action_block.setContentsMargins(0, 0, 0, 0)
         action_block.setSpacing(6)
-        action_block.addWidget(self.btn_start_selected)
-        action_block.addWidget(self.btn_stop_all)
+        action_block.addWidget(self.btn_start_selected, 1)
+        action_block.addWidget(self.btn_stop_all, 1)
         tb.addLayout(action_block)
 
         for themed in (self.btn_stop_all,):
@@ -2615,7 +2635,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.section_nav.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
         self.section_nav.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
         self.section_nav.setMinimumWidth(220)
-        self.section_nav.setMaximumWidth(260)
+        self.section_nav.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Preferred,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
         body_layout.addWidget(self.section_nav)
 
         self.section_stack = QtWidgets.QStackedWidget()
@@ -2627,12 +2650,48 @@ class MainWindow(QtWidgets.QMainWindow):
         context_layout = QtWidgets.QVBoxLayout(self.context_container)
         context_layout.setContentsMargins(0, 0, 0, 0)
         context_layout.setSpacing(12)
+        self.context_container.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Preferred,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
 
         self.context_stack = QtWidgets.QStackedWidget()
         self.context_stack.setObjectName("contextStack")
         self.context_stack.setMinimumWidth(260)
-        self.context_stack.setMaximumWidth(320)
+        self.context_stack.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Preferred,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
         context_layout.addWidget(self.context_stack, 1)
+
+        self.context_status_card = QtWidgets.QFrame()
+        self.context_status_card.setObjectName("contextStatusCard")
+        status_card_layout = QtWidgets.QVBoxLayout(self.context_status_card)
+        status_card_layout.setContentsMargins(18, 16, 18, 18)
+        status_card_layout.setSpacing(10)
+        self.lbl_context_status_heading = QtWidgets.QLabel("Текущий процесс")
+        self.lbl_context_status_heading.setObjectName("contextStatusTitle")
+        status_card_layout.addWidget(self.lbl_context_status_heading)
+        status_body_row = QtWidgets.QHBoxLayout()
+        status_body_row.setSpacing(8)
+        self.lbl_context_status_icon = QtWidgets.QLabel("—")
+        self.lbl_context_status_icon.setMinimumWidth(18)
+        self.lbl_context_status_icon.setAlignment(QtCore.Qt.AlignmentFlag.AlignTop)
+        self.lbl_context_status_text = QtWidgets.QLabel("—")
+        self.lbl_context_status_text.setObjectName("contextStatusText")
+        self.lbl_context_status_text.setWordWrap(True)
+        status_body_row.addWidget(self.lbl_context_status_icon, 0)
+        status_body_row.addWidget(self.lbl_context_status_text, 1)
+        status_card_layout.addLayout(status_body_row)
+        self.pb_context_status = QtWidgets.QProgressBar()
+        self.pb_context_status.setObjectName("contextStatusProgress")
+        self.pb_context_status.setMinimum(0)
+        self.pb_context_status.setMaximum(1)
+        self.pb_context_status.setValue(1)
+        self.pb_context_status.setFormat("—")
+        self.pb_context_status.setTextVisible(False)
+        status_card_layout.addWidget(self.pb_context_status)
+        context_layout.addWidget(self.context_status_card)
 
         self.custom_command_panel = QtWidgets.QFrame()
         self.custom_command_panel.setObjectName("customCommandPanel")
@@ -2811,6 +2870,10 @@ class MainWindow(QtWidgets.QMainWindow):
         ):
             btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
             btn.setMinimumHeight(38)
+            btn.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Expanding,
+                QtWidgets.QSizePolicy.Policy.Fixed,
+            )
         quick_layout.addWidget(btn_quick_run)
         quick_layout.addWidget(btn_quick_images)
         quick_layout.addWidget(btn_quick_chrome)
@@ -3090,10 +3153,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_context_session_prompts = QtWidgets.QPushButton("Автоген")
         self.btn_context_session_images = QtWidgets.QPushButton("Картинки")
         self.btn_context_session_download = QtWidgets.QPushButton("Скачивание")
-        session_buttons.addWidget(self.btn_context_session_window)
-        session_buttons.addWidget(self.btn_context_session_prompts)
-        session_buttons.addWidget(self.btn_context_session_images)
-        session_buttons.addWidget(self.btn_context_session_download)
+        for btn in (
+            self.btn_context_session_window,
+            self.btn_context_session_prompts,
+            self.btn_context_session_images,
+            self.btn_context_session_download,
+        ):
+            btn.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Expanding,
+                QtWidgets.QSizePolicy.Policy.Fixed,
+            )
+            session_buttons.addWidget(btn, 1)
         workspace_ctx_layout.addLayout(session_buttons)
         workspace_ctx_layout.addStretch(1)
         register_context("workspaces", workspace_context)
@@ -6525,15 +6595,33 @@ class MainWindow(QtWidgets.QMainWindow):
     def _slot_set_status(self, text: str, progress: int, total: int, state: str):
         # state: idle|running|ok|error
         self.lbl_status.setText(text)
+        self.lbl_context_status_text.setText(text)
         if total > 0:
             self.pb_global.setMaximum(total); self.pb_global.setValue(progress); self.pb_global.setFormat(f"{progress}/{total}")
+            self.pb_context_status.setMaximum(total)
+            self.pb_context_status.setValue(progress)
+            self.pb_context_status.setFormat(f"{progress}/{total}")
         else:
             self.pb_global.setMaximum(1); self.pb_global.setValue(1); self.pb_global.setFormat("—")
+            self.pb_context_status.setMaximum(1)
+            self.pb_context_status.setValue(1)
+            self.pb_context_status.setFormat("—")
         color = "#777"
         if state == "running": color = "#f6a700"
         if state == "ok": color = "#1bb55c"
         if state == "error": color = "#d74c4c"
         self.pb_global.setStyleSheet(f"QProgressBar::chunk {{ background-color: {color}; }}")
+        self.pb_context_status.setStyleSheet(
+            "QProgressBar#contextStatusProgress {"
+            " background:#0f172a;"
+            " border:1px solid rgba(148,163,184,0.16);"
+            " border-radius:6px;"
+            " height:12px;"
+            "}"
+            f"QProgressBar#contextStatusProgress::chunk {{ background-color: {color}; border-radius:6px; }}"
+        )
+        icon_map = {"idle": "—", "running": "⏳", "ok": "✅", "error": "⚠️"}
+        self.lbl_context_status_icon.setText(icon_map.get(state, "—"))
 
         if state == "running":
             if self._current_step_state != "running":
