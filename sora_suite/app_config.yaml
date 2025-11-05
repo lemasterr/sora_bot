@@ -54,6 +54,29 @@ downloader:
   workdir: ./workers/downloader
   entry: download_all.py
   max_videos: 0
+watermark_cleaner:
+  workdir: ./workers/watermark_cleaner
+  entry: restore.py
+  source_dir: ./downloads
+  output_dir: ./restored
+  template: ./watermark.png
+  mask_threshold: 8
+  threshold: 0.78
+  frames: 120
+  downscale: 1080
+  scale_min: 0.85
+  scale_max: 1.2
+  scale_steps: 9
+  padding_px: 12
+  padding_pct: 0.18
+  min_size: 32
+  search_span: 12
+  pool: 4
+  max_iou: 0.25
+  blend: normal
+  inpaint_radius: 6
+  inpaint_method: telea
+  full_scan: false
 youtube:
   workdir: ./workers/uploader
   entry: upload_queue.py

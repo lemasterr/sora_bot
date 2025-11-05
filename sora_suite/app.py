@@ -431,6 +431,7 @@ def normalize_session_list(raw_sessions: object) -> List[Dict[str, Any]]:
         session.setdefault("auto_launch_chrome", False)
         session.setdefault("auto_launch_autogen", "idle")
         session.setdefault("download_dir", "")
+        session.setdefault("clean_dir", "")
         session.setdefault("titles_file", "")
         session.setdefault("cursor_file", "")
         session.setdefault("max_videos", 0)
@@ -888,6 +889,7 @@ class SessionWorkspaceWindow(QtWidgets.QDialog):
         self.btn_run_prompts = QtWidgets.QPushButton("Промпты Sora")
         self.btn_run_images = QtWidgets.QPushButton("Генерация")
         self.btn_run_download = QtWidgets.QPushButton("Скачивание")
+        self.btn_run_watermark = QtWidgets.QPushButton("Замена водяного знака")
         self.btn_open_downloads = QtWidgets.QPushButton("Папка RAW")
         self.btn_stop = QtWidgets.QPushButton("Остановить")
         for btn in (
@@ -895,6 +897,7 @@ class SessionWorkspaceWindow(QtWidgets.QDialog):
             self.btn_run_prompts,
             self.btn_run_images,
             self.btn_run_download,
+            self.btn_run_watermark,
             self.btn_open_downloads,
             self.btn_stop,
         ):
@@ -943,6 +946,7 @@ class SessionWorkspaceWindow(QtWidgets.QDialog):
         self.btn_run_prompts.clicked.connect(lambda: self._main._run_session_autogen(self.session_id))
         self.btn_run_images.clicked.connect(lambda: self._main._run_session_images(self.session_id))
         self.btn_run_download.clicked.connect(lambda: self._main._run_session_download(self.session_id))
+        self.btn_run_watermark.clicked.connect(lambda: self._main._run_session_watermark(self.session_id))
         self.btn_open_downloads.clicked.connect(lambda: self._main._open_session_download_dir(self.session_id))
         self.btn_stop.clicked.connect(lambda: self._main._stop_session_runner(self.session_id))
 
@@ -1418,6 +1422,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._auto_scan_profiles_at_start()
         self._refresh_prompt_profiles_ui()
         self._refresh_content_context()
+        self._refresh_watermark_context()
         self._load_image_prompts()
         self._refresh_youtube_ui()
         self._refresh_tiktok_ui()
@@ -1466,6 +1471,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 "last_task": "",
                 "download_before": None,
                 "download_dest": "",
+                "clean_before": None,
+                "clean_dest": "",
             },
         )
         return state
@@ -1558,6 +1565,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "auto_launch_chrome": bool(session.get("auto_launch_chrome", False)),
                 "auto_launch_autogen": session.get("auto_launch_autogen", "idle"),
                 "download_dir": session.get("download_dir", ""),
+                "clean_dir": session.get("clean_dir", ""),
                 "titles_file": session.get("titles_file", ""),
                 "cursor_file": session.get("cursor_file", ""),
                 "max_videos": int(_coerce_int(session.get("max_videos")) or 0),
@@ -1675,6 +1683,7 @@ class MainWindow(QtWidgets.QMainWindow):
             ("submitted_log", self.ed_session_submitted),
             ("failed_log", self.ed_session_failed),
             ("download_dir", self.ed_session_download_dir),
+            ("clean_dir", self.ed_session_clean_dir),
             ("titles_file", self.ed_session_titles_file),
             ("cursor_file", self.ed_session_cursor_file),
         ]:
@@ -1851,6 +1860,11 @@ class MainWindow(QtWidgets.QMainWindow):
         if session_id:
             self._run_session_download(session_id)
 
+    def _on_session_run_watermark(self):
+        session_id = getattr(self, "_current_session_id", "")
+        if session_id:
+            self._run_session_watermark(session_id)
+
     def _on_session_stop(self):
         session_id = getattr(self, "_current_session_id", "")
         if session_id:
@@ -2008,11 +2022,38 @@ class MainWindow(QtWidgets.QMainWindow):
             message = f"Autogen (картинки + промпты) {'завершён' if rc == 0 else 'с ошибками'}"
         elif task == "autogen_prompts":
             message = f"Autogen (промпты) {'завершён' if rc == 0 else 'с ошибками'}"
+        elif task == "watermark":
+            dest_raw = state.get("clean_dest") or ""
+            dest_path = Path(dest_raw) if dest_raw else None
+            before = state.get("clean_before")
+            try:
+                after = len(self._iter_videos(dest_path)) if dest_path else None
+            except Exception:
+                after = None
+            delta = None
+            if isinstance(after, int) and isinstance(before, int):
+                delta = max(after - before, 0)
+            message = f"Замена водяного знака {'завершена' if rc == 0 else 'с ошибками'}"
+            if isinstance(after, int):
+                if delta is not None:
+                    message += f" · +{delta} (итого {after})"
+                else:
+                    message += f" · итог {after}"
+            if dest_path:
+                message += f" → {dest_path}"
+            status_word = "готово" if rc == 0 else "ошибки"
+            total_text = after if isinstance(after, int) else "?"
+            if dest_path:
+                tg_message = f"🧼 {label}: {status_word} · {total_text} файлов → {dest_path}"
+            else:
+                tg_message = f"🧼 {label}: {status_word}"
 
         state["last_task"] = task
         state["active_task"] = ""
         state["download_before"] = None
         state["download_dest"] = ""
+        state["clean_before"] = None
+        state["clean_dest"] = ""
 
         if tg_message:
             self._send_tg(tg_message)
@@ -2029,6 +2070,8 @@ class MainWindow(QtWidgets.QMainWindow):
         state["active_task"] = ""
         state["download_before"] = None
         state["download_dest"] = ""
+        state["clean_before"] = None
+        state["clean_dest"] = ""
         self._set_session_status(session_id, "idle", "Остановлено пользователем")
 
     def _run_session_autogen(self, session_id: str, *, force_images: Optional[bool] = None, images_only: bool = False):
@@ -2126,6 +2169,67 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         path = self._session_download_dir(session, ensure=True)
         open_in_finder(path)
+
+    def _run_session_watermark(self, session_id: str):
+        session = self._session_cache.get(session_id)
+        if not session:
+            return
+        runner = self._ensure_session_runner(session_id)
+        if runner.proc and runner.proc.poll() is None:
+            self._append_session_log(session_id, "[!] Уже выполняется задача")
+            return
+
+        cfg = self.cfg.get("watermark_cleaner", {}) or {}
+        workdir = cfg.get("workdir", str(WORKERS_DIR / "watermark_cleaner"))
+        entry = cfg.get("entry", "restore.py")
+        source_dir = self._session_download_dir(session, ensure=True)
+        output_dir = self._session_watermark_output_dir(session, ensure=True)
+        template_path = _project_path(cfg.get("template", str(PROJECT_ROOT / "watermark.png")))
+
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
+        env["WMR_SOURCE_DIR"] = str(source_dir)
+        env["WMR_OUTPUT_DIR"] = str(output_dir)
+        env["WMR_TEMPLATE"] = str(template_path)
+        env["WMR_MASK_THRESHOLD"] = str(int(cfg.get("mask_threshold", 8) or 0))
+        env["WMR_THRESHOLD"] = str(float(cfg.get("threshold", 0.78) or 0.78))
+        env["WMR_FRAMES"] = str(int(cfg.get("frames", 120) or 1))
+        env["WMR_DOWNSCALE"] = str(int(cfg.get("downscale", 1080) or 0))
+        env["WMR_SCALE_MIN"] = str(float(cfg.get("scale_min", 0.85) or 0.85))
+        env["WMR_SCALE_MAX"] = str(float(cfg.get("scale_max", 1.2) or 1.2))
+        env["WMR_SCALE_STEPS"] = str(int(cfg.get("scale_steps", 9) or 3))
+        env["WMR_FULL_SCAN"] = "1" if bool(cfg.get("full_scan")) else "0"
+        env["WMR_PADDING_PX"] = str(int(cfg.get("padding_px", 12) or 0))
+        env["WMR_PADDING_PCT"] = str(float(cfg.get("padding_pct", 0.18) or 0.0))
+        env["WMR_MIN_SIZE"] = str(int(cfg.get("min_size", 32) or 2))
+        env["WMR_SEARCH_SPAN"] = str(int(cfg.get("search_span", 12) or 1))
+        env["WMR_POOL"] = str(int(cfg.get("pool", 4) or 1))
+        env["WMR_MAX_IOU"] = str(float(cfg.get("max_iou", 0.25) or 0.0))
+        env["WMR_BLEND"] = str(cfg.get("blend", "normal") or "normal")
+        env["WMR_INPAINT_RADIUS"] = str(int(cfg.get("inpaint_radius", 6) or 1))
+        env["WMR_INPAINT_METHOD"] = str(cfg.get("inpaint_method", "telea") or "telea")
+
+        python = sys.executable
+        cmd = [python, entry]
+        label = self._session_instance_label(session)
+        total = len(self._iter_videos(source_dir)) if source_dir.exists() else 0
+        state = self._ensure_session_state(session_id)
+        state["active_task"] = "watermark"
+        try:
+            before = len(self._iter_videos(output_dir)) if output_dir.exists() else 0
+        except Exception:
+            before = 0
+        state["clean_before"] = before
+        state["clean_dest"] = str(output_dir)
+        self._append_activity(
+            f"Сессия {label}: замена водяного знака → {output_dir}",
+            kind="running",
+            card_text=False,
+        )
+        self._append_session_log(session_id, f"[SESSION] Старт замены водяного знака → {output_dir}")
+        self._set_session_status(session_id, "running", "Замена водяного знака…")
+        self._send_tg(f"🧼 {label}: замена водяного знака запускается ({total} файлов) → {output_dir}")
+        runner.run(cmd, cwd=workdir, env=env)
 
     def _launch_session_chrome(self, session_id: str):
         session = self._session_cache.get(session_id)
@@ -3153,11 +3257,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_context_session_prompts = QtWidgets.QPushButton("Автоген")
         self.btn_context_session_images = QtWidgets.QPushButton("Картинки")
         self.btn_context_session_download = QtWidgets.QPushButton("Скачивание")
+        self.btn_context_session_watermark = QtWidgets.QPushButton("Замена знака")
         for btn in (
             self.btn_context_session_window,
             self.btn_context_session_prompts,
             self.btn_context_session_images,
             self.btn_context_session_download,
+            self.btn_context_session_watermark,
         ):
             btn.setSizePolicy(
                 QtWidgets.QSizePolicy.Policy.Expanding,
@@ -3195,6 +3301,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cb_do_autogen = QtWidgets.QCheckBox("Вставка промптов в Sora")
         self.cb_do_download = QtWidgets.QCheckBox("Авто-скачка видео")
         self.cb_do_blur = QtWidgets.QCheckBox("Блюр водяного знака (ffmpeg, пресеты 9:16 / 16:9)")
+        self.cb_do_watermark = QtWidgets.QCheckBox("Замена водяного знака (по шаблону)")
         self.cb_do_merge = QtWidgets.QCheckBox("Склейка группами N")
         self.cb_do_upload = QtWidgets.QCheckBox("Загрузка на YouTube (отложенный постинг)")
         self.cb_do_tiktok = QtWidgets.QCheckBox("Загрузка в TikTok")
@@ -3203,6 +3310,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.cb_do_autogen,
             self.cb_do_download,
             self.cb_do_blur,
+            self.cb_do_watermark,
             self.cb_do_merge,
             self.cb_do_upload,
             self.cb_do_tiktok,
@@ -3212,6 +3320,7 @@ class MainWindow(QtWidgets.QMainWindow):
         f.addRow(self.cb_do_autogen)
         f.addRow(self.cb_do_download)
         f.addRow(self.cb_do_blur)
+        f.addRow(self.cb_do_watermark)
         f.addRow(self.cb_do_merge)
         f.addRow(self.cb_do_upload)
         f.addRow(self.cb_do_tiktok)
@@ -3221,8 +3330,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_run_scenario = QtWidgets.QPushButton("Старт сценария (галочки сверху)")
         self.btn_run_autogen_images = QtWidgets.QPushButton("Генерация картинок (Google)")
         self.btn_open_genai_output = QtWidgets.QPushButton("Открыть папку картинок")
+        self.btn_run_watermark = QtWidgets.QPushButton("Замена водяного знака")
         hb2.addWidget(self.btn_run_scenario)
         hb2.addWidget(self.btn_run_autogen_images)
+        hb2.addWidget(self.btn_run_watermark)
         hb2.addWidget(self.btn_open_genai_output)
         hb2.addStretch(1)
 
@@ -3451,6 +3562,192 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tab_tasks,
             category="Рабочие процессы",
             description="Пошаговый запуск: генерация, скачивание, блюр, склейка и загрузка",
+        )
+
+        wm_cfg = self.cfg.get("watermark_cleaner", {}) or {}
+        self.tab_watermark, wm_layout = make_scroll_tab()
+        wm_intro = QtWidgets.QLabel(
+            "Новый модуль восстанавливает кадры вместо блюра: шаблон водяного знака ищется на каждом кадре,"
+            " подбираются чистые фрагменты и бесшовно подставляются вместо логотипа."
+        )
+        wm_intro.setWordWrap(True)
+        wm_intro.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
+        wm_layout.addWidget(wm_intro)
+
+        def make_path_field() -> Tuple[QtWidgets.QLineEdit, QtWidgets.QToolButton, QtWidgets.QWidget]:
+            container = QtWidgets.QWidget()
+            hl = QtWidgets.QHBoxLayout(container)
+            hl.setContentsMargins(0, 0, 0, 0)
+            hl.setSpacing(6)
+            line = QtWidgets.QLineEdit()
+            line.setClearButtonEnabled(True)
+            btn = QtWidgets.QToolButton()
+            btn.setText("…")
+            btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+            hl.addWidget(line, 1)
+            hl.addWidget(btn)
+            return line, btn, container
+
+        grp_io = QtWidgets.QGroupBox("Папки и шаблон")
+        io_form = QtWidgets.QFormLayout(grp_io)
+        io_form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
+        io_form.setHorizontalSpacing(8)
+        io_form.setVerticalSpacing(8)
+        self.ed_wmr_source, self.btn_wmr_source_browse, wmr_source_widget = make_path_field()
+        self.ed_wmr_source.setText(wm_cfg.get("source_dir", self.cfg.get("downloads_dir", str(DL_DIR))))
+        io_form.addRow("Исходники (RAW):", wmr_source_widget)
+        self.ed_wmr_output, self.btn_wmr_output_browse, wmr_output_widget = make_path_field()
+        self.ed_wmr_output.setText(wm_cfg.get("output_dir", str(PROJECT_ROOT / "restored")))
+        io_form.addRow("Готовые клипы:", wmr_output_widget)
+        self.ed_wmr_template, self.btn_wmr_template_browse, wmr_template_widget = make_path_field()
+        self.ed_wmr_template.setText(wm_cfg.get("template", str(PROJECT_ROOT / "watermark.png")))
+        io_form.addRow("Шаблон водяного знака:", wmr_template_widget)
+        self.sb_wmr_mask_threshold = QtWidgets.QSpinBox()
+        self.sb_wmr_mask_threshold.setRange(0, 255)
+        self.sb_wmr_mask_threshold.setValue(int(wm_cfg.get("mask_threshold", 8) or 0))
+        io_form.addRow("Порог маски (alpha):", self.sb_wmr_mask_threshold)
+        wm_layout.addWidget(grp_io)
+
+        grp_detect = QtWidgets.QGroupBox("Детекция логотипа")
+        detect_form = QtWidgets.QGridLayout(grp_detect)
+        detect_form.setHorizontalSpacing(8)
+        detect_form.setVerticalSpacing(8)
+        row = 0
+        detect_form.addWidget(QtWidgets.QLabel("Порог совпадения:"), row, 0)
+        self.dsb_wmr_threshold = QtWidgets.QDoubleSpinBox()
+        self.dsb_wmr_threshold.setRange(0.0, 1.0)
+        self.dsb_wmr_threshold.setDecimals(3)
+        self.dsb_wmr_threshold.setSingleStep(0.01)
+        self.dsb_wmr_threshold.setValue(float(wm_cfg.get("threshold", 0.78) or 0.78))
+        detect_form.addWidget(self.dsb_wmr_threshold, row, 1)
+        detect_form.addWidget(QtWidgets.QLabel("Кадров для анализа:"), row, 2)
+        self.sb_wmr_frames = QtWidgets.QSpinBox()
+        self.sb_wmr_frames.setRange(1, 5000)
+        self.sb_wmr_frames.setValue(int(wm_cfg.get("frames", 120) or 120))
+        detect_form.addWidget(self.sb_wmr_frames, row, 3)
+        row += 1
+        detect_form.addWidget(QtWidgets.QLabel("Макс. ширина кадра:"), row, 0)
+        self.sb_wmr_downscale = QtWidgets.QSpinBox()
+        self.sb_wmr_downscale.setRange(0, 4096)
+        self.sb_wmr_downscale.setSuffix(" px")
+        self.sb_wmr_downscale.setSpecialValueText("без изменений")
+        self.sb_wmr_downscale.setValue(int(wm_cfg.get("downscale", 1080) or 0))
+        detect_form.addWidget(self.sb_wmr_downscale, row, 1)
+        detect_form.addWidget(QtWidgets.QLabel("Масштаб min/max:"), row, 2)
+        scale_box = QtWidgets.QHBoxLayout()
+        self.dsb_wmr_scale_min = QtWidgets.QDoubleSpinBox()
+        self.dsb_wmr_scale_min.setRange(0.05, 3.0)
+        self.dsb_wmr_scale_min.setDecimals(2)
+        self.dsb_wmr_scale_min.setSingleStep(0.05)
+        self.dsb_wmr_scale_min.setValue(float(wm_cfg.get("scale_min", 0.85) or 0.85))
+        self.dsb_wmr_scale_max = QtWidgets.QDoubleSpinBox()
+        self.dsb_wmr_scale_max.setRange(0.1, 4.0)
+        self.dsb_wmr_scale_max.setDecimals(2)
+        self.dsb_wmr_scale_max.setSingleStep(0.05)
+        self.dsb_wmr_scale_max.setValue(float(wm_cfg.get("scale_max", 1.2) or 1.2))
+        scale_box.addWidget(self.dsb_wmr_scale_min)
+        scale_box.addWidget(QtWidgets.QLabel("→"))
+        scale_box.addWidget(self.dsb_wmr_scale_max)
+        detect_form.addLayout(scale_box, row, 3)
+        row += 1
+        detect_form.addWidget(QtWidgets.QLabel("Шагов масштаба:"), row, 0)
+        self.sb_wmr_scale_steps = QtWidgets.QSpinBox()
+        self.sb_wmr_scale_steps.setRange(3, 25)
+        self.sb_wmr_scale_steps.setValue(int(wm_cfg.get("scale_steps", 9) or 9))
+        detect_form.addWidget(self.sb_wmr_scale_steps, row, 1)
+        self.cb_wmr_full_scan = QtWidgets.QCheckBox("Проверять каждый кадр (медленнее, но точнее)")
+        self.cb_wmr_full_scan.setChecked(bool(wm_cfg.get("full_scan", False)))
+        detect_form.addWidget(self.cb_wmr_full_scan, row, 2, 1, 2)
+        wm_layout.addWidget(grp_detect)
+
+        grp_replace = QtWidgets.QGroupBox("Замена")
+        replace_form = QtWidgets.QGridLayout(grp_replace)
+        replace_form.setHorizontalSpacing(8)
+        replace_form.setVerticalSpacing(8)
+        r = 0
+        replace_form.addWidget(QtWidgets.QLabel("Запас по краям (px):"), r, 0)
+        self.sb_wmr_padding_px = QtWidgets.QSpinBox()
+        self.sb_wmr_padding_px.setRange(0, 512)
+        self.sb_wmr_padding_px.setValue(int(wm_cfg.get("padding_px", 12) or 0))
+        replace_form.addWidget(self.sb_wmr_padding_px, r, 1)
+        replace_form.addWidget(QtWidgets.QLabel("Доп. ширина (%):"), r, 2)
+        self.dsb_wmr_padding_pct = QtWidgets.QDoubleSpinBox()
+        self.dsb_wmr_padding_pct.setRange(0.0, 100.0)
+        self.dsb_wmr_padding_pct.setDecimals(1)
+        self.dsb_wmr_padding_pct.setSingleStep(0.5)
+        self.dsb_wmr_padding_pct.setSuffix(" %")
+        self.dsb_wmr_padding_pct.setValue(float(wm_cfg.get("padding_pct", 0.18) or 0.0) * 100.0)
+        replace_form.addWidget(self.dsb_wmr_padding_pct, r, 3)
+        r += 1
+        replace_form.addWidget(QtWidgets.QLabel("Мин. размер зоны:"), r, 0)
+        self.sb_wmr_min_size = QtWidgets.QSpinBox()
+        self.sb_wmr_min_size.setRange(2, 1920)
+        self.sb_wmr_min_size.setValue(int(wm_cfg.get("min_size", 32) or 32))
+        replace_form.addWidget(self.sb_wmr_min_size, r, 1)
+        replace_form.addWidget(QtWidgets.QLabel("Радиус поиска кадров:"), r, 2)
+        self.sb_wmr_search_span = QtWidgets.QSpinBox()
+        self.sb_wmr_search_span.setRange(1, 240)
+        self.sb_wmr_search_span.setValue(int(wm_cfg.get("search_span", 12) or 12))
+        replace_form.addWidget(self.sb_wmr_search_span, r, 3)
+        r += 1
+        replace_form.addWidget(QtWidgets.QLabel("Сколько кадров в смеси:"), r, 0)
+        self.sb_wmr_pool = QtWidgets.QSpinBox()
+        self.sb_wmr_pool.setRange(1, 12)
+        self.sb_wmr_pool.setValue(int(wm_cfg.get("pool", 4) or 4))
+        replace_form.addWidget(self.sb_wmr_pool, r, 1)
+        replace_form.addWidget(QtWidgets.QLabel("Макс. пересечение (IoU):"), r, 2)
+        self.dsb_wmr_max_iou = QtWidgets.QDoubleSpinBox()
+        self.dsb_wmr_max_iou.setRange(0.0, 1.0)
+        self.dsb_wmr_max_iou.setDecimals(2)
+        self.dsb_wmr_max_iou.setSingleStep(0.05)
+        self.dsb_wmr_max_iou.setValue(float(wm_cfg.get("max_iou", 0.25) or 0.25))
+        replace_form.addWidget(self.dsb_wmr_max_iou, r, 3)
+        r += 1
+        replace_form.addWidget(QtWidgets.QLabel("Режим смешивания:"), r, 0)
+        self.cmb_wmr_blend = QtWidgets.QComboBox()
+        self.cmb_wmr_blend.addItems(["normal", "mixed"])
+        self.cmb_wmr_blend.setCurrentText(str(wm_cfg.get("blend", "normal") or "normal"))
+        replace_form.addWidget(self.cmb_wmr_blend, r, 1)
+        replace_form.addWidget(QtWidgets.QLabel("Радиус inpaint:"), r, 2)
+        self.sb_wmr_inpaint_radius = QtWidgets.QSpinBox()
+        self.sb_wmr_inpaint_radius.setRange(1, 64)
+        self.sb_wmr_inpaint_radius.setValue(int(wm_cfg.get("inpaint_radius", 6) or 6))
+        replace_form.addWidget(self.sb_wmr_inpaint_radius, r, 3)
+        r += 1
+        replace_form.addWidget(QtWidgets.QLabel("Резервный метод:"), r, 0)
+        self.cmb_wmr_inpaint_method = QtWidgets.QComboBox()
+        self.cmb_wmr_inpaint_method.addItems(["telea", "ns"])
+        self.cmb_wmr_inpaint_method.setCurrentText(str(wm_cfg.get("inpaint_method", "telea") or "telea"))
+        replace_form.addWidget(self.cmb_wmr_inpaint_method, r, 1)
+        replace_form.addItem(QtWidgets.QSpacerItem(20, 20, QtWidgets.QSizePolicy.Policy.Minimum, QtWidgets.QSizePolicy.Policy.Minimum), r, 2, 1, 2)
+        wm_layout.addWidget(grp_replace)
+
+        wm_layout.addStretch(1)
+
+        wm_context, wm_ctx_layout = make_context_card(
+            "Замена водяного знака",
+            "Следи за активной папкой и шаблоном, чтобы не запустить обработку не того проекта.",
+        )
+        self.lbl_context_wmr_source = QtWidgets.QLabel("—")
+        self.lbl_context_wmr_output = QtWidgets.QLabel("—")
+        self.lbl_context_wmr_template = QtWidgets.QLabel("—")
+        wm_form = QtWidgets.QFormLayout()
+        wm_form.setHorizontalSpacing(8)
+        wm_form.setVerticalSpacing(6)
+        wm_form.addRow("RAW:", self.lbl_context_wmr_source)
+        wm_form.addRow("Output:", self.lbl_context_wmr_output)
+        wm_form.addRow("Шаблон:", self.lbl_context_wmr_template)
+        wm_ctx_layout.addLayout(wm_form)
+        wm_ctx_layout.addStretch(1)
+        register_context("watermark", wm_context)
+
+        add_section(
+            "watermark",
+            "🧼 Водяной знак",
+            self.tab_watermark,
+            scrollable=True,
+            category="Рабочие процессы",
+            description="Замена логотипа подбором чистых фрагментов видео",
         )
 
         # TAB: YouTube uploader
@@ -4492,6 +4789,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "overview": self._refresh_overview_context,
             "workspaces": self._refresh_workspace_context,
             "automation": self._refresh_automation_context,
+            "watermark": self._refresh_watermark_context,
             "content": self._refresh_content_context,
             "telegram": self._refresh_telegram_context,
             "autopost": self._refresh_autopost_context,
@@ -4576,6 +4874,24 @@ class MainWindow(QtWidgets.QMainWindow):
             self.lbl_context_settings_status.setText(self.lbl_settings_status.text())
         if hasattr(self, "lbl_context_project_root"):
             self.lbl_context_project_root.setText(self.cfg.get("project_root", str(PROJECT_ROOT)))
+
+    def _refresh_watermark_context(self) -> None:
+        wm_cfg = self.cfg.get("watermark_cleaner", {}) or {}
+        if hasattr(self, "lbl_context_wmr_source"):
+            source = wm_cfg.get("source_dir", self.cfg.get("downloads_dir", str(DL_DIR)))
+            if hasattr(self, "ed_wmr_source") and isinstance(self.ed_wmr_source, QtWidgets.QLineEdit):
+                source = self.ed_wmr_source.text().strip() or source
+            self.lbl_context_wmr_source.setText(source)
+        if hasattr(self, "lbl_context_wmr_output"):
+            output = wm_cfg.get("output_dir", str(PROJECT_ROOT / "restored"))
+            if hasattr(self, "ed_wmr_output") and isinstance(self.ed_wmr_output, QtWidgets.QLineEdit):
+                output = self.ed_wmr_output.text().strip() or output
+            self.lbl_context_wmr_output.setText(output)
+        if hasattr(self, "lbl_context_wmr_template"):
+            template = wm_cfg.get("template", str(PROJECT_ROOT / "watermark.png"))
+            if hasattr(self, "ed_wmr_template") and isinstance(self.ed_wmr_template, QtWidgets.QLineEdit):
+                template = self.ed_wmr_template.text().strip() or template
+            self.lbl_context_wmr_template.setText(template)
 
     def _refresh_telegram_templates(self) -> None:
         if not hasattr(self, "cmb_tg_templates"):
@@ -4706,6 +5022,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "prompts": getattr(self, "cb_do_autogen", None),
             "download": getattr(self, "cb_do_download", None),
             "blur": getattr(self, "cb_do_blur", None),
+            "watermark": getattr(self, "cb_do_watermark", None),
             "merge": getattr(self, "cb_do_merge", None),
             "youtube": getattr(self, "cb_do_upload", None),
             "tiktok": getattr(self, "cb_do_tiktok", None),
@@ -5572,6 +5889,14 @@ class MainWindow(QtWidgets.QMainWindow):
         ]
         if hasattr(self, "ed_genai_output_dir"):
             mapping.append((self.ed_genai_output_dir, self.cfg.get("google_genai", {}).get("output_dir", str(IMAGES_DIR))))
+        wm_cfg = self.cfg.get("watermark_cleaner", {}) or {}
+        mapping.extend(
+            [
+                (getattr(self, "ed_wmr_source", None), wm_cfg.get("source_dir", self.cfg.get("downloads_dir", str(DL_DIR)))) ,
+                (getattr(self, "ed_wmr_output", None), wm_cfg.get("output_dir", str(PROJECT_ROOT / "restored"))),
+                (getattr(self, "ed_wmr_template", None), wm_cfg.get("template", str(PROJECT_ROOT / "watermark.png"))),
+            ]
+        )
         for line, value in mapping:
             if not isinstance(line, QtWidgets.QLineEdit):
                 continue
@@ -5587,6 +5912,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._settings_autosave_timer.stop()
             self._settings_autosave_timer.start()
         self._refresh_settings_context()
+        self._refresh_watermark_context()
 
     def _autosave_settings(self):
         if getattr(self, "_settings_dirty", False):
@@ -5648,6 +5974,26 @@ class MainWindow(QtWidgets.QMainWindow):
             (self.cb_genai_enabled, "toggled"),
             (self.cb_genai_attach, "toggled"),
             (self.ed_genai_api_key, "textEdited"),
+            (getattr(self, "ed_wmr_source", None), "textEdited"),
+            (getattr(self, "ed_wmr_output", None), "textEdited"),
+            (getattr(self, "ed_wmr_template", None), "textEdited"),
+            (getattr(self, "sb_wmr_mask_threshold", None), "valueChanged"),
+            (getattr(self, "dsb_wmr_threshold", None), "valueChanged"),
+            (getattr(self, "sb_wmr_frames", None), "valueChanged"),
+            (getattr(self, "sb_wmr_downscale", None), "valueChanged"),
+            (getattr(self, "dsb_wmr_scale_min", None), "valueChanged"),
+            (getattr(self, "dsb_wmr_scale_max", None), "valueChanged"),
+            (getattr(self, "sb_wmr_scale_steps", None), "valueChanged"),
+            (getattr(self, "cb_wmr_full_scan", None), "toggled"),
+            (getattr(self, "sb_wmr_padding_px", None), "valueChanged"),
+            (getattr(self, "dsb_wmr_padding_pct", None), "valueChanged"),
+            (getattr(self, "sb_wmr_min_size", None), "valueChanged"),
+            (getattr(self, "sb_wmr_search_span", None), "valueChanged"),
+            (getattr(self, "sb_wmr_pool", None), "valueChanged"),
+            (getattr(self, "dsb_wmr_max_iou", None), "valueChanged"),
+            (getattr(self, "cmb_wmr_blend", None), "currentIndexChanged"),
+            (getattr(self, "sb_wmr_inpaint_radius", None), "valueChanged"),
+            (getattr(self, "cmb_wmr_inpaint_method", None), "currentIndexChanged"),
             (self.cmb_genai_model, "currentIndexChanged"),
             (self.cmb_genai_model.lineEdit(), "textEdited"),
             (self.cmb_genai_person, "currentIndexChanged"),
@@ -6158,6 +6504,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ed_session_download_dir.setPlaceholderText("По умолчанию — отдельная папка RAW для сессии")
         form.addRow("Папка RAW:", download_widget)
 
+        self.ed_session_clean_dir, self.btn_session_clean_dir_browse, clean_widget = make_path_field()
+        self.ed_session_clean_dir.setPlaceholderText("По умолчанию — глобальная папка очистки")
+        form.addRow("Папка очистки:", clean_widget)
+
         self.ed_session_titles_file, self.btn_session_titles_browse, titles_widget = make_path_field()
         self.ed_session_titles_file.setPlaceholderText("Использовать общий список названий")
         form.addRow("Названия:", titles_widget)
@@ -6208,6 +6558,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_session_run_prompts = QtWidgets.QPushButton("Autogen промптов")
         self.btn_session_run_images = QtWidgets.QPushButton("Только картинки")
         self.btn_session_run_download = QtWidgets.QPushButton("Скачать видео")
+        self.btn_session_run_watermark = QtWidgets.QPushButton("Замена водяного знака")
         self.btn_session_open_downloads = QtWidgets.QPushButton("Открыть RAW")
         self.btn_session_stop_runner = QtWidgets.QPushButton("Остановить")
         for btn in (
@@ -6215,6 +6566,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.btn_session_run_prompts,
             self.btn_session_run_images,
             self.btn_session_run_download,
+            self.btn_session_run_watermark,
             self.btn_session_open_downloads,
             self.btn_session_stop_runner,
         ):
@@ -6243,6 +6595,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.btn_session_failed_browse,
             self.ed_session_download_dir,
             self.btn_session_download_dir_browse,
+            self.ed_session_clean_dir,
+            self.btn_session_clean_dir_browse,
             self.ed_session_titles_file,
             self.btn_session_titles_browse,
             self.ed_session_cursor_file,
@@ -6256,6 +6610,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.btn_session_run_prompts,
             self.btn_session_run_images,
             self.btn_session_run_download,
+            self.btn_session_run_watermark,
             self.btn_session_open_downloads,
             self.btn_session_stop_runner,
             self.te_session_log,
@@ -6286,6 +6641,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_session_download_dir_browse.clicked.connect(
             lambda: self._browse_dir(self.ed_session_download_dir, "Выбери папку RAW для сессии")
         )
+        self.btn_session_clean_dir_browse.clicked.connect(
+            lambda: self._browse_dir(self.ed_session_clean_dir, "Выбери папку для очищенных видео")
+        )
         self.btn_session_titles_browse.clicked.connect(
             lambda: self._browse_file(
                 self.ed_session_titles_file,
@@ -6304,6 +6662,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_session_run_prompts.clicked.connect(self._on_session_run_prompts)
         self.btn_session_run_images.clicked.connect(self._on_session_run_images)
         self.btn_session_run_download.clicked.connect(self._on_session_run_download)
+        self.btn_session_run_watermark.clicked.connect(self._on_session_run_watermark)
         self.btn_session_open_downloads.clicked.connect(self._on_session_open_downloads)
         self.btn_session_stop_runner.clicked.connect(self._on_session_stop)
         self.btn_session_open_window.clicked.connect(self._on_session_open_window)
@@ -6323,6 +6682,9 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.ed_session_download_dir.textEdited.connect(
             lambda: self._on_session_path_changed("download_dir", self.ed_session_download_dir)
+        )
+        self.ed_session_clean_dir.textEdited.connect(
+            lambda: self._on_session_path_changed("clean_dir", self.ed_session_clean_dir)
         )
         self.ed_session_titles_file.textEdited.connect(
             lambda: self._on_session_path_changed("titles_file", self.ed_session_titles_file)
@@ -6396,6 +6758,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_apply_dl.clicked.connect(self._apply_dl_limit)
         self.btn_run_scenario.clicked.connect(self._run_scenario)
         self.btn_run_autogen_images.clicked.connect(self._save_and_run_autogen_images)
+        self.btn_run_watermark.clicked.connect(self._run_watermark)
         self.btn_open_genai_output.clicked.connect(self._open_genai_output_dir)
 
         self.btn_save_settings.clicked.connect(self._save_settings_clicked)
@@ -6433,6 +6796,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sb_youtube_default_delay.valueChanged.connect(self._apply_default_delay)
         self.sb_youtube_interval_default.valueChanged.connect(lambda val: self.sb_youtube_interval.setValue(int(val)))
         self.sb_youtube_limit_default.valueChanged.connect(lambda val: self.sb_youtube_batch_limit.setValue(int(val)))
+        self.btn_wmr_source_browse.clicked.connect(lambda: self._browse_dir(self.ed_wmr_source, "Выбери папку RAW"))
+        self.btn_wmr_output_browse.clicked.connect(lambda: self._browse_dir(self.ed_wmr_output, "Выбери папку для готовых клипов"))
+        self.btn_wmr_template_browse.clicked.connect(
+            lambda: self._browse_file(
+                self.ed_wmr_template,
+                "Выбери шаблон водяного знака",
+                "Изображения (*.png *.jpg *.jpeg *.bmp);;Все файлы (*.*)",
+            )
+        )
         self.btn_tiktok_archive_browse.clicked.connect(lambda: self._browse_dir(self.ed_tiktok_archive, "Выбери папку архива"))
         self.sb_tiktok_default_delay.valueChanged.connect(self._apply_tiktok_default_delay)
         self.sb_tiktok_interval_default.valueChanged.connect(lambda val: self.sb_tiktok_interval.setValue(int(val)))
@@ -6459,6 +6831,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.btn_context_session_images.clicked.connect(self._on_session_run_images)
         if hasattr(self, "btn_context_session_download"):
             self.btn_context_session_download.clicked.connect(self._on_session_run_download)
+        if hasattr(self, "btn_context_session_watermark"):
+            self.btn_context_session_watermark.clicked.connect(self._on_session_run_watermark)
         if hasattr(self, "btn_context_tg_test"):
             self.btn_context_tg_test.clicked.connect(self._test_tg_settings)
         if hasattr(self, "btn_context_tg_open"):
@@ -6576,18 +6950,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self.runner_dl = ProcRunner("DL")
         self.runner_upload = ProcRunner("YT")
         self.runner_tiktok = ProcRunner("TT")
+        self.runner_watermark = ProcRunner("WMR")
         self.runner_autogen.line.connect(self._slot_log)
         self.runner_dl.line.connect(self._slot_log)
         self.runner_upload.line.connect(self._slot_log)
         self.runner_tiktok.line.connect(self._slot_log)
+        self.runner_watermark.line.connect(self._slot_log)
         self.runner_autogen.finished.connect(self._proc_done)
         self.runner_dl.finished.connect(self._proc_done)
         self.runner_upload.finished.connect(self._proc_done)
         self.runner_tiktok.finished.connect(self._proc_done)
+        self.runner_watermark.finished.connect(self._proc_done)
         self.runner_autogen.notify.connect(self._notify)
         self.runner_dl.notify.connect(self._notify)
         self.runner_upload.notify.connect(self._notify)
         self.runner_tiktok.notify.connect(self._notify)
+        self.runner_watermark.notify.connect(self._notify)
         self._post_status("Готово", state="idle")
 
     # ----- безопасные слоты GUI-потока -----
@@ -7473,6 +7851,21 @@ class MainWindow(QtWidgets.QMainWindow):
                 pass
         return path
 
+    def _session_watermark_output_dir(self, session: Dict[str, Any], *, ensure: bool = False) -> Path:
+        custom = session.get("clean_dir")
+        if custom:
+            path = _project_path(custom)
+        else:
+            base = _project_path(self.cfg.get("watermark_cleaner", {}).get("output_dir", str(PROJECT_ROOT / "restored")))
+            slug = slugify(self._session_instance_label(session))
+            path = base / slug
+        if ensure:
+            try:
+                path.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+        return path
+
     def _session_titles_path(self, session: Dict[str, Any]) -> Path:
         custom = session.get("titles_file")
         if custom:
@@ -7780,6 +8173,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.cb_do_autogen.isChecked(): steps.append("autogen")
         if self.cb_do_download.isChecked(): steps.append("download")
         if self.cb_do_blur.isChecked(): steps.append("blur")
+        if self.cb_do_watermark.isChecked(): steps.append("watermark")
         if self.cb_do_merge.isChecked(): steps.append("merge")
         if self.cb_do_upload.isChecked(): steps.append("upload")
         if self.cb_do_tiktok.isChecked(): steps.append("tiktok")
@@ -7795,6 +8189,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "autogen": "Autogen",
             "download": "Download",
             "blur": "Blur",
+            "watermark": "Watermark",
             "merge": "Merge",
             "upload": "YouTube",
             "tiktok": "TikTok",
@@ -7824,6 +8219,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 ok = self._run_blur_presets_sync(); ok_all = ok_all and ok
                 if not ok:
                     self._post_status("Блюр завершён с ошибкой", state="error")
+                    return
+            if "watermark" in steps:
+                ok = self._run_watermark_restore_sync(); ok_all = ok_all and ok
+                if not ok:
+                    self._post_status("Замена водяного знака завершена с ошибкой", state="error")
                     return
             if "merge" in steps:
                 ok = self._run_merge_sync(); ok_all = ok_all and ok
@@ -7930,7 +8330,68 @@ class MainWindow(QtWidgets.QMainWindow):
         after = len(self._iter_videos(dest_dir)) if dest_dir.exists() else before
         delta = max(after - before, 0)
         status = "завершено" if ok else "завершено с ошибками"
+        self._post_status(
+            f"Скачивание завершено: +{delta} (итого {after})",
+            state=("ok" if ok else "error"),
+        )
         self._send_tg(f"⬇️ Скачивание {status}: +{delta} файлов (итого {after}) → {dest_dir}")
+        self._refresh_stats()
+        return ok
+
+    def _run_watermark(self):
+        self._run_watermark_restore_sync()
+
+    def _run_watermark_restore_sync(self) -> bool:
+        self._save_settings_clicked(silent=True)
+        cfg = self.cfg.get("watermark_cleaner", {}) or {}
+        workdir = cfg.get("workdir", str(WORKERS_DIR / "watermark_cleaner"))
+        entry = cfg.get("entry", "restore.py")
+        source_dir = _project_path(cfg.get("source_dir", self.cfg.get("downloads_dir", str(DL_DIR))))
+        output_dir = _project_path(cfg.get("output_dir", str(PROJECT_ROOT / "restored")))
+        template_path = _project_path(cfg.get("template", str(PROJECT_ROOT / "watermark.png")))
+
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
+        env["WMR_SOURCE_DIR"] = str(source_dir)
+        env["WMR_OUTPUT_DIR"] = str(output_dir)
+        env["WMR_TEMPLATE"] = str(template_path)
+        env["WMR_MASK_THRESHOLD"] = str(int(cfg.get("mask_threshold", 8) or 0))
+        env["WMR_THRESHOLD"] = str(float(cfg.get("threshold", 0.78) or 0.78))
+        env["WMR_FRAMES"] = str(int(cfg.get("frames", 120) or 1))
+        env["WMR_DOWNSCALE"] = str(int(cfg.get("downscale", 1080) or 0))
+        env["WMR_SCALE_MIN"] = str(float(cfg.get("scale_min", 0.85) or 0.85))
+        env["WMR_SCALE_MAX"] = str(float(cfg.get("scale_max", 1.2) or 1.2))
+        env["WMR_SCALE_STEPS"] = str(int(cfg.get("scale_steps", 9) or 3))
+        env["WMR_PADDING_PX"] = str(int(cfg.get("padding_px", 12) or 0))
+        env["WMR_PADDING_PCT"] = str(float(cfg.get("padding_pct", 0.18) or 0.0))
+        env["WMR_MIN_SIZE"] = str(int(cfg.get("min_size", 32) or 2))
+        env["WMR_SEARCH_SPAN"] = str(int(cfg.get("search_span", 12) or 1))
+        env["WMR_POOL"] = str(int(cfg.get("pool", 4) or 1))
+        env["WMR_MAX_IOU"] = str(float(cfg.get("max_iou", 0.25) or 0.0))
+        env["WMR_BLEND"] = str(cfg.get("blend", "normal") or "normal")
+        env["WMR_INPAINT_RADIUS"] = str(int(cfg.get("inpaint_radius", 6) or 1))
+        env["WMR_INPAINT_METHOD"] = str(cfg.get("inpaint_method", "telea") or "telea")
+        env["WMR_FULL_SCAN"] = "1" if bool(cfg.get("full_scan")) else "0"
+
+        python = sys.executable
+        cmd = [python, entry]
+        total = len(self._iter_videos(source_dir)) if source_dir.exists() else 0
+        self._post_status("Замена водяного знака…", state="running")
+        self._send_tg(f"🧼 Замена водяного знака запускается: {total} файлов → {output_dir}")
+
+        rc = self._await_runner(
+            self.runner_watermark,
+            "WMR",
+            lambda: self.runner_watermark.run(cmd, cwd=workdir, env=env),
+        )
+        ok = rc == 0
+        status = "завершена" if ok else "с ошибками"
+        self._post_status(
+            "Замена водяного знака завершена" if ok else "Замена водяного знака: ошибки",
+            state=("ok" if ok else "error"),
+        )
+        self._send_tg(f"🧼 Замена водяного знака {status}: {total} файлов → {output_dir}")
+        self._refresh_stats()
         return ok
 
     # ----- BLUR -----
@@ -9310,6 +9771,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.runner_autogen.stop()
         self.runner_dl.stop()
         self.runner_upload.stop()
+        self.runner_tiktok.stop()
+        self.runner_watermark.stop()
         # стоп ffmpeg / любые активные
         with self._procs_lock:
             procs = list(self._active_procs)
@@ -9438,6 +9901,34 @@ class MainWindow(QtWidgets.QMainWindow):
 
         dl_cfg = self.cfg.setdefault("downloader", {})
         dl_cfg["max_videos"] = int(self.sb_max_videos.value())
+
+        wmr_cfg = self.cfg.setdefault("watermark_cleaner", {})
+        wmr_cfg["source_dir"] = self.ed_wmr_source.text().strip() or wmr_cfg.get(
+            "source_dir", self.cfg.get("downloads_dir", str(DL_DIR))
+        )
+        wmr_cfg["output_dir"] = self.ed_wmr_output.text().strip() or wmr_cfg.get(
+            "output_dir", str(PROJECT_ROOT / "restored")
+        )
+        wmr_cfg["template"] = self.ed_wmr_template.text().strip() or wmr_cfg.get(
+            "template", str(PROJECT_ROOT / "watermark.png")
+        )
+        wmr_cfg["mask_threshold"] = int(self.sb_wmr_mask_threshold.value())
+        wmr_cfg["threshold"] = float(self.dsb_wmr_threshold.value())
+        wmr_cfg["frames"] = int(self.sb_wmr_frames.value())
+        wmr_cfg["downscale"] = int(self.sb_wmr_downscale.value())
+        wmr_cfg["scale_min"] = float(self.dsb_wmr_scale_min.value())
+        wmr_cfg["scale_max"] = float(self.dsb_wmr_scale_max.value())
+        wmr_cfg["scale_steps"] = int(self.sb_wmr_scale_steps.value())
+        wmr_cfg["full_scan"] = bool(self.cb_wmr_full_scan.isChecked())
+        wmr_cfg["padding_px"] = int(self.sb_wmr_padding_px.value())
+        wmr_cfg["padding_pct"] = round(float(self.dsb_wmr_padding_pct.value()) / 100.0, 4)
+        wmr_cfg["min_size"] = int(self.sb_wmr_min_size.value())
+        wmr_cfg["search_span"] = int(self.sb_wmr_search_span.value())
+        wmr_cfg["pool"] = int(self.sb_wmr_pool.value())
+        wmr_cfg["max_iou"] = float(self.dsb_wmr_max_iou.value())
+        wmr_cfg["blend"] = self.cmb_wmr_blend.currentText().strip() or "normal"
+        wmr_cfg["inpaint_radius"] = int(self.sb_wmr_inpaint_radius.value())
+        wmr_cfg["inpaint_method"] = self.cmb_wmr_inpaint_method.currentText().strip() or "telea"
 
         ui_cfg = self.cfg.setdefault("ui", {})
         ui_cfg["show_activity"] = bool(self.cb_ui_show_activity.isChecked())
