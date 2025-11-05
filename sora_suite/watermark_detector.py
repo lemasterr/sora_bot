@@ -524,3 +524,123 @@ def detect_watermark(
         score = best_score if best_score >= 0 else None
         return (None, score)
     return None
+
+
+class WaterMarkDetector:
+    """Compatibility wrapper mirroring the historic detector API."""
+
+    def __init__(
+        self,
+        template_path: Union[str, Path],
+        *,
+        mask_threshold: int = 8,
+        template_image: Optional[np.ndarray] = None,
+        **default_cfg: Any,
+    ) -> None:
+        self.template_path = str(template_path)
+        self.mask_threshold = int(mask_threshold)
+        self._default_cfg: Dict[str, Any] = dict(default_cfg)
+        self._template_package: Optional[TemplateAssets] = None
+        self._last_result: Dict[str, Any] = {}
+
+        image = template_image
+        if image is None and Path(self.template_path).exists():
+            image = cv2.imread(self.template_path, cv2.IMREAD_UNCHANGED)
+        if image is not None and getattr(image, "size", 0):
+            self._template_package = prepare_template(
+                image,
+                self.template_path,
+                mask_threshold=self.mask_threshold,
+            )
+
+    def _ensure_template(self) -> TemplateAssets:
+        if self._template_package is not None:
+            return self._template_package
+        image = cv2.imread(self.template_path, cv2.IMREAD_UNCHANGED)
+        if image is None or getattr(image, "size", 0) == 0:
+            raise FileNotFoundError(self.template_path)
+        self._template_package = prepare_template(
+            image,
+            self.template_path,
+            mask_threshold=self.mask_threshold,
+        )
+        return self._template_package
+
+    def detect(self, video_path: Union[str, Path], **overrides: Any) -> Dict[str, Any]:
+        cfg = dict(self._default_cfg)
+        cfg.update(overrides)
+        package = overrides.get("template_package")
+        if package is None:
+            package = self._ensure_template()
+        result = detect_watermark(
+            video_path,
+            self.template_path,
+            template_package=package,
+            return_details=bool(cfg.pop("return_details", True)),
+            return_series=bool(cfg.pop("return_series", True)),
+            **cfg,
+        )
+        if isinstance(result, dict):
+            self._last_result = result
+        else:
+            self._last_result = {"series": [], "details": []}
+        return self._last_result
+
+    def scan(self, video_path: Union[str, Path], **overrides: Any) -> Dict[str, Any]:
+        return self.detect(video_path, **overrides)
+
+    def last_series(self) -> List[Dict[str, Any]]:
+        data = self._last_result.get("series") if isinstance(self._last_result, dict) else []
+        return list(data or [])
+
+    def _get_zone_masks(
+        self,
+        frame_size: Optional[Tuple[int, int]] = None,
+        *,
+        series: Optional[Sequence[Dict[str, Any]]] = None,
+    ) -> List[np.ndarray]:
+        records = series if series is not None else self.last_series()
+        if not records:
+            return []
+        width: Optional[int]
+        height: Optional[int]
+        if frame_size:
+            width, height = frame_size
+        else:
+            width = height = None
+            for entry in records:
+                size = entry.get("frame_size")
+                if isinstance(size, (list, tuple)) and len(size) == 2:
+                    try:
+                        width = int(size[0])
+                        height = int(size[1])
+                        break
+                    except (TypeError, ValueError):
+                        width = height = None
+        if not width or not height:
+            raise ValueError("Frame size is required to build masks")
+        masks: List[np.ndarray] = []
+        for entry in records:
+            bbox = entry.get("bbox")
+            if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+                continue
+            x, y, w, h = [int(v) for v in bbox]
+            mask = np.zeros((height, width), dtype=np.uint8)
+            x = max(0, min(x, width - 1))
+            y = max(0, min(y, height - 1))
+            w = max(1, min(w, width - x))
+            h = max(1, min(h, height - y))
+            mask[y : y + h, x : x + w] = 255
+            masks.append(mask)
+        return masks
+
+    def get_zone_masks(
+        self,
+        frame_size: Optional[Tuple[int, int]] = None,
+        *,
+        series: Optional[Sequence[Dict[str, Any]]] = None,
+    ) -> List[np.ndarray]:
+        return self._get_zone_masks(frame_size, series=series)
+
+
+__all__ = ["prepare_template", "detect_watermark", "TemplateAssets", "WaterMarkDetector"]
