@@ -239,6 +239,9 @@ def load_cfg() -> dict:
     downloader.setdefault("entry", "download_all.py")
     downloader.setdefault("max_videos", 0)
 
+    automator = data.setdefault("automator", {})
+    automator.setdefault("steps", [])
+
     # --- ffmpeg ---
     ff = data.setdefault("ffmpeg", {})
     ff.setdefault("binary", "ffmpeg")
@@ -438,6 +441,61 @@ def normalize_session_list(raw_sessions: object) -> List[Dict[str, Any]]:
         session["max_videos"] = int(_coerce_int(session.get("max_videos")) or 0)
 
         normalized.append(session)
+
+    return normalized
+
+
+def normalize_automator_steps(raw_steps: object) -> List[Dict[str, Any]]:
+    """Приводит шаги автоматизатора к ожидаемой структуре."""
+
+    normalized: List[Dict[str, Any]] = []
+    if not isinstance(raw_steps, list):
+        return normalized
+
+    valid_types = {
+        "session_prompts",
+        "session_images",
+        "session_mix",
+        "session_download",
+        "session_watermark",
+        "global_blur",
+        "global_merge",
+        "global_watermark",
+    }
+
+    for item in raw_steps:
+        if not isinstance(item, dict):
+            continue
+        step_type = str(item.get("type") or "").strip()
+        if step_type not in valid_types:
+            continue
+        step: Dict[str, Any] = {"type": step_type}
+
+        if step_type.startswith("session_"):
+            sessions_raw = item.get("sessions")
+            sessions: List[str] = []
+            if isinstance(sessions_raw, (list, tuple)):
+                for sid in sessions_raw:
+                    if not sid:
+                        continue
+                    sid_str = str(sid).strip()
+                    if not sid_str:
+                        continue
+                    if sid_str not in sessions:
+                        sessions.append(sid_str)
+            if not sessions:
+                continue
+            step["sessions"] = sessions
+            if step_type == "session_download":
+                limit = _coerce_int(item.get("limit")) or 0
+                step["limit"] = max(0, limit)
+        elif step_type == "global_merge":
+            group = _coerce_int(item.get("group")) or 0
+            if group < 0:
+                group = 0
+            step["group"] = group
+
+        normalized.append(step)
 
     return normalized
 
@@ -1201,6 +1259,147 @@ class CustomCommandDialog(QtWidgets.QDialog):
         }
 
 
+class AutomatorStepDialog(QtWidgets.QDialog):
+    """Диалог добавления/редактирования шага автоматизации."""
+
+    def __init__(self, main: "MainWindow", sessions: List[Tuple[str, str]], step: Optional[Dict[str, Any]] = None):
+        super().__init__(main)
+        self._sessions = sessions
+        self.setWindowTitle("Шаг автоматизации")
+        self.setModal(True)
+        self.resize(420, 520)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(12)
+
+        self.cmb_type = QtWidgets.QComboBox()
+        self.cmb_type.addItem("✍️ Вставка промптов (сессии)", "session_prompts")
+        self.cmb_type.addItem("🖼️ Генерация картинок (сессии)", "session_images")
+        self.cmb_type.addItem("🪄 Промпты + картинки (сессии)", "session_mix")
+        self.cmb_type.addItem("⬇️ Скачивание видео (сессии)", "session_download")
+        self.cmb_type.addItem("🧼 Замена водяного знака (сессии)", "session_watermark")
+        self.cmb_type.addItem("🌫️ Блюр (глобально)", "global_blur")
+        self.cmb_type.addItem("🧵 Склейка (глобально)", "global_merge")
+        self.cmb_type.addItem("🧼 Замена водяного знака (глобально)", "global_watermark")
+        layout.addWidget(self.cmb_type)
+
+        self.session_group = QtWidgets.QGroupBox("Выбор сессий")
+        session_layout = QtWidgets.QVBoxLayout(self.session_group)
+        session_layout.setContentsMargins(12, 12, 12, 12)
+        session_layout.setSpacing(6)
+        self.lst_sessions = QtWidgets.QListWidget()
+        self.lst_sessions.setAlternatingRowColors(True)
+        self.lst_sessions.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
+        for sid, label in sessions:
+            item = QtWidgets.QListWidgetItem(label)
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, sid)
+            item.setFlags(item.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(QtCore.Qt.CheckState.Unchecked)
+            self.lst_sessions.addItem(item)
+        session_layout.addWidget(self.lst_sessions)
+        layout.addWidget(self.session_group)
+
+        self.limit_widget = QtWidgets.QWidget()
+        limit_layout = QtWidgets.QHBoxLayout(self.limit_widget)
+        limit_layout.setContentsMargins(0, 0, 0, 0)
+        limit_layout.setSpacing(8)
+        limit_layout.addWidget(QtWidgets.QLabel("Скачать по:"))
+        self.sb_limit = QtWidgets.QSpinBox()
+        self.sb_limit.setRange(0, 10000)
+        self.sb_limit.setValue(0)
+        self.sb_limit.setSuffix(" видео")
+        limit_layout.addWidget(self.sb_limit)
+        limit_layout.addStretch(1)
+        layout.addWidget(self.limit_widget)
+
+        self.merge_widget = QtWidgets.QWidget()
+        merge_layout = QtWidgets.QHBoxLayout(self.merge_widget)
+        merge_layout.setContentsMargins(0, 0, 0, 0)
+        merge_layout.setSpacing(8)
+        merge_layout.addWidget(QtWidgets.QLabel("Склеивать по:"))
+        self.sb_group = QtWidgets.QSpinBox()
+        self.sb_group.setRange(1, 50)
+        self.sb_group.setValue(3)
+        self.sb_group.setSuffix(" клипа")
+        merge_layout.addWidget(self.sb_group)
+        merge_layout.addStretch(1)
+        layout.addWidget(self.merge_widget)
+
+        layout.addStretch(1)
+
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self.cmb_type.currentIndexChanged.connect(self._update_visibility)
+        self._update_visibility()
+
+        if step:
+            self._load_step(step)
+
+    def _load_step(self, step: Dict[str, Any]):
+        step_type = step.get("type")
+        idx = self.cmb_type.findData(step_type)
+        if idx >= 0:
+            self.cmb_type.setCurrentIndex(idx)
+        sessions = set(step.get("sessions") or [])
+        for i in range(self.lst_sessions.count()):
+            item = self.lst_sessions.item(i)
+            sid = item.data(QtCore.Qt.ItemDataRole.UserRole)
+            if sid in sessions:
+                item.setCheckState(QtCore.Qt.CheckState.Checked)
+        if step_type == "session_download":
+            self.sb_limit.setValue(int(step.get("limit", 0) or 0))
+        if step_type == "global_merge":
+            group = int(step.get("group", 0) or 0)
+            if group > 0:
+                self.sb_group.setValue(group)
+
+    def _update_visibility(self):
+        step_type = self.cmb_type.currentData()
+        is_session = isinstance(step_type, str) and step_type.startswith("session_")
+        self.session_group.setVisible(is_session)
+        self.limit_widget.setVisible(step_type == "session_download")
+        self.merge_widget.setVisible(step_type == "global_merge")
+
+    def _selected_sessions(self) -> List[str]:
+        selected: List[str] = []
+        for i in range(self.lst_sessions.count()):
+            item = self.lst_sessions.item(i)
+            if item.checkState() == QtCore.Qt.CheckState.Checked:
+                sid = item.data(QtCore.Qt.ItemDataRole.UserRole)
+                if sid:
+                    selected.append(str(sid))
+        return selected
+
+    def accept(self) -> None:  # type: ignore[override]
+        step_type = self.cmb_type.currentData()
+        if isinstance(step_type, str) and step_type.startswith("session_"):
+            if not self._selected_sessions():
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Выбери сессии",
+                    "Нужно отметить хотя бы одну сессию для выполнения шага.",
+                )
+                return
+        super().accept()
+
+    def get_data(self) -> Dict[str, Any]:
+        step_type = self.cmb_type.currentData()
+        step: Dict[str, Any] = {"type": step_type}
+        if isinstance(step_type, str) and step_type.startswith("session_"):
+            step["sessions"] = self._selected_sessions()
+            if step_type == "session_download":
+                step["limit"] = int(self.sb_limit.value())
+        elif step_type == "global_merge":
+            step["group"] = int(self.sb_group.value())
+        return step
+
+
 # ---------- главное окно ----------
 class MainWindow(QtWidgets.QMainWindow):
     # сигналы для безопасных UI-апдейтов из потоков
@@ -1247,6 +1446,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_windows: Dict[str, "SessionWorkspaceWindow"] = {}
         self._current_session_id: str = self._session_order[0] if self._session_order else ""
 
+        automator_cfg = self.cfg.setdefault("automator", {})
+        self._automator_steps: List[Dict[str, Any]] = normalize_automator_steps(automator_cfg.get("steps"))
+        automator_cfg["steps"] = [dict(step) for step in self._automator_steps]
+
         self._command_registry: Dict[str, Dict[str, Any]] = {}
         self._command_actions: Dict[str, QtGui.QAction] = {}
         self._pending_tg_jobs: List[Tuple[QtCore.QTimer, str]] = []
@@ -1284,6 +1487,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._scenario_waiters: Dict[str, threading.Event] = {}
         self._scenario_results: Dict[str, int] = {}
         self._scenario_wait_lock = Lock()
+        self._session_waiters: Dict[str, List[Tuple[str, str]]] = {}
+        self._session_wait_events: Dict[str, threading.Event] = {}
+        self._session_wait_results: Dict[str, int] = {}
         self._stat_cache: Dict[Tuple[str, Tuple[str, ...]], Tuple[float, int, int]] = {}
         self._activity_filter_text: str = ""
         self._readme_loaded = False
@@ -1299,6 +1505,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._build_ui()
         self._wire()
+        self._refresh_automator_list()
         self._init_state()
         self._refresh_update_buttons()
 
@@ -1544,6 +1751,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lst_sessions.blockSignals(False)
         self._refresh_command_palette_sessions()
         self._refresh_workspace_context()
+        self._refresh_automator_list()
 
     def _session_config_snapshot(self) -> List[Dict[str, Any]]:
         snapshot: List[Dict[str, Any]] = []
@@ -1963,6 +2171,67 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_cache[session_id]["max_videos"] = limit if limit > 0 else 0
         self._persist_sessions()
 
+    def _register_session_waiter(self, session_id: str, task: str) -> Tuple[str, threading.Event]:
+        token = f"{session_id}:{uuid.uuid4().hex}"
+        event = threading.Event()
+        with self._scenario_wait_lock:
+            queue = self._session_waiters.setdefault(session_id, [])
+            queue.append((token, task or ""))
+            self._session_wait_events[token] = event
+        return token, event
+
+    def _cancel_session_waiter(self, token: str):
+        with self._scenario_wait_lock:
+            self._session_wait_events.pop(token, None)
+            self._session_wait_results.pop(token, None)
+            for sid, entries in list(self._session_waiters.items()):
+                filtered = [entry for entry in entries if entry[0] != token]
+                if filtered:
+                    self._session_waiters[sid] = filtered
+                else:
+                    self._session_waiters.pop(sid, None)
+
+    def _wait_for_session(self, token: str, waiter: threading.Event, timeout: Optional[float] = None) -> int:
+        deadline = time.monotonic() + timeout if timeout else None
+        while True:
+            remaining = 0 if deadline is None else max(0.0, deadline - time.monotonic())
+            interval = 0.25 if deadline is None else min(0.25, remaining)
+            if waiter.wait(interval):
+                break
+            if deadline is not None and time.monotonic() >= deadline:
+                break
+            with self._scenario_wait_lock:
+                if token not in self._session_wait_events:
+                    break
+        with self._scenario_wait_lock:
+            rc = self._session_wait_results.pop(token, 1)
+            self._session_wait_events.pop(token, None)
+            for sid, entries in list(self._session_waiters.items()):
+                filtered = [entry for entry in entries if entry[0] != token]
+                if filtered:
+                    self._session_waiters[sid] = filtered
+                else:
+                    self._session_waiters.pop(sid, None)
+        return rc
+
+    def _notify_session_waiters(self, session_id: str, task: str, rc: int):
+        with self._scenario_wait_lock:
+            entries = self._session_waiters.get(session_id, [])
+            remaining: List[Tuple[str, str]] = []
+            for token, expected in entries:
+                expected_clean = expected or ""
+                if expected_clean and expected_clean not in {task, "*"}:
+                    remaining.append((token, expected))
+                    continue
+                event = self._session_wait_events.pop(token, None)
+                self._session_wait_results[token] = rc
+                if event:
+                    event.set()
+            if remaining:
+                self._session_waiters[session_id] = remaining
+            else:
+                self._session_waiters.pop(session_id, None)
+
     def _ensure_session_runner(self, session_id: str) -> ProcRunner:
         runner = self._session_runners.get(session_id)
         if runner:
@@ -2048,6 +2317,7 @@ class MainWindow(QtWidgets.QMainWindow):
             else:
                 tg_message = f"🧼 {label}: {status_word}"
 
+        self._notify_session_waiters(session_id, task, rc)
         state["last_task"] = task
         state["active_task"] = ""
         state["download_before"] = None
@@ -2109,7 +2379,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _run_session_images(self, session_id: str):
         self._run_session_autogen(session_id, force_images=True, images_only=True)
 
-    def _run_session_download(self, session_id: str):
+    def _run_session_download(self, session_id: str, *, override_limit: Optional[int] = None):
         session = self._session_cache.get(session_id)
         if not session:
             return
@@ -2136,7 +2406,11 @@ class MainWindow(QtWidgets.QMainWindow):
         env["DOWNLOAD_DIR"] = str(dest_dir)
         env["TITLES_FILE"] = str(titles_path)
         env["TITLES_CURSOR_FILE"] = str(cursor_path)
-        limit_value = self._session_download_limit(session)
+        limit_value = (
+            self._session_download_limit(session)
+            if override_limit is None
+            else max(0, int(override_limit))
+        )
         env["MAX_VIDEOS"] = str(limit_value if limit_value > 0 else 0)
         port = self._session_chrome_port(session)
         env["CDP_ENDPOINT"] = f"http://127.0.0.1:{int(port)}"
@@ -2157,8 +2431,19 @@ class MainWindow(QtWidgets.QMainWindow):
             kind="running",
             card_text=False,
         )
-        self._append_session_log(session_id, f"[SESSION] Старт скачивания → {dest_dir}")
-        limit_label = self._session_download_limit_label(session)
+        limit_display = (
+            f"{limit_value}"
+            if limit_value > 0
+            else self._session_download_limit_label(session)
+        )
+        self._append_session_log(
+            session_id,
+            f"[SESSION] Старт скачивания → {dest_dir} (лимит {limit_display})",
+        )
+        if override_limit is not None and override_limit > 0:
+            limit_label = f"{override_limit}"
+        else:
+            limit_label = self._session_download_limit_label(session)
         self._set_session_status(session_id, "running", f"Скачивание видео… (лимит {limit_label})")
         self._send_tg(f"⬇️ {label}: скачивание запускается → {dest_dir}")
         runner.run(cmd, cwd=workdir, env=env)
@@ -3535,6 +3820,53 @@ class MainWindow(QtWidgets.QMainWindow):
         merge_layout.addWidget(grp_merge)
         merge_layout.addStretch(1)
         self.task_tabs.addTab(merge_tab, "Склейка")
+
+        automator_tab, automator_layout = make_scroll_tab()
+        automator_intro = QtWidgets.QLabel(
+            "Собери последовательность действий: выбери шаг, отметь сессии и запусти цепочку одним кликом."
+        )
+        automator_intro.setWordWrap(True)
+        automator_intro.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
+        automator_layout.addWidget(automator_intro)
+
+        self.lst_automator = QtWidgets.QListWidget()
+        self.lst_automator.setObjectName("automatorStepList")
+        self.lst_automator.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        self.lst_automator.setAlternatingRowColors(True)
+        self.lst_automator.setSpacing(2)
+        automator_layout.addWidget(self.lst_automator, 1)
+
+        automator_controls = QtWidgets.QHBoxLayout()
+        automator_controls.setSpacing(8)
+        self.btn_automator_add = QtWidgets.QPushButton("Добавить шаг")
+        self.btn_automator_edit = QtWidgets.QPushButton("Изменить")
+        self.btn_automator_remove = QtWidgets.QPushButton("Удалить")
+        self.btn_automator_up = QtWidgets.QPushButton("▲")
+        self.btn_automator_down = QtWidgets.QPushButton("▼")
+        self.btn_automator_clear = QtWidgets.QPushButton("Очистить")
+        for btn in (
+            self.btn_automator_add,
+            self.btn_automator_edit,
+            self.btn_automator_remove,
+            self.btn_automator_up,
+            self.btn_automator_down,
+            self.btn_automator_clear,
+        ):
+            btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        automator_controls.addWidget(self.btn_automator_add)
+        automator_controls.addWidget(self.btn_automator_edit)
+        automator_controls.addWidget(self.btn_automator_remove)
+        automator_controls.addWidget(self.btn_automator_up)
+        automator_controls.addWidget(self.btn_automator_down)
+        automator_controls.addWidget(self.btn_automator_clear)
+        automator_controls.addStretch(1)
+        automator_layout.addLayout(automator_controls)
+
+        self.btn_run_automator = QtWidgets.QPushButton("🚀 Запустить автоматизацию")
+        self.btn_run_automator.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        automator_layout.addWidget(self.btn_run_automator)
+        automator_layout.addStretch(1)
+        self.task_tabs.addTab(automator_tab, "Автоматизатор")
 
         automation_context, automation_ctx_layout = make_context_card(
             "Пресеты запуска",
@@ -6736,6 +7068,23 @@ class MainWindow(QtWidgets.QMainWindow):
             self.btn_custom_up.clicked.connect(lambda _, direction=-1: self._on_custom_command_move(direction))
         if hasattr(self, "btn_custom_down"):
             self.btn_custom_down.clicked.connect(lambda _, direction=1: self._on_custom_command_move(direction))
+        if hasattr(self, "lst_automator"):
+            self.lst_automator.itemSelectionChanged.connect(self._update_automator_buttons)
+            self.lst_automator.itemDoubleClicked.connect(lambda *_: self._on_automator_edit())
+        if hasattr(self, "btn_automator_add"):
+            self.btn_automator_add.clicked.connect(self._on_automator_add)
+        if hasattr(self, "btn_automator_edit"):
+            self.btn_automator_edit.clicked.connect(self._on_automator_edit)
+        if hasattr(self, "btn_automator_remove"):
+            self.btn_automator_remove.clicked.connect(self._on_automator_remove)
+        if hasattr(self, "btn_automator_up"):
+            self.btn_automator_up.clicked.connect(lambda _, direction=-1: self._on_automator_move(direction))
+        if hasattr(self, "btn_automator_down"):
+            self.btn_automator_down.clicked.connect(lambda _, direction=1: self._on_automator_move(direction))
+        if hasattr(self, "btn_automator_clear"):
+            self.btn_automator_clear.clicked.connect(self._on_automator_clear)
+        if hasattr(self, "btn_run_automator"):
+            self.btn_run_automator.clicked.connect(self._run_automator)
         if hasattr(self, "cb_quick_activity"):
             self.cb_quick_activity.toggled.connect(lambda checked: self._apply_activity_visibility(bool(checked), persist=True))
         if hasattr(self, "cmb_quick_density"):
@@ -8166,6 +8515,281 @@ class MainWindow(QtWidgets.QMainWindow):
         save_cfg(self.cfg)
         self._post_status(f"Склеивать по {n} клипов", state="ok")
 
+    # ----- Automator -----
+    def _automator_session_choices(self) -> List[Tuple[str, str]]:
+        choices: List[Tuple[str, str]] = []
+        for session_id in self._session_order:
+            session = self._session_cache.get(session_id)
+            if not session:
+                continue
+            label = self._session_instance_label(session)
+            choices.append((session_id, label))
+        return choices
+
+    def _describe_automator_step(self, step: Dict[str, Any]) -> str:
+        step_type = step.get("type", "")
+        label_map = {
+            "session_prompts": "✍️ Промпты",
+            "session_images": "🖼️ Картинки",
+            "session_mix": "🪄 Промпты + картинки",
+            "session_download": "⬇️ Скачивание",
+            "session_watermark": "🧼 Замена знака",
+            "global_blur": "🌫️ Блюр",
+            "global_merge": "🧵 Склейка",
+            "global_watermark": "🧼 Замена знака (глобально)",
+        }
+        base = label_map.get(step_type, str(step_type))
+        if step_type.startswith("session_"):
+            sessions = step.get("sessions") or []
+            names: List[str] = []
+            for sid in sessions:
+                session = self._session_cache.get(sid)
+                if session:
+                    names.append(self._session_instance_label(session))
+                else:
+                    names.append(f"{sid}")
+            extra = ", ".join(names)
+            if step_type == "session_download":
+                limit = int(step.get("limit", 0) or 0)
+                if limit > 0:
+                    extra = f"{extra} · {limit} шт."
+                else:
+                    extra = f"{extra} · лимит по настройкам"
+            return f"{base}: {extra}"
+        if step_type == "global_merge":
+            group = int(step.get("group", 0) or 0)
+            if group > 0:
+                return f"{base} по {group}"
+            return f"{base} (по настройкам)"
+        return base
+
+    def _format_automator_step(self, step: Dict[str, Any], idx: int) -> str:
+        return f"{idx}. {self._describe_automator_step(step)}"
+
+    def _refresh_automator_list(self):
+        if not hasattr(self, "lst_automator"):
+            return
+        self.lst_automator.blockSignals(True)
+        self.lst_automator.clear()
+        for idx, step in enumerate(self._automator_steps, start=1):
+            item = QtWidgets.QListWidgetItem(self._format_automator_step(step, idx))
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, idx - 1)
+            self.lst_automator.addItem(item)
+        self.lst_automator.blockSignals(False)
+        self._update_automator_buttons()
+
+    def _update_automator_buttons(self):
+        if not hasattr(self, "lst_automator"):
+            return
+        has_items = bool(self._automator_steps)
+        current_row = self.lst_automator.currentRow()
+        has_selection = current_row >= 0 and current_row < len(self._automator_steps)
+        for attr in ("btn_automator_edit", "btn_automator_remove", "btn_automator_up", "btn_automator_down"):
+            btn = getattr(self, attr, None)
+            if btn:
+                btn.setEnabled(has_selection)
+        if hasattr(self, "btn_automator_clear"):
+            self.btn_automator_clear.setEnabled(has_items)
+        if hasattr(self, "btn_run_automator"):
+            self.btn_run_automator.setEnabled(has_items)
+
+    def _persist_automator(self):
+        self.cfg.setdefault("automator", {})["steps"] = [dict(step) for step in self._automator_steps]
+        save_cfg(self.cfg)
+
+    def _on_automator_add(self):
+        dialog = AutomatorStepDialog(self, self._automator_session_choices())
+        if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            self._automator_steps.append(dialog.get_data())
+            self._persist_automator()
+            self._refresh_automator_list()
+
+    def _on_automator_edit(self):
+        if not hasattr(self, "lst_automator"):
+            return
+        row = self.lst_automator.currentRow()
+        if row < 0 or row >= len(self._automator_steps):
+            return
+        dialog = AutomatorStepDialog(self, self._automator_session_choices(), step=self._automator_steps[row])
+        if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            self._automator_steps[row] = dialog.get_data()
+            self._persist_automator()
+            self._refresh_automator_list()
+            self.lst_automator.setCurrentRow(row)
+
+    def _on_automator_remove(self):
+        if not hasattr(self, "lst_automator"):
+            return
+        row = self.lst_automator.currentRow()
+        if row < 0 or row >= len(self._automator_steps):
+            return
+        self._automator_steps.pop(row)
+        self._persist_automator()
+        self._refresh_automator_list()
+        if row and row - 1 < self.lst_automator.count():
+            self.lst_automator.setCurrentRow(row - 1)
+
+    def _on_automator_move(self, direction: int):
+        if not hasattr(self, "lst_automator"):
+            return
+        row = self.lst_automator.currentRow()
+        if row < 0 or row >= len(self._automator_steps):
+            return
+        new_row = row + direction
+        if new_row < 0 or new_row >= len(self._automator_steps):
+            return
+        self._automator_steps[row], self._automator_steps[new_row] = (
+            self._automator_steps[new_row],
+            self._automator_steps[row],
+        )
+        self._persist_automator()
+        self._refresh_automator_list()
+        self.lst_automator.setCurrentRow(new_row)
+
+    def _on_automator_clear(self):
+        if not self._automator_steps:
+            return
+        confirm = QtWidgets.QMessageBox.question(
+            self,
+            "Очистить шаги",
+            "Удалить все шаги автоматизации?",
+            QtWidgets.QMessageBox.StandardButton.Yes,
+            QtWidgets.QMessageBox.StandardButton.No,
+        )
+        if confirm != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        self._automator_steps.clear()
+        self._persist_automator()
+        self._refresh_automator_list()
+
+    def _run_automator(self):
+        steps = list(self._automator_steps)
+        if not steps:
+            self._post_status("Список шагов пуст", state="error")
+            return
+        summary = " → ".join(self._describe_automator_step(step) for step in steps)
+        self._append_activity(f"Автоматизация: {summary}", kind="info", card_text=False)
+        total = len(steps)
+        self._post_status("Автоматизация запускается…", progress=0, total=total, state="running")
+        threading.Thread(target=self._automator_flow, args=(steps,), daemon=True).start()
+
+    def _automator_flow(self, steps: List[Dict[str, Any]]):
+        total = len(steps)
+        ok_all = True
+        last_idx = 0
+        for idx, step in enumerate(steps, start=1):
+            last_idx = idx
+            description = self._describe_automator_step(step)
+            self._append_activity(
+                f"Автоматизация: шаг {idx}/{total} — {description}",
+                kind="running",
+                card_text=False,
+            )
+            if not self._execute_automator_step(step, idx, total):
+                ok_all = False
+                self._append_activity(
+                    f"Автоматизация: шаг {idx} завершился ошибкой", kind="error", card_text=False
+                )
+                break
+            self._append_activity(
+                f"Автоматизация: шаг {idx} выполнен", kind="success", card_text=False
+            )
+            self._post_status(
+                f"Шаг {idx}/{total} завершён", progress=idx, total=total, state="running"
+            )
+
+        if ok_all:
+            self._post_status("Автоматизация завершена", progress=total, total=total, state="ok")
+        else:
+            self._post_status(
+                f"Автоматизация остановлена на шаге {last_idx}",
+                progress=max(0, last_idx - 1),
+                total=total,
+                state="error",
+            )
+        self._refresh_stats()
+
+    def _execute_automator_step(self, step: Dict[str, Any], idx: int, total: int) -> bool:
+        step_type = step.get("type", "")
+        if step_type.startswith("session_"):
+            sessions = step.get("sessions") or []
+            if not sessions:
+                return False
+            limit_override = int(step.get("limit", 0) or 0) if step_type == "session_download" else 0
+            for sid in sessions:
+                session = self._session_cache.get(sid)
+                if not session:
+                    self._append_activity(f"Сессия {sid} не найдена", kind="error")
+                    return False
+                label = self._session_instance_label(session)
+                self._post_status(
+                    f"Шаг {idx}/{total}: {self._describe_automator_step(step)} → {label}",
+                    state="running",
+                )
+                ok = self._automator_run_session_task(
+                    sid,
+                    step_type,
+                    limit=(limit_override if limit_override > 0 else None),
+                )
+                if not ok:
+                    return False
+            return True
+        if step_type == "global_blur":
+            return self._run_blur_presets_sync()
+        if step_type == "global_merge":
+            group = int(step.get("group", 0) or 0)
+            group_override = group if group > 0 else None
+            return self._run_merge_sync(group_override=group_override)
+        if step_type == "global_watermark":
+            return self._run_watermark_restore_sync()
+        return False
+
+    def _automator_run_session_task(
+        self,
+        session_id: str,
+        step_type: str,
+        *,
+        limit: Optional[int] = None,
+    ) -> bool:
+        expected_task = {
+            "session_prompts": "autogen_prompts",
+            "session_images": "autogen_images",
+            "session_mix": "autogen_mix",
+            "session_download": "download",
+            "session_watermark": "watermark",
+        }.get(step_type, "")
+        if not expected_task:
+            return False
+
+        token, waiter = self._register_session_waiter(session_id, expected_task)
+        started = {"ok": False}
+        done = threading.Event()
+
+        def start_task():
+            try:
+                if step_type == "session_prompts":
+                    self._run_session_autogen(session_id)
+                elif step_type == "session_images":
+                    self._run_session_images(session_id)
+                elif step_type == "session_mix":
+                    self._run_session_autogen(session_id, force_images=True)
+                elif step_type == "session_download":
+                    self._run_session_download(session_id, override_limit=limit)
+                elif step_type == "session_watermark":
+                    self._run_session_watermark(session_id)
+            finally:
+                state = self._ensure_session_state(session_id)
+                started["ok"] = state.get("active_task") == expected_task
+                done.set()
+
+        QtCore.QTimer.singleShot(0, start_task)
+        done.wait()
+        if not started["ok"]:
+            self._cancel_session_waiter(token)
+            return False
+        rc = self._wait_for_session(token, waiter)
+        return rc == 0
+
     # ----- Scenario -----
     def _run_scenario(self):
         steps = []
@@ -8598,6 +9222,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
         if downloads_dir.exists() and not any(_same_path(d, downloads_dir) for d in candidate_dirs):
             candidate_dirs.append(downloads_dir)
+
+        for session_id in self._session_order:
+            session = self._session_cache.get(session_id)
+            if not session:
+                continue
+            session_dir = self._session_download_dir(session)
+            if session_dir.exists() and not any(_same_path(d, session_dir) for d in candidate_dirs):
+                candidate_dirs.append(session_dir)
 
         if not candidate_dirs:
             self._post_status("Нет доступных папок для блюра", state="error")
@@ -9509,10 +10141,13 @@ class MainWindow(QtWidgets.QMainWindow):
         return ok_all
 
     # ----- MERGE -----
-    def _run_merge_sync(self) -> bool:
+    def _run_merge_sync(self, group_override: Optional[int] = None) -> bool:
         self._save_settings_clicked(silent=True)
         merge_cfg = self.cfg.get("merge", {}) or {}
-        group = int(self.sb_merge_group.value() or merge_cfg.get("group_size", 3))
+        if group_override and group_override > 0:
+            group = int(group_override)
+        else:
+            group = int(self.sb_merge_group.value() or merge_cfg.get("group_size", 3))
         pattern = merge_cfg.get("pattern", "*.mp4")
         ff = self.ed_ff_bin.text().strip() or "ffmpeg"
 
