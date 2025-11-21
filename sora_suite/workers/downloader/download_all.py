@@ -136,7 +136,56 @@ def open_drafts_page(context):
             page.goto(DRAFTS_URL)
         except Exception:
             pass
+    try:
+        page.wait_for_load_state("networkidle")
+    except Exception:
+        pass
     return page
+
+
+def _open_first_card_on_page(page, *, allow_reload: bool = True) -> bool:
+    """Пробует открыть первую карточку на текущей странице черновиков."""
+
+    try:
+        cards = page.locator(CARD_LINKS)
+        cards.first.wait_for(state="visible", timeout=15000)
+    except PwTimeout:
+        if allow_reload:
+            try:
+                page.reload()
+                page.wait_for_timeout(500)
+            except Exception:
+                pass
+            return _open_first_card_on_page(page, allow_reload=False)
+        return False
+
+    try:
+        box = cards.first.bounding_box()
+        if box:
+            page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+            jitter(0.05, 0.12)
+        cards.first.click()
+        page.wait_for_url("**/d/**", timeout=15000)
+    except PwTimeout:
+        if allow_reload:
+            try:
+                page.reload()
+                page.wait_for_timeout(600)
+            except Exception:
+                pass
+            return _open_first_card_on_page(page, allow_reload=False)
+        if not is_card_url(page.url):
+            return False
+    except Exception:
+        if not is_card_url(page.url):
+            return False
+
+    try:
+        page.locator(RIGHT_PANEL).wait_for(state="visible", timeout=10000)
+    except PwTimeout:
+        if not is_card_url(page.url):
+            return False
+    return True
 
 
 def open_card(page, href: str) -> bool:
@@ -239,7 +288,7 @@ def _long_swipe_once(page) -> None:
     page.wait_for_timeout(820)
 
 
-def ensure_card_open(page) -> bool:
+def ensure_card_open(page, *, from_drafts: bool = True) -> bool:
     """Гарантирует, что страница открыта на карточке Sora."""
 
     if is_card_url(page.url):
@@ -249,15 +298,22 @@ def ensure_card_open(page) -> bool:
         except PwTimeout:
             return False
 
+    if from_drafts:
+        return _open_first_card_on_page(page)
+
     try:
         first = page.locator(CARD_LINKS)
-        first.first.wait_for(state="visible", timeout=8000)
+        first.first.wait_for(state="visible", timeout=12000)
         href = first.first.get_attribute("href")
         if not href:
             return False
-        return open_card(page, href)
+        opened = open_card(page, href)
+        if opened:
+            return True
     except Exception:
-        return False
+        pass
+
+    return _open_first_card_on_page(page, allow_reload=False)
 
 
 def download_current_card(page, save_dir: str) -> bool:
@@ -378,12 +434,14 @@ def main() -> None:
                     "Нет контекстов Chrome. Запусти Chrome с --remote-debugging-port=9222 и сессией Sora."
                 )
             context = contexts[0]
-            page = open_drafts_page(context)
+            open_drafts = os.getenv("OPEN_DRAFTS_FIRST", "1").lower() not in {"0", "false", "off"}
+            page = open_drafts_page(context) if open_drafts else (context.pages[0] if context.pages else context.new_page())
+            page.bring_to_front()
             print(f"[i] Работаю в существующем окне: {page.url}")
 
             desired = MAX_VIDEOS if MAX_VIDEOS > 0 else 0
 
-            if not ensure_card_open(page):
+            if not ensure_card_open(page, from_drafts=open_drafts):
                 print("[x] Не удалось открыть первую карточку — остановка.")
                 return
             print("[i] Открыта первая карточка — перехожу в режим скролла.")

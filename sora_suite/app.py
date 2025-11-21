@@ -238,6 +238,7 @@ def load_cfg() -> dict:
     downloader.setdefault("workdir", str(WORKERS_DIR / "downloader"))
     downloader.setdefault("entry", "download_all.py")
     downloader.setdefault("max_videos", 0)
+    downloader.setdefault("open_drafts", True)
 
     automator = data.setdefault("automator", {})
     automator.setdefault("steps", [])
@@ -452,6 +453,7 @@ def normalize_session_list(raw_sessions: object) -> List[Dict[str, Any]]:
         session.setdefault("titles_file", "")
         session.setdefault("cursor_file", "")
         session.setdefault("max_videos", 0)
+        session.setdefault("open_drafts", True)
         session["max_videos"] = int(_coerce_int(session.get("max_videos")) or 0)
 
         normalized.append(session)
@@ -1872,6 +1874,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "titles_file": session.get("titles_file", ""),
                 "cursor_file": session.get("cursor_file", ""),
                 "max_videos": int(_coerce_int(session.get("max_videos")) or 0),
+                "open_drafts": bool(session.get("open_drafts", True)),
             }
             snapshot.append(entry)
         return snapshot
@@ -1937,6 +1940,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sb_session_max_videos.blockSignals(True)
         self.sb_session_max_videos.setValue(0)
         self.sb_session_max_videos.blockSignals(False)
+        self.chk_session_open_drafts.blockSignals(True)
+        self.chk_session_open_drafts.setChecked(True)
+        self.chk_session_open_drafts.blockSignals(False)
         self.chk_session_auto_chrome.blockSignals(True)
         self.chk_session_auto_chrome.setChecked(False)
         self.chk_session_auto_chrome.blockSignals(False)
@@ -2003,6 +2009,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sb_session_max_videos.blockSignals(True)
         self.sb_session_max_videos.setValue(limit if limit > 0 else 0)
         self.sb_session_max_videos.blockSignals(False)
+
+        self.chk_session_open_drafts.blockSignals(True)
+        self.chk_session_open_drafts.setChecked(bool(session.get("open_drafts", True)))
+        self.chk_session_open_drafts.blockSignals(False)
 
         self.chk_session_auto_chrome.blockSignals(True)
         self.chk_session_auto_chrome.setChecked(bool(session.get("auto_launch_chrome")))
@@ -2266,6 +2276,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_cache[session_id]["max_videos"] = limit if limit > 0 else 0
         self._persist_sessions()
 
+    def _on_session_open_drafts_changed(self, checked: bool):
+        session_id = getattr(self, "_current_session_id", "")
+        if not session_id or session_id not in self._session_cache:
+            return
+        self._session_cache[session_id]["open_drafts"] = bool(checked)
+        self._persist_sessions()
+
     def _register_session_waiter(self, session_id: str, task: str) -> Tuple[str, threading.Event]:
         token = f"{session_id}:{uuid.uuid4().hex}"
         event = threading.Event()
@@ -2501,6 +2518,7 @@ class MainWindow(QtWidgets.QMainWindow):
         env["DOWNLOAD_DIR"] = str(dest_dir)
         env["TITLES_FILE"] = str(titles_path)
         env["TITLES_CURSOR_FILE"] = str(cursor_path)
+        env["OPEN_DRAFTS_FIRST"] = "1" if self._session_open_drafts(session) else "0"
         limit_value = (
             self._session_download_limit(session)
             if override_limit is None
@@ -6856,6 +6874,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sb_max_videos.setValue(int(self.cfg.get("downloader", {}).get("max_videos", 0)))
         self.sb_max_videos.setSuffix(" видео")
         dl_row.addWidget(self.sb_max_videos)
+        self.chk_open_drafts_global = QtWidgets.QCheckBox("Открывать drafts")
+        self.chk_open_drafts_global.setChecked(bool(self.cfg.get("downloader", {}).get("open_drafts", True)))
+        dl_row.addWidget(self.chk_open_drafts_global)
         self.btn_apply_dl = QtWidgets.QPushButton("Применить")
         self.btn_apply_dl.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
         dl_row.addWidget(self.btn_apply_dl)
@@ -7080,6 +7101,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sb_session_max_videos.setSpecialValueText("Как в настройках")
         form.addRow("Лимит скачки:", self.sb_session_max_videos)
 
+        self.chk_session_open_drafts = QtWidgets.QCheckBox("Перед скачкой открывать drafts")
+        form.addRow("Drafts:", self.chk_session_open_drafts)
+
         detail_layout.addLayout(form)
 
         self.chk_session_auto_chrome = QtWidgets.QCheckBox("Автоматически запускать Chrome при старте")
@@ -7170,6 +7194,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ed_session_cursor_file,
             self.btn_session_cursor_browse,
             self.sb_session_max_videos,
+            self.chk_session_open_drafts,
             self.chk_session_auto_chrome,
             self.cmb_session_autogen_mode,
             self.te_session_notes,
@@ -7264,6 +7289,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.chk_session_auto_chrome.toggled.connect(self._on_session_auto_chrome_changed)
         self.cmb_session_autogen_mode.currentIndexChanged.connect(self._on_session_autogen_mode_changed)
         self.sb_session_max_videos.valueChanged.connect(self._on_session_max_videos_changed)
+        self.chk_session_open_drafts.toggled.connect(self._on_session_open_drafts_changed)
 
         self._refresh_sessions_choices()
         self._refresh_sessions_list()
@@ -8813,6 +8839,12 @@ class MainWindow(QtWidgets.QMainWindow):
         dl_cfg = self.cfg.get("downloader", {}) or {}
         return int(dl_cfg.get("max_videos", 0) or 0)
 
+    def _session_open_drafts(self, session: Dict[str, Any]) -> bool:
+        if "open_drafts" in session:
+            return bool(session.get("open_drafts"))
+        dl_cfg = self.cfg.get("downloader", {}) or {}
+        return bool(dl_cfg.get("open_drafts", True))
+
     def _session_download_limit_label(self, session: Dict[str, Any]) -> str:
         limit = _coerce_int(session.get("max_videos")) or 0
         if limit and limit > 0:
@@ -9078,7 +9110,9 @@ class MainWindow(QtWidgets.QMainWindow):
     # ----- Apply DL limit -----
     def _apply_dl_limit(self):
         n = int(self.sb_max_videos.value())
-        self.cfg.setdefault("downloader", {})["max_videos"] = n
+        dl_cfg = self.cfg.setdefault("downloader", {})
+        dl_cfg["max_videos"] = n
+        dl_cfg["open_drafts"] = bool(self.chk_open_drafts_global.isChecked())
         save_cfg(self.cfg)
         self._post_status(f"Будут скачаны последние {n if n>0 else 'ВСЕ'}", state="ok")
 
@@ -11425,6 +11459,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         dl_cfg = self.cfg.setdefault("downloader", {})
         dl_cfg["max_videos"] = int(self.sb_max_videos.value())
+        dl_cfg["open_drafts"] = bool(self.chk_open_drafts_global.isChecked())
 
         wmr_cfg = self.cfg.setdefault("watermark_cleaner", {})
         wmr_cfg["source_dir"] = self.ed_wmr_source.text().strip() or wmr_cfg.get(
