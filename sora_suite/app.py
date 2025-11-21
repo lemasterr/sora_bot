@@ -9653,7 +9653,7 @@ class MainWindow(QtWidgets.QMainWindow):
         rc = self._wait_for_session(token, waiter)
         return rc == 0
 
-    @QtCore.Slot(object)
+    @QtCore.pyqtSlot(object)
     def _run_on_ui(self, fn: object) -> None:
         if not callable(fn):
             return
