@@ -445,7 +445,7 @@ def scroll_to_next_card(page, *, pause_ms: int = 1400, timeout_ms: int = 8000) -
     try:
         page.wait_for_function(
             "({ startUrl, startSrc }) => window.location.href !== startUrl || ((document.querySelector('video')?.currentSrc || '') !== startSrc)",
-            {"startUrl": start_url, "startSrc": start_src},
+            arg={"startUrl": start_url, "startSrc": start_src},
             timeout=timeout_ms,
         )
         try:
@@ -464,7 +464,7 @@ def scroll_to_next_card(page, *, pause_ms: int = 1400, timeout_ms: int = 8000) -
     try:
         page.wait_for_function(
             "({ startUrl, startSrc }) => window.location.href !== startUrl || ((document.querySelector('video')?.currentSrc || '') !== startSrc)",
-            {"startUrl": start_url, "startSrc": start_src},
+            arg={"startUrl": start_url, "startSrc": start_src},
             timeout=int(timeout_ms * 0.9),
         )
         try:
