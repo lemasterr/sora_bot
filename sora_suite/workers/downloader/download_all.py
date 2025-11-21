@@ -365,32 +365,26 @@ def scroll_to_next_card(page, *, pause_ms: int = 1400, timeout_ms: int = 8000) -
 
     _long_swipe_once(page)
     page.wait_for_timeout(pause_ms)
-    try:
-        if not _wait_for_change(timeout_ms):
-            raise PwTimeout()
+    if _wait_for_change(timeout_ms):
         try:
             page.locator(RIGHT_PANEL).wait_for(state="visible", timeout=6500)
         except PwTimeout:
             pass
         return True
-    except PwTimeout:
-        pass
 
     if not _changed():
         long_jitter(0.7, 1.2)
         _long_swipe_once(page)
         page.wait_for_timeout(int(pause_ms * 0.9))
 
-    try:
-        if not _wait_for_change(int(timeout_ms * 0.9)):
-            raise PwTimeout()
+    if _wait_for_change(int(timeout_ms * 0.9)):
         try:
             page.locator(RIGHT_PANEL).wait_for(state="visible", timeout=6500)
         except PwTimeout:
             pass
         return True
-    except PwTimeout:
-        return _changed()
+
+    return _changed()
 
 
 def download_feed_mode(page, desired: int) -> None:
