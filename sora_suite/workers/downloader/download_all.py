@@ -125,19 +125,19 @@ def is_card_url(url: str) -> bool:
     return "/d/" in (url or "")
 
 
-def find_or_open_start_page(context):
-    for page in context.pages:
-        if is_card_url(page.url):
-            page.bring_to_front()
-            return page, True
-    for page in context.pages:
-        if page.url.startswith(DRAFTS_URL):
-            page.bring_to_front()
-            return page, False
+def open_drafts_page(context):
+    """Открывает страницу драфтов, даже если была открыта карточка."""
+
     page = context.pages[0] if context.pages else context.new_page()
     page.bring_to_front()
-    page.goto(DRAFTS_URL, wait_until="domcontentloaded")
-    return page, False
+    try:
+        page.goto(DRAFTS_URL, wait_until="domcontentloaded")
+    except Exception:
+        try:
+            page.goto(DRAFTS_URL)
+        except Exception:
+            pass
+    return page
 
 
 def open_card(page, href: str) -> bool:
@@ -519,13 +519,16 @@ def main() -> None:
                     "Нет контекстов Chrome. Запусти Chrome с --remote-debugging-port=9222 и сессией Sora."
                 )
             context = contexts[0]
-            page, on_card_page = find_or_open_start_page(context)
+            page = open_drafts_page(context)
             print(f"[i] Работаю в существующем окне: {page.url}")
 
             desired = MAX_VIDEOS if MAX_VIDEOS > 0 else 0
 
-            if on_card_page or SCROLL_MODE:
-                print("[i] Обнаружена открытая карточка — перехожу в режим скролла.")
+            if SCROLL_MODE:
+                if not ensure_card_open(page):
+                    print("[x] Не удалось открыть первую карточку — остановка.")
+                    return
+                print("[i] Открыта первая карточка — перехожу в режим скролла.")
                 download_feed_mode(page, desired)
             else:
                 links = collect_card_links(page, desired)
