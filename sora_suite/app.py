@@ -9619,8 +9619,20 @@ class MainWindow(QtWidgets.QMainWindow):
                 started["ok"] = state.get("active_task") == expected_task
                 done.set()
 
-        QtCore.QTimer.singleShot(0, start_task)
-        done.wait()
+        def _queue_start():
+            start_task()
+
+        QtCore.QMetaObject.invokeMethod(
+            self,
+            _queue_start,
+            QtCore.Qt.ConnectionType.QueuedConnection,
+        )
+        if not done.wait(5.0):
+            self._append_activity(
+                f"Сессия {session_id}: задача не запустилась вовремя", kind="error", card_text=False
+            )
+            self._cancel_session_waiter(token)
+            return False
         if not started["ok"]:
             self._cancel_session_waiter(token)
             return False
