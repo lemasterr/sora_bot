@@ -2792,13 +2792,13 @@ class MainWindow(QtWidgets.QMainWindow):
             QPushButton {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #1d2b46, stop:1 #15213a);
                 border: 1px solid #2c3d63;
-                border-radius: 12px;
-                padding: 10px 20px;
+                border-radius: 10px;
+                padding: 6px 12px;
                 color: #f8fafc;
                 font-weight: 600;
                 letter-spacing: 0.2px;
-                min-height: 34px;
-                box-shadow: 0px 8px 24px rgba(0,0,0,0.25);
+                min-height: 30px;
+                box-shadow: 0px 8px 18px rgba(0,0,0,0.22);
             }
             QPushButton:disabled { background: #131a2a; border-color: #1f2a3f; color: #475569; }
             QPushButton:hover {
@@ -2811,7 +2811,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 background: rgba(12,19,34,0.85);
                 border: 1px solid #27364d;
                 border-radius: 10px;
-                padding: 6px 10px;
+                padding: 4px 8px;
                 color: #e2e8f0;
             }
             QToolButton:hover { border-color: #8ba8ff; background: rgba(35,55,91,0.65); }
@@ -2833,7 +2833,7 @@ class MainWindow(QtWidgets.QMainWindow):
             QCheckBox::indicator:disabled { background: #1e293b; border-color: #27364d; }
             QListWidget { border: none; background: transparent; color: #f1f5f9; }
             QListWidget#sectionNav { background: transparent; border: none; padding: 6px 4px; }
-            QListWidget#sectionNav::item { margin: 4px 8px; padding: 10px 14px; border-radius: 12px; color: #cbd5f5; }
+            QListWidget#sectionNav::item { margin: 4px 8px; padding: 8px 12px; border-radius: 12px; color: #cbd5f5; background: rgba(99,102,241,0.08); }
             QListWidget#sectionNav::item:!enabled { margin: 16px 8px 6px 8px; padding: 4px 14px; color: #64748b; font-weight:600; background: transparent; }
             QListWidget#sectionNav::item:selected { background: rgba(99,102,241,0.36); color: #ffffff; }
             QListWidget#sectionNav::item:hover { background: rgba(148,163,184,0.18); }
