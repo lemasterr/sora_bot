@@ -2732,7 +2732,7 @@ class MainWindow(QtWidgets.QMainWindow):
             """
             QWidget { background-color: #0d1425; color: #e2e8f0; }
             QLabel { background: transparent; }
-            QGroupBox { border: 1px solid #1f2a40; border-radius: 12px; margin-top: 16px; padding-top: 12px; background: transparent; }
+            QGroupBox { border: 1px solid #1f2a40; border-radius: 12px; margin-top: 16px; padding-top: 12px; background: rgba(12,18,31,0.9); }
             QGroupBox::title { subcontrol-origin: margin; left: 16px; padding: 0 6px; background: #0d1425; color: #94a3b8; }
             QToolButton#contextToggleButton {
                 border: 1px solid #27364d;
@@ -2747,12 +2747,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 border-color: #8ba8ff;
             }
             QSplitter#mainSplitter::handle {
-                background: rgba(148,163,184,0.18);
-                width: 8px;
-                border-radius: 3px;
+                background: transparent;
+                width: 10px;
+                border: none;
+                margin: 0 2px;
             }
             QSplitter#mainSplitter::handle:hover {
-                background: rgba(129,140,248,0.38);
+                background: rgba(129,140,248,0.22);
+                border-radius: 6px;
             }
             QFrame#navFrame {
                 background: rgba(15,23,42,0.82);
@@ -2761,43 +2763,59 @@ class MainWindow(QtWidgets.QMainWindow):
                 padding: 6px 0;
             }
             QFrame#sectionContainer {
-                background: transparent;
+                background: radial-gradient(circle at 12% 18%, rgba(76,110,245,0.08), transparent 42%),
+                             radial-gradient(circle at 88% 30%, rgba(34,211,238,0.06), transparent 38%),
+                             linear-gradient(145deg, rgba(10,16,28,0.92), rgba(12,18,31,0.95));
+                border: 1px solid rgba(148,163,184,0.14);
+                border-radius: 22px;
+                padding: 8px;
             }
             QFrame#sectionSurface {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 rgba(15,23,42,0.94), stop:1 rgba(17,24,39,0.92));
-                border: 1px solid rgba(148,163,184,0.18);
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 rgba(14,21,36,0.96), stop:1 rgba(11,18,31,0.94));
+                border: 1px solid rgba(148,163,184,0.22);
                 border-radius: 20px;
-                padding: 12px;
+                padding: 16px;
             }
             QScrollArea#sectionScrollArea {
-                background: transparent;
+                background: rgba(5,10,18,0.65);
                 border: none;
             }
             QWidget#sectionScrollWidget {
-                background: transparent;
+                background: rgba(8,13,23,0.6);
             }
             QFrame#contextContainer {
-                background: rgba(15,23,42,0.88);
+                background: qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 rgba(12,19,34,0.92), stop:1 rgba(10,15,28,0.9));
                 border: 1px solid #1e293b;
                 border-radius: 18px;
                 padding: 12px 0;
             }
             QPushButton {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #1f2d4a, stop:1 #16213a);
-                border: 1px solid #314365;
-                border-radius: 10px;
-                padding: 8px 18px;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #1d2b46, stop:1 #15213a);
+                border: 1px solid #2c3d63;
+                border-radius: 12px;
+                padding: 10px 20px;
                 color: #f8fafc;
-                font-weight: 500;
+                font-weight: 600;
                 letter-spacing: 0.2px;
+                min-height: 34px;
+                box-shadow: 0px 8px 24px rgba(0,0,0,0.25);
             }
             QPushButton:disabled { background: #131a2a; border-color: #1f2a3f; color: #475569; }
             QPushButton:hover {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #26365a, stop:1 #1b2a46);
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #23375b, stop:1 #1b2948);
                 border-color: #8ba8ff;
             }
             QPushButton:pressed { background: #121d34; border-color: #3d4f78; }
             QPushButton:focus { outline: none; border-color: #9fb4ff; }
+            QToolButton {
+                background: rgba(12,19,34,0.85);
+                border: 1px solid #27364d;
+                border-radius: 10px;
+                padding: 6px 10px;
+                color: #e2e8f0;
+            }
+            QToolButton:hover { border-color: #8ba8ff; background: rgba(35,55,91,0.65); }
+            QToolButton:pressed { background: rgba(23,35,63,0.8); }
             QLineEdit, QSpinBox, QDoubleSpinBox, QDateTimeEdit, QComboBox, QTextEdit, QPlainTextEdit {
                 background-color: #0a1324; border: 1px solid #1f2a40; border-radius: 8px; padding: 4px 8px;
                 selection-background-color: #6366f1; selection-color: #f8fafc;
@@ -2830,7 +2848,7 @@ class MainWindow(QtWidgets.QMainWindow):
             QLabel#dashboardSectionTitle { font-size: 13px; font-weight: 600; letter-spacing: 0.4px; text-transform: uppercase; color: #9fb7ff; }
             QFrame#dashboardHeader { background: transparent; border: 1px solid #1f2a40; border-radius: 18px; }
             QFrame#dashboardQuickActions, QFrame#dashboardStats, QFrame#dashboardActivity, QFrame#dashboardQuickSettings { background: rgba(15,23,42,0.55); border: 1px solid #1f2a40; border-radius: 16px; }
-            QFrame#contextContainer { background: transparent; }
+            QFrame#contextContainer { background: qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 rgba(12,19,34,0.92), stop:1 rgba(10,15,28,0.9)); }
             QFrame#customCommandPanel { background: rgba(15,23,42,0.55); border: 1px solid rgba(148,163,184,0.22); border-radius: 16px; }
             QLabel#customCommandTitle { font-size: 13px; font-weight: 600; color: #cbd5f5; }
             QLabel#customCommandSubtitle { color: #94a3b8; font-size: 11px; }
