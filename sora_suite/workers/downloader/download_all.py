@@ -257,6 +257,19 @@ def _gentle_scroll_once(page) -> None:
     page.wait_for_timeout(420)
 
 
+def _long_swipe_once(page) -> None:
+    """Один длинный свайп вверх для переключения карточки."""
+
+    try:
+        page.mouse.wheel(0, 2400)
+    except Exception:
+        try:
+            page.evaluate("window.scrollBy(0, arguments[0])", 2400)
+        except Exception:
+            return
+    page.wait_for_timeout(620)
+
+
 def _is_near_bottom(page) -> bool:
     try:
         return bool(
@@ -392,11 +405,11 @@ def download_current_card(page, save_dir: str) -> bool:
             return False
 
 
-def scroll_to_next_card(page, *, pause_ms: int = 950, timeout_ms: int = 7000) -> bool:
-    """Листает ленту вниз и ждёт смены карточки лёгким жестом."""
+def scroll_to_next_card(page, *, pause_ms: int = 1400, timeout_ms: int = 8000) -> bool:
+    """Листает ленту вниз одним длинным свайпом и ждёт смены карточки."""
 
     start_url = page.url
-    _gentle_scroll_once(page)
+    _long_swipe_once(page)
     page.wait_for_timeout(pause_ms)
     try:
         page.wait_for_function(
@@ -405,7 +418,7 @@ def scroll_to_next_card(page, *, pause_ms: int = 950, timeout_ms: int = 7000) ->
             timeout=timeout_ms,
         )
         try:
-            page.locator(RIGHT_PANEL).wait_for(state="visible", timeout=6000)
+            page.locator(RIGHT_PANEL).wait_for(state="visible", timeout=6500)
         except PwTimeout:
             pass
         return True
@@ -413,16 +426,17 @@ def scroll_to_next_card(page, *, pause_ms: int = 950, timeout_ms: int = 7000) ->
         pass
 
     if page.url == start_url:
-        _gentle_scroll_once(page)
-        page.wait_for_timeout(int(pause_ms * 0.75))
+        long_jitter(0.7, 1.2)
+        _long_swipe_once(page)
+        page.wait_for_timeout(int(pause_ms * 0.85))
     try:
         page.wait_for_function(
             "({ start }) => window.location.href !== start",
             {"start": start_url},
-            timeout=int(timeout_ms * 0.7),
+            timeout=int(timeout_ms * 0.75),
         )
         try:
-            page.locator(RIGHT_PANEL).wait_for(state="visible", timeout=6000)
+            page.locator(RIGHT_PANEL).wait_for(state="visible", timeout=6500)
         except PwTimeout:
             pass
         return True
