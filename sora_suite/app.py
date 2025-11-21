@@ -9635,7 +9635,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 started["ok"] = state.get("active_task") == expected_task
                 done.set()
 
-        QtCore.QTimer.singleShot(0, self, start_task)
+        QtCore.QMetaObject.invokeMethod(
+            self,
+            "_run_on_ui",
+            QtCore.Qt.ConnectionType.QueuedConnection,
+            QtCore.Q_ARG(object, start_task),
+        )
         if not done.wait(5.0):
             self._append_activity(
                 f"Сессия {session_id}: задача не запустилась вовремя", kind="error", card_text=False
@@ -9647,6 +9652,17 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         rc = self._wait_for_session(token, waiter)
         return rc == 0
+
+    @QtCore.Slot(object)
+    def _run_on_ui(self, fn: object) -> None:
+        if not callable(fn):
+            return
+        try:
+            fn()
+        except Exception as exc:  # noqa: BLE001
+            self._append_activity(
+                f"Автоматизация: ошибка запуска задачи — {exc}", kind="error", card_text=False
+            )
 
     # ----- Scenario -----
     def _run_scenario(self):
