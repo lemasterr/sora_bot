@@ -352,17 +352,22 @@ def scroll_to_next_card(page, *, pause_ms: int = 1400, timeout_ms: int = 8000) -
     start_url = page.url
     start_src = _current_video_src(page)
 
+    def _wait_for_change(total_ms: int) -> bool:
+        deadline = time.time() + (total_ms / 1000)
+        while time.time() < deadline:
+            if (page.url != start_url) or (_current_video_src(page) != start_src):
+                return True
+            page.wait_for_timeout(180)
+        return (page.url != start_url) or (_current_video_src(page) != start_src)
+
     def _changed() -> bool:
         return (page.url != start_url) or (_current_video_src(page) != start_src)
 
     _long_swipe_once(page)
     page.wait_for_timeout(pause_ms)
     try:
-        page.wait_for_function(
-            "({ startUrl, startSrc }) => window.location.href !== startUrl || ((document.querySelector('video')?.currentSrc || '') !== startSrc)",
-            arg={"startUrl": start_url, "startSrc": start_src},
-            timeout=timeout_ms,
-        )
+        if not _wait_for_change(timeout_ms):
+            raise PwTimeout()
         try:
             page.locator(RIGHT_PANEL).wait_for(state="visible", timeout=6500)
         except PwTimeout:
@@ -377,11 +382,8 @@ def scroll_to_next_card(page, *, pause_ms: int = 1400, timeout_ms: int = 8000) -
         page.wait_for_timeout(int(pause_ms * 0.9))
 
     try:
-        page.wait_for_function(
-            "({ startUrl, startSrc }) => window.location.href !== startUrl || ((document.querySelector('video')?.currentSrc || '') !== startSrc)",
-            arg={"startUrl": start_url, "startSrc": start_src},
-            timeout=int(timeout_ms * 0.9),
-        )
+        if not _wait_for_change(int(timeout_ms * 0.9)):
+            raise PwTimeout()
         try:
             page.locator(RIGHT_PANEL).wait_for(state="visible", timeout=6500)
         except PwTimeout:
