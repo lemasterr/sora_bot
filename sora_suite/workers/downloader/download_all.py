@@ -17,6 +17,7 @@ from playwright.sync_api import TimeoutError as PwTimeout
 from playwright.sync_api import sync_playwright
 
 DRAFTS_URL = "https://sora.chatgpt.com/drafts"
+CARD_URL_PREFIX = "https://sora.chatgpt.com/d/"
 
 # === Дефолтные пути относительно корня проекта ===
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -198,6 +199,150 @@ def click_download_in_menu(page, save_dir: str) -> str:
     return target_path
 
 
+def wait_for_card(page) -> bool:
+    """Проверяет, что открыта карточка, дожидаясь правой панели."""
+
+    try:
+        page.locator(RIGHT_PANEL).wait_for(state="visible", timeout=12000)
+        return True
+    except PwTimeout:
+        return False
+
+
+def open_first_card_on_page(page) -> bool:
+    """Открывает первую доступную карточку и ждёт правую панель."""
+
+    cards = page.locator(CARD_LINKS)
+    try:
+        cards.first.wait_for(timeout=8000)
+    except PwTimeout:
+        return False
+
+    try:
+        target_href = cards.first.evaluate("el => el.href")
+    except Exception:
+        target_href = None
+
+    if target_href:
+        if not open_card(page, target_href):
+            return False
+    else:
+        try:
+            cards.first.click()
+        except Exception:
+            return False
+
+    return wait_for_card(page)
+
+
+def ensure_card_mode(page) -> bool:
+    """Поднимает страницу и открывает карточку при необходимости."""
+
+    page.bring_to_front()
+    if page.url.startswith(CARD_URL_PREFIX):
+        return wait_for_card(page)
+
+    try:
+        page.goto(DRAFTS_URL, wait_until="domcontentloaded")
+    except Exception:
+        try:
+            page.goto(DRAFTS_URL)
+        except Exception:
+            pass
+
+    return open_first_card_on_page(page)
+
+
+def swipe_to_next_video(page, previous_url: str) -> bool:
+    """Листает ленту вниз и ждёт смену URL карточки."""
+
+    viewport = page.viewport_size or {}
+    scroll_step = int((viewport.get("height") or 1200) * 0.9)
+    for attempt in range(6):
+        try:
+            page.mouse.wheel(0, scroll_step)
+        except Exception:
+            pass
+        jitter(0.08, 0.18)
+        try:
+            page.keyboard.press("PageDown")
+        except Exception:
+            pass
+        try:
+            page.wait_for_function(
+                "prev => window.location.href !== prev",
+                arg=previous_url,
+                timeout=2600,
+            )
+            jitter(0.25, 0.35)
+            return True
+        except PwTimeout:
+            long_jitter(0.45, 0.8)
+    return False
+
+
+def download_current_card(page, save_dir: str) -> bool:
+    """Скачивает открытую карточку, пробуя меню повторно."""
+
+    try:
+        open_kebab_menu(page)
+    except PwTimeout:
+        print("[!] Не нашёл меню «три точки» — пропускаю.")
+        return False
+
+    try:
+        path = click_download_in_menu(page, save_dir)
+        print(f"[✓] Скачано: {os.path.basename(path)}")
+        return True
+    except PwTimeout:
+        print("[!] Меню есть, но загрузка не стартовала. Повтор через 1.2с…")
+        time.sleep(1.2)
+        try:
+            open_kebab_menu(page)
+            path = click_download_in_menu(page, save_dir)
+            print(f"[✓] Скачано: {os.path.basename(path)}")
+            return True
+        except Exception as exc:  # noqa: BLE001
+            print(f"[x] Не удалось скачать: {exc}")
+            return False
+    except Exception as exc:  # noqa: BLE001
+        print(f"[x] Не удалось скачать: {exc}")
+        return False
+
+
+def download_feed(page, save_dir: str, desired: int) -> int:
+    """Скачивает текущую карточку и листает вниз, как в TikTok."""
+
+    downloaded = 0
+    while True:
+        if desired and downloaded >= desired:
+            break
+
+        if not wait_for_card(page):
+            print("[x] Не вижу правую панель карточки — выхожу.")
+            break
+
+        current_url = page.url
+        if not download_current_card(page, save_dir):
+            break
+        downloaded += 1
+
+        if desired and downloaded >= desired:
+            break
+
+        moved = swipe_to_next_video(page, current_url)
+        if not moved:
+            print("[i] Не удалось перейти на следующее видео — останавливаюсь.")
+            break
+
+        # страница иногда меняет URL с задержкой; дожидаемся панели
+        if not wait_for_card(page):
+            print("[!] Следующая карточка не загрузилась — останавливаюсь.")
+            break
+
+    return downloaded
+
+
 def go_back_to_drafts(page) -> None:
     try:
         page.locator(BACK_BTN).click(timeout=2000)
@@ -288,51 +433,72 @@ def main() -> None:
                     "Нет контекстов Chrome. Запусти Chrome с --remote-debugging-port=9222 и сессией Sora."
                 )
             context = contexts[0]
-            page = find_or_open_drafts_page(context)
+
+            # если есть уже открытая карточка — продолжаем с неё
+            page = None
+            for candidate in context.pages:
+                if candidate.url.startswith(CARD_URL_PREFIX):
+                    page = candidate
+                    break
+            if page is None:
+                page = find_or_open_drafts_page(context)
+
             print(f"[i] Работаю в существующем окне: {page.url}")
-
             desired = MAX_VIDEOS if MAX_VIDEOS > 0 else 0
-            links = collect_card_links(page, desired)
 
-            if desired:
-                links = links[:desired]
-                print(f"[i] Скачаю первые {len(links)} карточек")
+            if ensure_card_mode(page):
+                print(
+                    "[i] Карточка открыта — качаю текущую и листаю вниз, как в TikTok."
+                )
+                downloaded = download_feed(page, DOWNLOAD_DIR, desired)
+                print(f"[i] Готово. Скачано: {downloaded}")
             else:
-                print(f"[i] Скачаю все найденные карточки: {len(links)}")
+                print(
+                    "[!] Не удалось открыть карточку напрямую — переключаюсь на старый режим сканирования."
+                )
+                links = collect_card_links(page, desired)
 
-            for k, href in enumerate(links, 1):
-                print(f"[>] {k}/{len(links)} — открываю карточку…")
-                if not open_card(page, href):
-                    print("[!] Карточка недоступна — пропускаю.")
-                    continue
-                long_jitter()
-                try:
-                    open_kebab_menu(page)
-                except PwTimeout:
-                    print("[!] Не нашёл меню «три точки» — пропускаю.")
-                    go_back_to_drafts(page)
-                    continue
-                try:
-                    path = click_download_in_menu(page, DOWNLOAD_DIR)
-                    print(f"[✓] Скачано: {os.path.basename(path)}")
-                except PwTimeout:
-                    print("[!] Меню есть, но загрузка не стартовала. Повтор через 1.5с…")
-                    time.sleep(1.5)
+                if desired:
+                    links = links[:desired]
+                    print(f"[i] Скачаю первые {len(links)} карточек")
+                else:
+                    print(f"[i] Скачаю все найденные карточки: {len(links)}")
+
+                for k, href in enumerate(links, 1):
+                    print(f"[>] {k}/{len(links)} — открываю карточку…")
+                    if not open_card(page, href):
+                        print("[!] Карточка недоступна — пропускаю.")
+                        continue
+                    long_jitter()
                     try:
                         open_kebab_menu(page)
+                    except PwTimeout:
+                        print("[!] Не нашёл меню «три точки» — пропускаю.")
+                        go_back_to_drafts(page)
+                        continue
+                    try:
                         path = click_download_in_menu(page, DOWNLOAD_DIR)
                         print(f"[✓] Скачано: {os.path.basename(path)}")
-                    except Exception as exc:  # noqa: BLE001
-                        print(f"[x] Не удалось скачать: {exc}")
-                long_jitter()
-                go_back_to_drafts(page)
-                long_jitter()
-                try:
-                    page.evaluate("window.scrollTo(0, 0)")
-                except Exception:
-                    pass
+                    except PwTimeout:
+                        print(
+                            "[!] Меню есть, но загрузка не стартовала. Повтор через 1.5с…"
+                        )
+                        time.sleep(1.5)
+                        try:
+                            open_kebab_menu(page)
+                            path = click_download_in_menu(page, DOWNLOAD_DIR)
+                            print(f"[✓] Скачано: {os.path.basename(path)}")
+                        except Exception as exc:  # noqa: BLE001
+                            print(f"[x] Не удалось скачать: {exc}")
+                    long_jitter()
+                    go_back_to_drafts(page)
+                    long_jitter()
+                    try:
+                        page.evaluate("window.scrollTo(0, 0)")
+                    except Exception:
+                        pass
 
-            print("[i] Готово.")
+                print("[i] Готово.")
         except Exception as exc:  # noqa: BLE001
             print(f"[x] Критическая ошибка: {exc}")
             raise
