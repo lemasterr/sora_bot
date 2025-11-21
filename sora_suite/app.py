@@ -265,7 +265,11 @@ def load_cfg() -> dict:
     wm_probe.setdefault("region", {"x": 0, "y": 0, "w": 320, "h": 120})
     wm_probe.setdefault("frames", 120)
     wm_probe.setdefault("brightness_threshold", 245)
-    wm_probe.setdefault("coverage_ratio", 0.02)
+    wm_probe.setdefault("coverage_ratio", 0.002)
+    wm_probe.setdefault("method", "hybrid")
+    wm_probe.setdefault("edge_ratio", 0.006)
+    wm_probe.setdefault("min_hits", 1)
+    wm_probe.setdefault("downscale", 2.0)
     wm_probe.setdefault("flip_when", "missing")
     wm_probe.setdefault("flip_direction", "left")
     auto_wm.setdefault("bbox_padding", 12)
@@ -1348,6 +1352,7 @@ class AutomatorStepDialog(QtWidgets.QDialog):
         self.cmb_type.addItem("🌫️ Блюр (глобально)", "global_blur")
         self.cmb_type.addItem("🧵 Склейка (глобально)", "global_merge")
         self.cmb_type.addItem("🧼 Замена водяного знака (глобально)", "global_watermark")
+        self.cmb_type.addItem("🧐 Проверка ВЗ (глобально)", "global_probe")
         layout.addWidget(self.cmb_type)
 
         self.session_group = QtWidgets.QGroupBox("Выбор сессий")
@@ -1392,6 +1397,17 @@ class AutomatorStepDialog(QtWidgets.QDialog):
         merge_layout.addStretch(1)
         layout.addWidget(self.merge_widget)
 
+        self.probe_widget = QtWidgets.QWidget()
+        probe_layout = QtWidgets.QHBoxLayout(self.probe_widget)
+        probe_layout.setContentsMargins(0, 0, 0, 0)
+        probe_layout.setSpacing(8)
+        self.cb_probe_flip_step = QtWidgets.QCheckBox("Флипать при срабатывании")
+        self.cb_probe_flip_step.setChecked(True)
+        self.cb_probe_flip_step.setToolTip("Запуск из автоматизатора будет использовать текущие настройки зоны/порогов")
+        probe_layout.addWidget(self.cb_probe_flip_step)
+        probe_layout.addStretch(1)
+        layout.addWidget(self.probe_widget)
+
         layout.addStretch(1)
 
         buttons = QtWidgets.QDialogButtonBox(
@@ -1424,6 +1440,8 @@ class AutomatorStepDialog(QtWidgets.QDialog):
             group = int(step.get("group", 0) or 0)
             if group > 0:
                 self.sb_group.setValue(group)
+        if step_type == "global_probe":
+            self.cb_probe_flip_step.setChecked(bool(step.get("flip", True)))
 
     def _update_visibility(self):
         step_type = self.cmb_type.currentData()
@@ -1431,6 +1449,7 @@ class AutomatorStepDialog(QtWidgets.QDialog):
         self.session_group.setVisible(is_session)
         self.limit_widget.setVisible(step_type == "session_download")
         self.merge_widget.setVisible(step_type == "global_merge")
+        self.probe_widget.setVisible(step_type == "global_probe")
 
     def _selected_sessions(self) -> List[str]:
         selected: List[str] = []
@@ -1463,6 +1482,8 @@ class AutomatorStepDialog(QtWidgets.QDialog):
                 step["limit"] = int(self.sb_limit.value())
         elif step_type == "global_merge":
             step["group"] = int(self.sb_group.value())
+        elif step_type == "global_probe":
+            step["flip"] = bool(self.cb_probe_flip_step.isChecked())
         return step
 
 
@@ -2526,6 +2547,49 @@ class MainWindow(QtWidgets.QMainWindow):
         path = self._session_download_dir(session, ensure=True)
         open_in_finder(path)
 
+    def _gather_session_downloads(self) -> None:
+        dest = _project_path(self.cfg.get("downloads_dir", str(DL_DIR)))
+        dest.mkdir(parents=True, exist_ok=True)
+        allowed_ext = {".mp4", ".mov", ".m4v", ".webm", ".mkv"}
+
+        def _slug(text: str) -> str:
+            slug = re.sub(r"[^A-Za-z0-9]+", "-", text).strip("-")
+            return slug or "session"
+
+        copied = 0
+        skipped = 0
+        for session_id in self._session_order:
+            session = self._session_cache.get(session_id)
+            if not session:
+                continue
+            src = self._session_download_dir(session)
+            try:
+                entries = sorted(src.iterdir())
+            except FileNotFoundError:
+                continue
+            prefix = _slug(session.get("name") or session_id)
+            for video in entries:
+                if not video.is_file() or video.suffix.lower() not in allowed_ext:
+                    continue
+                target = dest / video.name
+                if target.exists():
+                    base = f"{video.stem}_{prefix}"
+                    counter = 1
+                    candidate = dest / f"{base}{video.suffix}"
+                    while candidate.exists():
+                        counter += 1
+                        candidate = dest / f"{base}_{counter}{video.suffix}"
+                    target = candidate
+                    skipped += 1
+                shutil.copy2(video, target)
+                copied += 1
+
+        msg = f"Готово: собрано {copied} файлов"
+        if skipped:
+            msg += f", дубликаты переименованы {skipped}"
+        self._append_activity(msg, kind="success", card_text=False)
+        self._post_status(msg, state="ok")
+
     def _run_session_watermark(self, session_id: str):
         session = self._session_cache.get(session_id)
         if not session:
@@ -3030,6 +3094,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_open_merge = make_folder_button(*folder_shortcuts[3][:2])
         self.btn_open_images_top = make_folder_button(*folder_shortcuts[4][:2])
         self.btn_open_restored_top = make_folder_button(*folder_shortcuts[5][:2])
+        self.btn_collect_raw = make_folder_button("⇆", "RAW → общая")
         for btn in (
             self.btn_open_root,
             self.btn_open_raw,
@@ -3037,6 +3102,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.btn_open_merge,
             self.btn_open_images_top,
             self.btn_open_restored_top,
+            self.btn_collect_raw,
         ):
             btn.setSizePolicy(
                 QtWidgets.QSizePolicy.Policy.Expanding,
@@ -3846,10 +3912,27 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sb_probe_frames.setValue(int(wm_probe_cfg.get("frames", 120) or 120))
         self.sb_probe_brightness = QtWidgets.QSpinBox(); self.sb_probe_brightness.setRange(1, 255)
         self.sb_probe_brightness.setValue(int(wm_probe_cfg.get("brightness_threshold", 245) or 245))
-        self.dsb_probe_coverage = QtWidgets.QDoubleSpinBox(); self.dsb_probe_coverage.setRange(0.001, 1.0)
+        self.dsb_probe_coverage = QtWidgets.QDoubleSpinBox(); self.dsb_probe_coverage.setRange(0.0005, 1.0)
         self.dsb_probe_coverage.setDecimals(4)
-        self.dsb_probe_coverage.setSingleStep(0.005)
-        self.dsb_probe_coverage.setValue(float(wm_probe_cfg.get("coverage_ratio", 0.02) or 0.02))
+        self.dsb_probe_coverage.setSingleStep(0.001)
+        self.dsb_probe_coverage.setValue(float(wm_probe_cfg.get("coverage_ratio", 0.002) or 0.002))
+        self.dsb_probe_edge_ratio = QtWidgets.QDoubleSpinBox(); self.dsb_probe_edge_ratio.setRange(0.0, 1.0)
+        self.dsb_probe_edge_ratio.setDecimals(4)
+        self.dsb_probe_edge_ratio.setSingleStep(0.001)
+        self.dsb_probe_edge_ratio.setValue(float(wm_probe_cfg.get("edge_ratio", 0.006) or 0.006))
+        self.dsb_probe_downscale = QtWidgets.QDoubleSpinBox(); self.dsb_probe_downscale.setRange(0.0, 8.0)
+        self.dsb_probe_downscale.setDecimals(1)
+        self.dsb_probe_downscale.setSingleStep(0.5)
+        self.dsb_probe_downscale.setValue(float(wm_probe_cfg.get("downscale", 2.0) or 2.0))
+        self.sb_probe_hits = QtWidgets.QSpinBox(); self.sb_probe_hits.setRange(1, 20)
+        self.sb_probe_hits.setValue(int(wm_probe_cfg.get("min_hits", 1) or 1))
+        self.cmb_probe_method = QtWidgets.QComboBox()
+        self.cmb_probe_method.addItem("Гибрид: вспышка или границы", "hybrid")
+        self.cmb_probe_method.addItem("Только вспышка", "flash")
+        self.cmb_probe_method.addItem("Только границы", "edges")
+        current_method = wm_probe_cfg.get("method", "hybrid")
+        idx_method = max(0, self.cmb_probe_method.findData(current_method))
+        self.cmb_probe_method.setCurrentIndex(idx_method)
         self.cmb_probe_flip_when = QtWidgets.QComboBox()
         self.cmb_probe_flip_when.addItem("Флипать, если знака НЕТ", "missing")
         self.cmb_probe_flip_when.addItem("Флипать, если знак ЕСТЬ", "present")
@@ -3863,14 +3946,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cmb_probe_direction.setCurrentIndex(idx_dir)
         po_form.addWidget(QtWidgets.QLabel("Кадров для проверки:"), 0, 0)
         po_form.addWidget(self.sb_probe_frames, 0, 1)
-        po_form.addWidget(QtWidgets.QLabel("Порог яркости:"), 0, 2)
-        po_form.addWidget(self.sb_probe_brightness, 0, 3)
-        po_form.addWidget(QtWidgets.QLabel("Доля заполнения:"), 1, 0)
-        po_form.addWidget(self.dsb_probe_coverage, 1, 1)
-        po_form.addWidget(QtWidgets.QLabel("Условие:"), 1, 2)
-        po_form.addWidget(self.cmb_probe_flip_when, 1, 3)
-        po_form.addWidget(QtWidgets.QLabel("Направление flip:"), 2, 0)
-        po_form.addWidget(self.cmb_probe_direction, 2, 1, 1, 3)
+        po_form.addWidget(QtWidgets.QLabel("Метод поиска:"), 0, 2)
+        po_form.addWidget(self.cmb_probe_method, 0, 3)
+        po_form.addWidget(QtWidgets.QLabel("Порог яркости:"), 1, 0)
+        po_form.addWidget(self.sb_probe_brightness, 1, 1)
+        po_form.addWidget(QtWidgets.QLabel("Доля заполнения:"), 1, 2)
+        po_form.addWidget(self.dsb_probe_coverage, 1, 3)
+        po_form.addWidget(QtWidgets.QLabel("Границы (доля):"), 2, 0)
+        po_form.addWidget(self.dsb_probe_edge_ratio, 2, 1)
+        po_form.addWidget(QtWidgets.QLabel("Минимум срабатываний:"), 2, 2)
+        po_form.addWidget(self.sb_probe_hits, 2, 3)
+        po_form.addWidget(QtWidgets.QLabel("Даунскейл зоны:"), 3, 0)
+        po_form.addWidget(self.dsb_probe_downscale, 3, 1)
+        po_form.addWidget(QtWidgets.QLabel("Условие флипа:"), 3, 2)
+        po_form.addWidget(self.cmb_probe_flip_when, 3, 3)
+        po_form.addWidget(QtWidgets.QLabel("Направление flip:"), 4, 0)
+        po_form.addWidget(self.cmb_probe_direction, 4, 1, 1, 3)
         wm_probe_layout.addWidget(probe_opts)
 
         probe_actions = QtWidgets.QGroupBox("Действия")
@@ -3879,6 +3970,8 @@ class MainWindow(QtWidgets.QMainWindow):
         pa_grid.setVerticalSpacing(8)
         self.btn_probe_scan = QtWidgets.QPushButton("Проверить водяной знак")
         self.btn_probe_flip = QtWidgets.QPushButton("Проверить и флипнуть")
+        self.btn_probe_batch_scan = QtWidgets.QPushButton("Папка: проверить")
+        self.btn_probe_batch_flip = QtWidgets.QPushButton("Папка: проверить и флипнуть")
         self.cb_probe_autosave = QtWidgets.QCheckBox("Сохранять результат в папку")
         self.cb_probe_autosave.setChecked(True)
         self.lbl_probe_status = QtWidgets.QLabel("—")
@@ -3886,7 +3979,9 @@ class MainWindow(QtWidgets.QMainWindow):
         pa_grid.addWidget(self.btn_probe_scan, 0, 0)
         pa_grid.addWidget(self.btn_probe_flip, 0, 1)
         pa_grid.addWidget(self.cb_probe_autosave, 0, 2)
-        pa_grid.addWidget(self.lbl_probe_status, 1, 0, 1, 3)
+        pa_grid.addWidget(self.btn_probe_batch_scan, 1, 0)
+        pa_grid.addWidget(self.btn_probe_batch_flip, 1, 1)
+        pa_grid.addWidget(self.lbl_probe_status, 2, 0, 1, 3)
         wm_probe_layout.addWidget(probe_actions)
 
         wm_probe_layout.addStretch(1)
@@ -7455,6 +7550,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_open_chrome.clicked.connect(self._open_chrome)
         self.btn_open_root.clicked.connect(lambda: open_in_finder(self.cfg.get("project_root", PROJECT_ROOT)))
         self.btn_open_raw.clicked.connect(lambda: open_in_finder(self.cfg.get("downloads_dir", DL_DIR)))
+        self.btn_collect_raw.clicked.connect(self._gather_session_downloads)
         self.btn_open_blur.clicked.connect(lambda: open_in_finder(self.cfg.get("blurred_dir", BLUR_DIR)))
         self.btn_open_merge.clicked.connect(lambda: open_in_finder(self.cfg.get("merged_dir", MERG_DIR)))
         self.btn_open_images_top.clicked.connect(self._open_genai_output_dir)
@@ -7595,6 +7691,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.btn_probe_scan.clicked.connect(lambda: self._run_watermark_probe(flip=False))
         if hasattr(self, "btn_probe_flip"):
             self.btn_probe_flip.clicked.connect(lambda: self._run_watermark_probe(flip=True))
+        if hasattr(self, "btn_probe_batch_scan"):
+            self.btn_probe_batch_scan.clicked.connect(lambda: self._run_watermark_probe_batch(flip=False))
+        if hasattr(self, "btn_probe_batch_flip"):
+            self.btn_probe_batch_flip.clicked.connect(lambda: self._run_watermark_probe_batch(flip=True))
         self.btn_tiktok_archive_browse.clicked.connect(lambda: self._browse_dir(self.ed_tiktok_archive, "Выбери папку архива"))
         self.sb_tiktok_default_delay.valueChanged.connect(self._apply_tiktok_default_delay)
         self.sb_tiktok_interval_default.valueChanged.connect(lambda val: self.sb_tiktok_interval.setValue(int(val)))
@@ -8980,6 +9080,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "global_blur": "🌫️ Блюр",
             "global_merge": "🧵 Склейка",
             "global_watermark": "🧼 Замена знака (глобально)",
+            "global_probe": "🧐 Проверка ВЗ",
         }
         base = label_map.get(step_type, str(step_type))
         if step_type.startswith("session_"):
@@ -9004,6 +9105,8 @@ class MainWindow(QtWidgets.QMainWindow):
             if group > 0:
                 return f"{base} по {group}"
             return f"{base} (по настройкам)"
+        if step_type == "global_probe":
+            return f"{base} ({'flip' if step.get('flip', True) else 'scan-only'})"
         return base
 
     def _format_automator_step(self, step: Dict[str, Any], idx: int) -> str:
@@ -9185,6 +9288,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return self._run_merge_sync(group_override=group_override)
         if step_type == "global_watermark":
             return self._run_watermark_restore_sync()
+        if step_type == "global_probe":
+            return self._watermark_probe_batch_job(flip=bool(step.get("flip", True)), silent=True)
         return False
 
     def _automator_run_session_task(
@@ -9535,6 +9640,10 @@ class MainWindow(QtWidgets.QMainWindow):
         frames = int(self.sb_probe_frames.value()) if hasattr(self, "sb_probe_frames") else 120
         brightness = int(self.sb_probe_brightness.value()) if hasattr(self, "sb_probe_brightness") else 245
         coverage = float(self.dsb_probe_coverage.value()) if hasattr(self, "dsb_probe_coverage") else 0.02
+        edge_ratio = float(self.dsb_probe_edge_ratio.value()) if hasattr(self, "dsb_probe_edge_ratio") else 0.006
+        downscale = float(self.dsb_probe_downscale.value()) if hasattr(self, "dsb_probe_downscale") else 2.0
+        min_hits = int(self.sb_probe_hits.value()) if hasattr(self, "sb_probe_hits") else 1
+        method = (self.cmb_probe_method.currentData() if hasattr(self, "cmb_probe_method") else None) or "hybrid"
         flip_when = (self.cmb_probe_flip_when.currentData() if hasattr(self, "cmb_probe_flip_when") else None) or "missing"
         flip_direction = (self.cmb_probe_direction.currentData() if hasattr(self, "cmb_probe_direction") else None) or "left"
 
@@ -9545,6 +9654,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 frames=frames,
                 brightness_threshold=brightness,
                 coverage_ratio=coverage,
+                method=method,
+                edge_ratio_threshold=edge_ratio,
+                min_hits=min_hits,
+                downscale=downscale,
             )
         except Exception as exc:  # noqa: BLE001
             self._post_status(f"Ошибка проверки: {exc}", state="error")
@@ -9571,6 +9684,10 @@ class MainWindow(QtWidgets.QMainWindow):
             frames=frames,
             brightness_threshold=brightness,
             coverage_ratio=coverage,
+            method=method,
+            edge_ratio_threshold=edge_ratio,
+            min_hits=min_hits,
+            downscale=downscale,
             flip_when=flip_when,
             flip_direction=flip_direction,
         )
@@ -9587,6 +9704,158 @@ class MainWindow(QtWidgets.QMainWindow):
             self.lbl_probe_status.setText(msg + f" → {out_path}")
         if flipped and not self.cb_probe_autosave.isChecked():
             self._open_file(out_path)
+
+    def _watermark_probe_batch_job(
+        self,
+        *,
+        flip: bool = False,
+        silent: bool = False,
+        source_dir: Optional[Path] = None,
+        output_dir: Optional[Path] = None,
+        custom_files: Optional[List[Path]] = None,
+    ) -> bool:
+        try:
+            from watermark_detector import flip_video_with_check, scan_region_for_flash  # type: ignore[import]
+        except Exception as exc:  # noqa: BLE001
+            if not silent:
+                QtWidgets.QMessageBox.critical(self, "Водяной знак", f"Не удалось загрузить watermark_detector: {exc}")
+            else:
+                self._append_activity(f"WM probe: ошибка импорта {exc}", kind="error", card_text=False)
+            return False
+
+        probe_cfg = self.cfg.get("watermark_probe", {}) or {}
+        region_cfg = probe_cfg.get("region", {}) or {}
+        region = (
+            int(region_cfg.get("x", 0)),
+            int(region_cfg.get("y", 0)),
+            int(region_cfg.get("w", 320)),
+            int(region_cfg.get("h", 120)),
+        )
+
+        frames = int(self.sb_probe_frames.value()) if hasattr(self, "sb_probe_frames") else int(probe_cfg.get("frames", 120) or 120)
+        brightness = int(self.sb_probe_brightness.value()) if hasattr(self, "sb_probe_brightness") else int(probe_cfg.get("brightness_threshold", 245) or 245)
+        coverage = float(self.dsb_probe_coverage.value()) if hasattr(self, "dsb_probe_coverage") else float(probe_cfg.get("coverage_ratio", 0.002) or 0.002)
+        edge_ratio = float(self.dsb_probe_edge_ratio.value()) if hasattr(self, "dsb_probe_edge_ratio") else float(probe_cfg.get("edge_ratio", 0.006) or 0.006)
+        downscale = float(self.dsb_probe_downscale.value()) if hasattr(self, "dsb_probe_downscale") else float(probe_cfg.get("downscale", 2.0) or 2.0)
+        min_hits = int(self.sb_probe_hits.value()) if hasattr(self, "sb_probe_hits") else int(probe_cfg.get("min_hits", 1) or 1)
+        method = (self.cmb_probe_method.currentData() if hasattr(self, "cmb_probe_method") else None) or probe_cfg.get("method", "hybrid")
+        flip_when = (self.cmb_probe_flip_when.currentData() if hasattr(self, "cmb_probe_flip_when") else None) or probe_cfg.get("flip_when", "missing")
+        flip_direction = (self.cmb_probe_direction.currentData() if hasattr(self, "cmb_probe_direction") else None) or probe_cfg.get("flip_direction", "left")
+
+        autosave = bool(self.cb_probe_autosave.isChecked()) if hasattr(self, "cb_probe_autosave") else True
+
+        if source_dir is not None:
+            src_dir = _project_path(source_dir)
+        else:
+            raw_source = self.ed_probe_source.text().strip() if hasattr(self, "ed_probe_source") else ""
+            fallback = probe_cfg.get("source_dir", self.cfg.get("downloads_dir", str(DL_DIR)))
+            src_dir = _project_path(raw_source or fallback)
+        if not src_dir.exists():
+            src_dir = _project_path(probe_cfg.get("source_dir", self.cfg.get("downloads_dir", str(DL_DIR))))
+        if not src_dir.exists():
+            self._post_status("Папка RAW для проверки не найдена", state="error")
+            return False
+
+        dst_dir = _project_path(
+            output_dir
+            or (self.ed_probe_output_dir.text().strip() if hasattr(self, "ed_probe_output_dir") else None)
+            or probe_cfg.get("output_dir", str(PROJECT_ROOT / "restored"))
+        )
+        if flip:
+            dst_dir.mkdir(parents=True, exist_ok=True)
+
+        allowed_ext = {".mp4", ".mov", ".m4v", ".webm", ".mkv"}
+        files = custom_files or []
+        if not files:
+            try:
+                files = [p for p in sorted(src_dir.iterdir()) if p.is_file() and p.suffix.lower() in allowed_ext]
+            except FileNotFoundError:
+                files = []
+        if not files:
+            self._post_status("Нет видео для проверки", state="error")
+            return False
+
+        total = len(files)
+        hits = 0
+        flipped = 0
+        failed = 0
+        for idx, video in enumerate(files, start=1):
+            try:
+                detected = scan_region_for_flash(
+                    video,
+                    region,
+                    frames=frames,
+                    brightness_threshold=brightness,
+                    coverage_ratio=coverage,
+                    method=method,
+                    edge_ratio_threshold=edge_ratio,
+                    min_hits=min_hits,
+                    downscale=downscale,
+                )
+            except Exception as exc:  # noqa: BLE001
+                failed += 1
+                self._append_activity(f"WM probe: {video.name} ошибка {exc}", kind="error", card_text=False)
+                continue
+
+            if detected:
+                hits += 1
+            if not flip:
+                self._post_status(
+                    f"Проверка ВЗ {idx}/{total}: {'найден' if detected else 'нет'} → {video.name}",
+                    progress=idx,
+                    total=total,
+                    state="running",
+                )
+                continue
+
+            target_path = (dst_dir / video.name) if autosave else None
+            res = flip_video_with_check(
+                video,
+                region=region,
+                output_path=target_path,
+                frames=frames,
+                brightness_threshold=brightness,
+                coverage_ratio=coverage,
+                method=method,
+                edge_ratio_threshold=edge_ratio,
+                min_hits=min_hits,
+                downscale=downscale,
+                flip_when=flip_when,
+                flip_direction=flip_direction,
+            )
+            flipped += int(bool(res.get("flipped")))
+            state = "ok" if res.get("flipped") else "warn"
+            msg = (
+                f"Флип {'выполнен' if res.get('flipped') else 'пропущен'}: {'знак есть' if res.get('detected') else 'знака нет'} → {video.name}"
+            )
+            self._post_status(msg, progress=idx, total=total, state=state)
+
+        summary = f"Проверено {total}, найдено {hits} знаков"
+        if flip:
+            summary += f", флипнуто {flipped}"
+        if failed:
+            summary += f", ошибок {failed}"
+        self._append_activity(summary, kind="success" if failed == 0 else "warn", card_text=False)
+        self._post_status(summary, state="ok" if failed == 0 else "warn")
+        return failed == 0
+
+    def _run_watermark_probe_batch(
+        self,
+        *,
+        flip: bool = False,
+        source_dir: Optional[Path] = None,
+        output_dir: Optional[Path] = None,
+        custom_files: Optional[List[Path]] = None,
+    ) -> None:
+        threading.Thread(
+            target=lambda: self._watermark_probe_batch_job(
+                flip=flip,
+                source_dir=source_dir,
+                output_dir=output_dir,
+                custom_files=custom_files,
+            ),
+            daemon=True,
+        ).start()
 
     # ----- BLUR -----
     def _run_blur_presets_sync(self) -> bool:
@@ -11151,6 +11420,10 @@ class MainWindow(QtWidgets.QMainWindow):
         probe_cfg["frames"] = int(self.sb_probe_frames.value())
         probe_cfg["brightness_threshold"] = int(self.sb_probe_brightness.value())
         probe_cfg["coverage_ratio"] = float(self.dsb_probe_coverage.value())
+        probe_cfg["edge_ratio"] = float(self.dsb_probe_edge_ratio.value())
+        probe_cfg["downscale"] = float(self.dsb_probe_downscale.value())
+        probe_cfg["min_hits"] = int(self.sb_probe_hits.value())
+        probe_cfg["method"] = self.cmb_probe_method.currentData() or "hybrid"
         probe_cfg["flip_when"] = self.cmb_probe_flip_when.currentData() or "missing"
         probe_cfg["flip_direction"] = self.cmb_probe_direction.currentData() or "left"
 

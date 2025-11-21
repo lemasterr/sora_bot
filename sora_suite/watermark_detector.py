@@ -651,11 +651,23 @@ def scan_region_for_flash(
     frames: int = 90,
     brightness_threshold: int = 245,
     coverage_ratio: float = 0.02,
+    method: str = "flash",
+    edge_ratio_threshold: float = 0.006,
+    min_hits: int = 1,
+    downscale: float = 2.0,
 ) -> bool:
-    """Проверяет, вспыхивает ли белый/светлый знак в указанной зоне.
+    """Проверяет появление знака по яркости или контрасту в указанной зоне.
 
-    Используется как быстрый чекер появления водяного знака: если зона никогда не
-    достигает порога яркости, считаем что знака нет.
+    Допустимые ``method``:
+        - ``flash`` (по умолчанию) — классическая проверка вспышки: считается
+          соотношение ярких пикселей (по умолчанию покрытие 0.002–0.02).
+        - ``edges`` — ищет резкие границы, которые появляются/исчезают в зоне
+          знака (порог по доле пикселей после Canny).
+        - ``hybrid`` — достаточно выполнения любого из двух критериев, что
+          полезно, если знак бывает и ярким, и прозрачным.
+
+    ``downscale`` ускоряет вычисления: при значении 2.0 зона уменьшается вдвое
+    по каждой стороне перед анализом. Значение ``0`` отключает уменьшение.
     """
 
     x, y, w, h = [max(0, int(v)) for v in region]
@@ -665,6 +677,12 @@ def scan_region_for_flash(
 
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
     indices = list(_iter_sample_frames(total_frames, max(frames, 1)))
+
+    hits = 0
+    min_hits = max(1, int(min_hits))
+    method = (method or "flash").lower()
+    edge_ratio_threshold = max(0.0, float(edge_ratio_threshold))
+    coverage_ratio = max(coverage_ratio, 0.0005)
 
     for idx in indices:
         cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
@@ -680,9 +698,33 @@ def scan_region_for_flash(
         region_crop = gray[ry : ry + rh, rx : rx + rw]
         if region_crop.size == 0:
             continue
-        ratio = float(np.mean(region_crop >= max(0, min(brightness_threshold, 255))))
-        if ratio >= max(coverage_ratio, 0.0005):
-            return True
+
+        if downscale and downscale > 0:
+            try:
+                scale = float(downscale)
+            except (TypeError, ValueError):
+                scale = 0.0
+            if scale > 0 and (region_crop.shape[0] > 48 or region_crop.shape[1] > 48):
+                region_crop = cv2.resize(
+                    region_crop,
+                    (max(1, int(region_crop.shape[1] / scale)), max(1, int(region_crop.shape[0] / scale))),
+                    interpolation=cv2.INTER_AREA,
+                )
+
+        bright_ratio = float(np.mean(region_crop >= max(0, min(brightness_threshold, 255))))
+        edge_ratio = 0.0
+        if method in {"edges", "hybrid"}:
+            blurred = cv2.GaussianBlur(region_crop, (3, 3), 0)
+            edges = cv2.Canny(blurred, 40, 120)
+            edge_ratio = float(np.mean(edges > 0))
+
+        flash_hit = bright_ratio >= coverage_ratio if method in {"flash", "hybrid"} else False
+        edge_hit = edge_ratio >= edge_ratio_threshold if method in {"edges", "hybrid"} else False
+
+        if flash_hit or edge_hit:
+            hits += 1
+            if hits >= min_hits:
+                return True
     return False
 
 
@@ -694,6 +736,10 @@ def flip_video_if_no_watermark(
     frames: int = 90,
     brightness_threshold: int = 245,
     coverage_ratio: float = 0.02,
+    method: str = "flash",
+    edge_ratio_threshold: float = 0.006,
+    min_hits: int = 1,
+    downscale: float = 2.0,
 ) -> Dict[str, object]:
     """
     Флипает видео горизонтально, если в указанной области не найден всплеск яркости
@@ -705,7 +751,15 @@ def flip_video_if_no_watermark(
         raise FileNotFoundError(video_path)
 
     has_mark = scan_region_for_flash(
-        video_path, region, frames=frames, brightness_threshold=brightness_threshold, coverage_ratio=coverage_ratio
+        video_path,
+        region,
+        frames=frames,
+        brightness_threshold=brightness_threshold,
+        coverage_ratio=coverage_ratio,
+        method=method,
+        edge_ratio_threshold=edge_ratio_threshold,
+        min_hits=min_hits,
+        downscale=downscale,
     )
     if has_mark:
         return {"flipped": False, "output": str(video_path), "reason": "watermark_detected"}
@@ -741,6 +795,10 @@ def flip_video_with_check(
     coverage_ratio: float = 0.02,
     flip_when: str = "missing",
     flip_direction: str = "left",
+    method: str = "hybrid",
+    edge_ratio_threshold: float = 0.006,
+    min_hits: int = 1,
+    downscale: float = 2.0,
 ) -> Dict[str, object]:
     """Горизонтально/вертикально отражает видео в зависимости от наличия вспышки.
 
@@ -757,7 +815,15 @@ def flip_video_with_check(
         raise FileNotFoundError(video_path)
 
     detected = scan_region_for_flash(
-        video_path, region, frames=frames, brightness_threshold=brightness_threshold, coverage_ratio=coverage_ratio
+        video_path,
+        region,
+        frames=frames,
+        brightness_threshold=brightness_threshold,
+        coverage_ratio=coverage_ratio,
+        method=method,
+        edge_ratio_threshold=edge_ratio_threshold,
+        min_hits=min_hits,
+        downscale=downscale,
     )
     should_flip = (flip_when == "present" and detected) or (flip_when != "present" and not detected)
 
