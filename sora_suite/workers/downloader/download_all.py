@@ -250,6 +250,13 @@ def _smooth_scroll(page, *, distance: int = 1400, pulses: int = 6, pause: tuple[
         page.wait_for_timeout(int(random.uniform(pause[0], pause[1]) * 1000))
 
 
+def _gentle_scroll_once(page) -> None:
+    """Один мягкий жест прокрутки без спама."""
+
+    _smooth_scroll(page, distance=900, pulses=3, pause=(0.12, 0.2))
+    page.wait_for_timeout(420)
+
+
 def _is_near_bottom(page) -> bool:
     try:
         return bool(
@@ -385,27 +392,42 @@ def download_current_card(page, save_dir: str) -> bool:
             return False
 
 
-def scroll_to_next_card(page, *, pause_ms: int = 850, timeout_ms: int = 6500) -> bool:
-    """Листает ленту вниз и ждёт смены карточки."""
+def scroll_to_next_card(page, *, pause_ms: int = 950, timeout_ms: int = 7000) -> bool:
+    """Листает ленту вниз и ждёт смены карточки лёгким жестом."""
 
     start_url = page.url
-    for attempt in range(3):
-        _smooth_scroll(page, distance=2200, pulses=7)
-        page.wait_for_timeout(pause_ms + attempt * 200)
+    _gentle_scroll_once(page)
+    page.wait_for_timeout(pause_ms)
+    try:
+        page.wait_for_function(
+            "({ start }) => window.location.href !== start",
+            {"start": start_url},
+            timeout=timeout_ms,
+        )
         try:
-            page.wait_for_function(
-                "({ start }) => window.location.href !== start",
-                {"start": start_url},
-                timeout=timeout_ms + attempt * 1200,
-            )
-            try:
-                page.locator(RIGHT_PANEL).wait_for(state="visible", timeout=6000)
-            except PwTimeout:
-                pass
-            return True
+            page.locator(RIGHT_PANEL).wait_for(state="visible", timeout=6000)
         except PwTimeout:
-            continue
-    return False
+            pass
+        return True
+    except PwTimeout:
+        pass
+
+    if page.url == start_url:
+        _gentle_scroll_once(page)
+        page.wait_for_timeout(int(pause_ms * 0.75))
+    try:
+        page.wait_for_function(
+            "({ start }) => window.location.href !== start",
+            {"start": start_url},
+            timeout=int(timeout_ms * 0.7),
+        )
+        try:
+            page.locator(RIGHT_PANEL).wait_for(state="visible", timeout=6000)
+        except PwTimeout:
+            pass
+        return True
+    except PwTimeout:
+        return False
 
 
 def download_feed_mode(page, desired: int) -> None:
