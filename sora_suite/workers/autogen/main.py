@@ -948,12 +948,29 @@ def _resolve_media_path(raw: str) -> Path:
         return PROMPTS_BASE_DIR / candidate
 
 
+def _collect_dir_media(folder: Path) -> List[Path]:
+    if not folder.is_dir():
+        return []
+    files: List[Path] = []
+    for item in folder.iterdir():
+        if item.is_file() and item.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".gif"}:
+            files.append(item)
+    return sorted(files, key=_natural_sort_key)
+
+
 def gather_media(entry: PromptEntry, client: GenAiClient, manifest: Optional[ImageManifest] = None) -> List[Path]:
     attachments: List[Path] = []
     for raw in entry.attachment_paths:
         if not raw:
             continue
         path = _resolve_media_path(raw)
+        if path.is_dir():
+            nested = _collect_dir_media(path)
+            if nested:
+                attachments.extend(nested)
+            else:
+                print(f"[WARN] Папка вложений пуста: {path}")
+            continue
         if path.exists():
             attachments.append(path)
         else:

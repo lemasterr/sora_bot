@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
@@ -643,4 +644,98 @@ class WaterMarkDetector:
         return self._get_zone_masks(frame_size, series=series)
 
 
-__all__ = ["prepare_template", "detect_watermark", "TemplateAssets", "WaterMarkDetector"]
+def scan_region_for_flash(
+    video_path: Union[str, Path],
+    region: Tuple[int, int, int, int],
+    *,
+    frames: int = 90,
+    brightness_threshold: int = 245,
+    coverage_ratio: float = 0.02,
+) -> bool:
+    """Проверяет, вспыхивает ли белый/светлый знак в указанной зоне.
+
+    Используется как быстрый чекер появления водяного знака: если зона никогда не
+    достигает порога яркости, считаем что знака нет.
+    """
+
+    x, y, w, h = [max(0, int(v)) for v in region]
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"Не удалось открыть видео {video_path}")
+
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    indices = list(_iter_sample_frames(total_frames, max(frames, 1)))
+
+    for idx in indices:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            continue
+        gray = _ensure_gray(frame)
+        if gray is None:
+            continue
+        height, width = gray.shape[:2]
+        rx, ry = min(x, width - 1), min(y, height - 1)
+        rw, rh = max(1, min(w, width - rx)), max(1, min(h, height - ry))
+        region_crop = gray[ry : ry + rh, rx : rx + rw]
+        if region_crop.size == 0:
+            continue
+        ratio = float(np.mean(region_crop >= max(0, min(brightness_threshold, 255))))
+        if ratio >= max(coverage_ratio, 0.0005):
+            return True
+    return False
+
+
+def flip_video_if_no_watermark(
+    video_path: Union[str, Path],
+    *,
+    region: Tuple[int, int, int, int],
+    output_path: Optional[Union[str, Path]] = None,
+    frames: int = 90,
+    brightness_threshold: int = 245,
+    coverage_ratio: float = 0.02,
+) -> Dict[str, object]:
+    """
+    Флипает видео горизонтально, если в указанной области не найден всплеск яркости
+    (условный водяной знак). Возвращает словарь с путём результата и флагом.
+    """
+
+    video_path = Path(video_path)
+    if not video_path.exists():
+        raise FileNotFoundError(video_path)
+
+    has_mark = scan_region_for_flash(
+        video_path, region, frames=frames, brightness_threshold=brightness_threshold, coverage_ratio=coverage_ratio
+    )
+    if has_mark:
+        return {"flipped": False, "output": str(video_path), "reason": "watermark_detected"}
+
+    target = Path(output_path) if output_path else video_path.with_name(f"{video_path.stem}_flipped{video_path.suffix}")
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-loglevel",
+        "warning",
+        "-i",
+        str(video_path),
+        "-vf",
+        "hflip",
+        str(target),
+    ]
+    result = subprocess.run(cmd, capture_output=True)
+    return {
+        "flipped": result.returncode == 0,
+        "output": str(target),
+        "rc": int(result.returncode),
+        "stderr": (result.stderr or b"").decode(errors="ignore"),
+    }
+
+
+__all__ = [
+    "prepare_template",
+    "detect_watermark",
+    "TemplateAssets",
+    "WaterMarkDetector",
+    "scan_region_for_flash",
+    "flip_video_if_no_watermark",
+]

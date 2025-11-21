@@ -748,13 +748,14 @@ def send_tg(cfg: dict, text: str, timeout: float = 5.0) -> bool:
 def _copytree_filtered(src: Path, dst: Path):
     """
     Копируем профиль без тяжёлых кешей/мусора.
-    Повторные запуски — дозаливаем изменения (по size+mtime).
+    Повторные запуски — дозаливаем изменения (по size+mtime),
+    но не затираем более свежие файлы в тени, чтобы сохранялись авторизации.
     """
     exclude_dirs = {
         "Cache", "Code Cache", "GPUCache", "Service Worker",
         "CertificateTransparency", "Crashpad", "ShaderCache",
         "GrShaderCache", "OptimizationGuide", "SafetyTips",
-        "Reporting and NEL", "File System", "Session Storage"
+        "Reporting and NEL", "File System",
     }
     exclude_files = {
         "LOCK", "LOCKFILE", "SingletonLock", "SingletonCookie",
@@ -777,7 +778,7 @@ def _copytree_filtered(src: Path, dst: Path):
                     shutil.copy2(s, d)
                 else:
                     ss, ds = s.stat(), d.stat()
-                    if ss.st_size != ds.st_size or int(ss.st_mtime) != int(ds.st_mtime):
+                    if ss.st_mtime > ds.st_mtime + 1:
                         shutil.copy2(s, d)
             except Exception:
                 pass
@@ -919,7 +920,8 @@ class SessionWorkspaceWindow(QtWidgets.QDialog):
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self.setModal(False)
         self.setWindowFlag(QtCore.Qt.WindowType.Window, True)
-        self.setMinimumSize(540, 520)
+        self.setMinimumSize(560, 520)
+        self.resize(720, 560)
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
@@ -940,17 +942,45 @@ class SessionWorkspaceWindow(QtWidgets.QDialog):
 
         actions_card = QtWidgets.QFrame()
         actions_card.setObjectName("sessionWindowActions")
-        actions_layout = QtWidgets.QHBoxLayout(actions_card)
+        actions_layout = QtWidgets.QVBoxLayout(actions_card)
         actions_layout.setContentsMargins(12, 12, 12, 12)
-        actions_layout.setSpacing(8)
+        actions_layout.setSpacing(10)
+
+        picker_row = QtWidgets.QHBoxLayout()
+        picker_row.setSpacing(8)
+        picker_row.setContentsMargins(0, 0, 0, 0)
+        self.cmb_action = QtWidgets.QComboBox()
+        self.cmb_action.setObjectName("sessionActionCombo")
+        self.cmb_action.addItems([
+            "Выбери действие",
+            "Запуск Chrome",
+            "Промпты Sora",
+            "Генерация картинок",
+            "Скачивание видео",
+            "Замена водяного знака",
+        ])
+        self.cmb_action.setMinimumWidth(200)
+        self.cmb_action.setEditable(False)
+        self.btn_start_action = QtWidgets.QPushButton("Старт")
+        self.btn_start_action.setObjectName("sessionActionStart")
+        self.btn_start_action.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        self.btn_start_action.setMinimumHeight(34)
+        picker_row.addWidget(self.cmb_action, 1)
+        picker_row.addWidget(self.btn_start_action)
+        actions_layout.addLayout(picker_row)
+
+        grid = QtWidgets.QGridLayout()
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(6)
+        grid.setContentsMargins(0, 0, 0, 0)
         self.btn_launch_chrome = QtWidgets.QPushButton("Открыть Chrome")
         self.btn_run_prompts = QtWidgets.QPushButton("Промпты Sora")
         self.btn_run_images = QtWidgets.QPushButton("Генерация")
         self.btn_run_download = QtWidgets.QPushButton("Скачивание")
-        self.btn_run_watermark = QtWidgets.QPushButton("Замена водяного знака")
+        self.btn_run_watermark = QtWidgets.QPushButton("Замена ВЗ")
         self.btn_open_downloads = QtWidgets.QPushButton("Папка RAW")
-        self.btn_stop = QtWidgets.QPushButton("Остановить")
-        for btn in (
+        self.btn_stop = QtWidgets.QPushButton("Стоп")
+        action_buttons = [
             self.btn_launch_chrome,
             self.btn_run_prompts,
             self.btn_run_images,
@@ -958,11 +988,13 @@ class SessionWorkspaceWindow(QtWidgets.QDialog):
             self.btn_run_watermark,
             self.btn_open_downloads,
             self.btn_stop,
-        ):
+        ]
+        for idx, btn in enumerate(action_buttons):
             btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
             btn.setMinimumHeight(32)
-            actions_layout.addWidget(btn)
-        actions_layout.addStretch(1)
+            row, col = divmod(idx, 3)
+            grid.addWidget(btn, row, col)
+        actions_layout.addLayout(grid)
         layout.addWidget(actions_card)
 
         status_card = QtWidgets.QFrame()
@@ -997,6 +1029,7 @@ class SessionWorkspaceWindow(QtWidgets.QDialog):
         font = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.SystemFont.FixedFont)
         font.setPointSize(max(font.pointSize() - 1, 9))
         self.log_view.setFont(font)
+        self.log_view.setMinimumHeight(140)
         log_layout.addWidget(self.log_view, 1)
         layout.addWidget(log_frame, 1)
 
@@ -1007,6 +1040,19 @@ class SessionWorkspaceWindow(QtWidgets.QDialog):
         self.btn_run_watermark.clicked.connect(lambda: self._main._run_session_watermark(self.session_id))
         self.btn_open_downloads.clicked.connect(lambda: self._main._open_session_download_dir(self.session_id))
         self.btn_stop.clicked.connect(lambda: self._main._stop_session_runner(self.session_id))
+        self.btn_start_action.clicked.connect(self._run_selected_action)
+
+    def _run_selected_action(self):
+        mapping = {
+            1: lambda: self._main._launch_session_chrome(self.session_id),
+            2: lambda: self._main._run_session_autogen(self.session_id),
+            3: lambda: self._main._run_session_images(self.session_id),
+            4: lambda: self._main._run_session_download(self.session_id),
+            5: lambda: self._main._run_session_watermark(self.session_id),
+        }
+        idx = self.cmb_action.currentIndex()
+        if idx in mapping:
+            mapping[idx]()
 
     def update_session(self, session: Dict[str, Any]):
         name = session.get("name", self.session_id)
@@ -2730,6 +2776,21 @@ class MainWindow(QtWidgets.QMainWindow):
             QLabel#sessionWindowStatusLabel { font-size: 13px; font-weight: 600; color: #e2e8f0; }
             QLabel#sessionWindowHint { color: #94a3b8; font-size: 11px; }
             QLabel#sessionWindowLogTitle { font-size: 12px; font-weight: 600; color: #cbd5f5; }
+            QComboBox#sessionActionCombo {
+                background: #0f172a;
+                border: 1px solid #27364d;
+                padding: 6px 10px;
+                border-radius: 10px;
+                font-weight: 500;
+            }
+            QPushButton#sessionActionStart {
+                background: qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #2563eb, stop:1 #1d4ed8);
+                border: 1px solid #7dd3fc;
+                color: #e2e8f0;
+                padding: 8px 16px;
+                border-radius: 12px;
+            }
+            QPushButton#sessionActionStart:hover { border-color: #a5b4fc; }
             QFrame#contextCard { background: rgba(15,23,42,0.6); border:1px solid rgba(148,163,184,0.24); border-radius:16px; }
             QFrame#contextStatusCard { background: rgba(15,23,42,0.78); border:1px solid rgba(148,163,184,0.28); border-radius:16px; }
             QLabel#contextStatusTitle { color:#cbd5f5; font-weight:600; letter-spacing:0.3px; }
