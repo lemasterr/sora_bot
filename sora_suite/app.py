@@ -258,6 +258,16 @@ def load_cfg() -> dict:
     auto_wm.setdefault("threshold", 0.75)
     auto_wm.setdefault("frames", 5)
     auto_wm.setdefault("downscale", 0)
+
+    wm_probe = data.setdefault("watermark_probe", {})
+    wm_probe.setdefault("source_dir", data.get("downloads_dir", str(DL_DIR)))
+    wm_probe.setdefault("output_dir", str(PROJECT_ROOT / "restored"))
+    wm_probe.setdefault("region", {"x": 0, "y": 0, "w": 320, "h": 120})
+    wm_probe.setdefault("frames", 120)
+    wm_probe.setdefault("brightness_threshold", 245)
+    wm_probe.setdefault("coverage_ratio", 0.02)
+    wm_probe.setdefault("flip_when", "missing")
+    wm_probe.setdefault("flip_direction", "left")
     auto_wm.setdefault("bbox_padding", 12)
     auto_wm.setdefault("bbox_padding_pct", 0.15)
     auto_wm.setdefault("bbox_min_size", 48)
@@ -614,6 +624,16 @@ def ensure_dirs(cfg: dict):
         merge_path = blurred_path
     merge_path.mkdir(parents=True, exist_ok=True)
     cfg["merge_src_dir"] = str(merge_path)
+
+    probe_cfg = cfg.setdefault("watermark_probe", {})
+    probe_src = _project_path(probe_cfg.get("source_dir") or downloads_path)
+    if not probe_src.exists():
+        probe_src = downloads_path
+    probe_src.mkdir(parents=True, exist_ok=True)
+    probe_out = _project_path(probe_cfg.get("output_dir") or PROJECT_ROOT / "restored")
+    probe_out.mkdir(parents=True, exist_ok=True)
+    probe_cfg["source_dir"] = str(probe_src)
+    probe_cfg["output_dir"] = str(probe_out)
 
     genai_cfg = cfg.get("google_genai", {}) or {}
     output_raw = genai_cfg.get("output_dir") or IMAGES_DIR
@@ -3484,12 +3504,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_context_session_images = QtWidgets.QPushButton("🖼️ Картинки")
         self.btn_context_session_download = QtWidgets.QPushButton("⬇️ Скачка")
         self.btn_context_session_watermark = QtWidgets.QPushButton("🧼 Очистка")
+        self.btn_context_session_probe = QtWidgets.QPushButton("🧐 Проверка ВЗ")
         for btn in (
             self.btn_context_session_window,
             self.btn_context_session_prompts,
             self.btn_context_session_images,
             self.btn_context_session_download,
             self.btn_context_session_watermark,
+            self.btn_context_session_probe,
         ):
             btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
             sessions_buttons.addWidget(btn)
@@ -3769,6 +3791,128 @@ class MainWindow(QtWidgets.QMainWindow):
             scrollable=True,
             category="Рабочие процессы",
             description="Замена логотипа подбором чистых фрагментов видео",
+        )
+
+        wm_probe_cfg = self.cfg.get("watermark_probe", {}) or {}
+        self.tab_watermark_probe, wm_probe_layout = make_scroll_tab()
+        wm_probe_intro = QtWidgets.QLabel(
+            "Проверяй, вспыхивает ли логотип в выбранной зоне, и автоматически отражай ролик при нужном условии."
+        )
+        wm_probe_intro.setWordWrap(True)
+        wm_probe_intro.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
+        wm_probe_layout.addWidget(wm_probe_intro)
+
+        probe_files = QtWidgets.QGroupBox("Файлы")
+        pf_form = QtWidgets.QFormLayout(probe_files)
+        pf_form.setHorizontalSpacing(8)
+        pf_form.setVerticalSpacing(8)
+        self.ed_probe_source, self.btn_probe_source_browse, probe_src_widget = make_path_field()
+        self.ed_probe_source.setText(wm_probe_cfg.get("source_dir", self.cfg.get("downloads_dir", str(DL_DIR))))
+        pf_form.addRow("RAW папка:", probe_src_widget)
+        self.ed_probe_output_dir, self.btn_probe_output_browse, probe_out_widget = make_path_field()
+        self.ed_probe_output_dir.setText(wm_probe_cfg.get("output_dir", str(PROJECT_ROOT / "restored")))
+        pf_form.addRow("Папка результата:", probe_out_widget)
+        self.ed_probe_video, self.btn_probe_video_browse, probe_video_widget = make_path_field()
+        self.ed_probe_video.setPlaceholderText("Выбери конкретный файл или оставь пустым, чтобы указать позже")
+        pf_form.addRow("Видео:", probe_video_widget)
+        wm_probe_layout.addWidget(probe_files)
+
+        probe_zone = QtWidgets.QGroupBox("Зона проверки")
+        pz_grid = QtWidgets.QGridLayout(probe_zone)
+        pz_grid.setHorizontalSpacing(8)
+        pz_grid.setVerticalSpacing(8)
+        self.sb_probe_x = QtWidgets.QSpinBox(); self.sb_probe_x.setRange(0, 10000)
+        self.sb_probe_y = QtWidgets.QSpinBox(); self.sb_probe_y.setRange(0, 10000)
+        self.sb_probe_w = QtWidgets.QSpinBox(); self.sb_probe_w.setRange(1, 20000)
+        self.sb_probe_h = QtWidgets.QSpinBox(); self.sb_probe_h.setRange(1, 20000)
+        region = wm_probe_cfg.get("region", {}) or {}
+        self.sb_probe_x.setValue(int(region.get("x", 0)))
+        self.sb_probe_y.setValue(int(region.get("y", 0)))
+        self.sb_probe_w.setValue(int(region.get("w", 320)))
+        self.sb_probe_h.setValue(int(region.get("h", 120)))
+        pz_grid.addWidget(QtWidgets.QLabel("x"), 0, 0); pz_grid.addWidget(self.sb_probe_x, 0, 1)
+        pz_grid.addWidget(QtWidgets.QLabel("y"), 0, 2); pz_grid.addWidget(self.sb_probe_y, 0, 3)
+        pz_grid.addWidget(QtWidgets.QLabel("w"), 1, 0); pz_grid.addWidget(self.sb_probe_w, 1, 1)
+        pz_grid.addWidget(QtWidgets.QLabel("h"), 1, 2); pz_grid.addWidget(self.sb_probe_h, 1, 3)
+        self.btn_probe_preview = QtWidgets.QPushButton("Предпросмотр и оверлей")
+        pz_grid.addWidget(self.btn_probe_preview, 2, 0, 1, 4)
+        wm_probe_layout.addWidget(probe_zone)
+
+        probe_opts = QtWidgets.QGroupBox("Параметры")
+        po_form = QtWidgets.QGridLayout(probe_opts)
+        po_form.setHorizontalSpacing(8)
+        po_form.setVerticalSpacing(8)
+        self.sb_probe_frames = QtWidgets.QSpinBox(); self.sb_probe_frames.setRange(1, 5000)
+        self.sb_probe_frames.setValue(int(wm_probe_cfg.get("frames", 120) or 120))
+        self.sb_probe_brightness = QtWidgets.QSpinBox(); self.sb_probe_brightness.setRange(1, 255)
+        self.sb_probe_brightness.setValue(int(wm_probe_cfg.get("brightness_threshold", 245) or 245))
+        self.dsb_probe_coverage = QtWidgets.QDoubleSpinBox(); self.dsb_probe_coverage.setRange(0.001, 1.0)
+        self.dsb_probe_coverage.setDecimals(4)
+        self.dsb_probe_coverage.setSingleStep(0.005)
+        self.dsb_probe_coverage.setValue(float(wm_probe_cfg.get("coverage_ratio", 0.02) or 0.02))
+        self.cmb_probe_flip_when = QtWidgets.QComboBox()
+        self.cmb_probe_flip_when.addItem("Флипать, если знака НЕТ", "missing")
+        self.cmb_probe_flip_when.addItem("Флипать, если знак ЕСТЬ", "present")
+        current_flip_when = wm_probe_cfg.get("flip_when", "missing")
+        idx_flip_when = max(0, self.cmb_probe_flip_when.findData(current_flip_when))
+        self.cmb_probe_flip_when.setCurrentIndex(idx_flip_when)
+        self.cmb_probe_direction = QtWidgets.QComboBox()
+        self.cmb_probe_direction.addItem("Влево (горизонтальный flip)", "left")
+        self.cmb_probe_direction.addItem("Вправо (вертикальный flip)", "right")
+        idx_dir = max(0, self.cmb_probe_direction.findData(wm_probe_cfg.get("flip_direction", "left")))
+        self.cmb_probe_direction.setCurrentIndex(idx_dir)
+        po_form.addWidget(QtWidgets.QLabel("Кадров для проверки:"), 0, 0)
+        po_form.addWidget(self.sb_probe_frames, 0, 1)
+        po_form.addWidget(QtWidgets.QLabel("Порог яркости:"), 0, 2)
+        po_form.addWidget(self.sb_probe_brightness, 0, 3)
+        po_form.addWidget(QtWidgets.QLabel("Доля заполнения:"), 1, 0)
+        po_form.addWidget(self.dsb_probe_coverage, 1, 1)
+        po_form.addWidget(QtWidgets.QLabel("Условие:"), 1, 2)
+        po_form.addWidget(self.cmb_probe_flip_when, 1, 3)
+        po_form.addWidget(QtWidgets.QLabel("Направление flip:"), 2, 0)
+        po_form.addWidget(self.cmb_probe_direction, 2, 1, 1, 3)
+        wm_probe_layout.addWidget(probe_opts)
+
+        probe_actions = QtWidgets.QGroupBox("Действия")
+        pa_grid = QtWidgets.QGridLayout(probe_actions)
+        pa_grid.setHorizontalSpacing(8)
+        pa_grid.setVerticalSpacing(8)
+        self.btn_probe_scan = QtWidgets.QPushButton("Проверить водяной знак")
+        self.btn_probe_flip = QtWidgets.QPushButton("Проверить и флипнуть")
+        self.cb_probe_autosave = QtWidgets.QCheckBox("Сохранять результат в папку")
+        self.cb_probe_autosave.setChecked(True)
+        self.lbl_probe_status = QtWidgets.QLabel("—")
+        self.lbl_probe_status.setWordWrap(True)
+        pa_grid.addWidget(self.btn_probe_scan, 0, 0)
+        pa_grid.addWidget(self.btn_probe_flip, 0, 1)
+        pa_grid.addWidget(self.cb_probe_autosave, 0, 2)
+        pa_grid.addWidget(self.lbl_probe_status, 1, 0, 1, 3)
+        wm_probe_layout.addWidget(probe_actions)
+
+        wm_probe_layout.addStretch(1)
+
+        probe_context, probe_ctx_layout = make_context_card(
+            "Проверка водяного знака",
+            "Выбери область экрана, при необходимости открой предпросмотр с оверлеем и реши, при каком условии нужно зеркалить клип.",
+        )
+        self.lbl_context_probe_source = QtWidgets.QLabel("—")
+        self.lbl_context_probe_output = QtWidgets.QLabel("—")
+        ctx_form = QtWidgets.QFormLayout()
+        ctx_form.setHorizontalSpacing(8)
+        ctx_form.setVerticalSpacing(6)
+        ctx_form.addRow("RAW:", self.lbl_context_probe_source)
+        ctx_form.addRow("Output:", self.lbl_context_probe_output)
+        probe_ctx_layout.addLayout(ctx_form)
+        probe_ctx_layout.addStretch(1)
+        register_context("watermark_probe", probe_context)
+
+        add_section(
+            "watermark_probe",
+            "🧐 Проверка ВЗ",
+            self.tab_watermark_probe,
+            scrollable=True,
+            category="Рабочие процессы",
+            description="Проверка области на вспышку водяного знака и управляемый flip видео",
         )
 
         # TAB: YouTube uploader
@@ -4846,6 +4990,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "logs": self._refresh_logs_context,
             "session_logs": self._refresh_session_logs_context,
             "watermark": self._refresh_watermark_context,
+            "watermark_probe": self._refresh_watermark_probe_context,
             "content": self._refresh_content_context,
             "telegram": self._refresh_telegram_context,
             "autopost": self._refresh_autopost_context,
@@ -4981,6 +5126,19 @@ class MainWindow(QtWidgets.QMainWindow):
             if hasattr(self, "ed_wmr_template") and isinstance(self.ed_wmr_template, QtWidgets.QLineEdit):
                 template = self.ed_wmr_template.text().strip() or template
             self.lbl_context_wmr_template.setText(template)
+
+    def _refresh_watermark_probe_context(self) -> None:
+        probe_cfg = self.cfg.get("watermark_probe", {}) or {}
+        if hasattr(self, "lbl_context_probe_source"):
+            source = probe_cfg.get("source_dir", self.cfg.get("downloads_dir", str(DL_DIR)))
+            if hasattr(self, "ed_probe_source") and isinstance(self.ed_probe_source, QtWidgets.QLineEdit):
+                source = self.ed_probe_source.text().strip() or source
+            self.lbl_context_probe_source.setText(source)
+        if hasattr(self, "lbl_context_probe_output"):
+            output = probe_cfg.get("output_dir", str(PROJECT_ROOT / "restored"))
+            if hasattr(self, "ed_probe_output_dir") and isinstance(self.ed_probe_output_dir, QtWidgets.QLineEdit):
+                output = self.ed_probe_output_dir.text().strip() or output
+            self.lbl_context_probe_output.setText(output)
 
     def _refresh_telegram_templates(self) -> None:
         if not hasattr(self, "cmb_tg_templates"):
@@ -6083,6 +6241,18 @@ class MainWindow(QtWidgets.QMainWindow):
             (getattr(self, "cmb_wmr_blend", None), "currentIndexChanged"),
             (getattr(self, "sb_wmr_inpaint_radius", None), "valueChanged"),
             (getattr(self, "cmb_wmr_inpaint_method", None), "currentIndexChanged"),
+            (getattr(self, "ed_probe_source", None), "textEdited"),
+            (getattr(self, "ed_probe_output_dir", None), "textEdited"),
+            (getattr(self, "ed_probe_video", None), "textEdited"),
+            (getattr(self, "sb_probe_x", None), "valueChanged"),
+            (getattr(self, "sb_probe_y", None), "valueChanged"),
+            (getattr(self, "sb_probe_w", None), "valueChanged"),
+            (getattr(self, "sb_probe_h", None), "valueChanged"),
+            (getattr(self, "sb_probe_frames", None), "valueChanged"),
+            (getattr(self, "sb_probe_brightness", None), "valueChanged"),
+            (getattr(self, "dsb_probe_coverage", None), "valueChanged"),
+            (getattr(self, "cmb_probe_flip_when", None), "currentIndexChanged"),
+            (getattr(self, "cmb_probe_direction", None), "currentIndexChanged"),
             (self.cmb_genai_model, "currentIndexChanged"),
             (self.cmb_genai_model.lineEdit(), "textEdited"),
             (self.cmb_genai_person, "currentIndexChanged"),
@@ -7403,6 +7573,28 @@ class MainWindow(QtWidgets.QMainWindow):
                 "Изображения (*.png *.jpg *.jpeg *.bmp);;Все файлы (*.*)",
             )
         )
+        if hasattr(self, "btn_probe_source_browse"):
+            self.btn_probe_source_browse.clicked.connect(
+                lambda: self._browse_dir(self.ed_probe_source, "Выбери папку RAW для проверки")
+            )
+        if hasattr(self, "btn_probe_output_browse"):
+            self.btn_probe_output_browse.clicked.connect(
+                lambda: self._browse_dir(self.ed_probe_output_dir, "Выбери папку для результата")
+            )
+        if hasattr(self, "btn_probe_video_browse"):
+            self.btn_probe_video_browse.clicked.connect(
+                lambda: self._browse_file(
+                    self.ed_probe_video,
+                    "Выбери видео для проверки",
+                    "Видео (*.mp4 *.mov *.m4v *.webm);;Все файлы (*.*)",
+                )
+            )
+        if hasattr(self, "btn_probe_preview"):
+            self.btn_probe_preview.clicked.connect(self._open_watermark_probe_preview)
+        if hasattr(self, "btn_probe_scan"):
+            self.btn_probe_scan.clicked.connect(lambda: self._run_watermark_probe(flip=False))
+        if hasattr(self, "btn_probe_flip"):
+            self.btn_probe_flip.clicked.connect(lambda: self._run_watermark_probe(flip=True))
         self.btn_tiktok_archive_browse.clicked.connect(lambda: self._browse_dir(self.ed_tiktok_archive, "Выбери папку архива"))
         self.sb_tiktok_default_delay.valueChanged.connect(self._apply_tiktok_default_delay)
         self.sb_tiktok_interval_default.valueChanged.connect(lambda val: self.sb_tiktok_interval.setValue(int(val)))
@@ -7431,6 +7623,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.btn_context_session_download.clicked.connect(self._on_session_run_download)
         if hasattr(self, "btn_context_session_watermark"):
             self.btn_context_session_watermark.clicked.connect(self._on_session_run_watermark)
+        if hasattr(self, "btn_context_session_probe"):
+            self.btn_context_session_probe.clicked.connect(lambda: self._select_section("watermark_probe"))
         if hasattr(self, "btn_context_tg_test"):
             self.btn_context_tg_test.clicked.connect(self._test_tg_settings)
         if hasattr(self, "btn_context_tg_open"):
@@ -9267,6 +9461,133 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_stats()
         return ok
 
+    def _probe_region_tuple(self) -> Tuple[int, int, int, int]:
+        return (
+            max(0, int(self.sb_probe_x.value() if hasattr(self, "sb_probe_x") else 0)),
+            max(0, int(self.sb_probe_y.value() if hasattr(self, "sb_probe_y") else 0)),
+            max(1, int(self.sb_probe_w.value() if hasattr(self, "sb_probe_w") else 1)),
+            max(1, int(self.sb_probe_h.value() if hasattr(self, "sb_probe_h") else 1)),
+        )
+
+    def _open_watermark_probe_preview(self):
+        try:
+            from blur_preview import BlurPreviewDialog, VIDEO_PREVIEW_AVAILABLE, VIDEO_PREVIEW_TIP  # type: ignore
+        except Exception as exc:  # noqa: BLE001
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Предпросмотр недоступен",
+                f"Не удалось загрузить модуль предпросмотра: {exc}\n{VIDEO_PREVIEW_TIP}",
+            )
+            return
+
+        source = _project_path(self.ed_probe_source.text().strip() or self.cfg.get("downloads_dir", str(DL_DIR)))
+        zones = [
+            {
+                "x": self.sb_probe_x.value(),
+                "y": self.sb_probe_y.value(),
+                "w": self.sb_probe_w.value(),
+                "h": self.sb_probe_h.value(),
+            }
+        ]
+        dlg = BlurPreviewDialog(self, "Проверка водяного знака", zones, [source])
+        if dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            updated = dlg.zones()
+            if updated:
+                zone = updated[0]
+                self.sb_probe_x.setValue(int(zone.get("x", 0)))
+                self.sb_probe_y.setValue(int(zone.get("y", 0)))
+                self.sb_probe_w.setValue(max(1, int(zone.get("w", 1))))
+                self.sb_probe_h.setValue(max(1, int(zone.get("h", 1))))
+                self._mark_settings_dirty()
+
+    def _resolve_probe_video(self, prompt_if_missing: bool = False) -> Optional[Path]:
+        raw = self.ed_probe_video.text().strip()
+        if raw:
+            return _project_path(raw)
+        if not prompt_if_missing:
+            return None
+        dlg = QtWidgets.QFileDialog(self, "Выбери видео для проверки")
+        dlg.setFileMode(QtWidgets.QFileDialog.FileMode.ExistingFile)
+        dlg.setNameFilter("Видео (*.mp4 *.mov *.m4v *.webm);;Все файлы (*.*)")
+        base = self.ed_probe_source.text().strip()
+        if base and os.path.isdir(base):
+            dlg.setDirectory(base)
+        if dlg.exec():
+            sel = dlg.selectedFiles()
+            if sel:
+                self.ed_probe_video.setText(sel[0])
+                return Path(sel[0])
+        return None
+
+    def _run_watermark_probe(self, *, flip: bool = False) -> None:
+        try:
+            from watermark_detector import flip_video_with_check, scan_region_for_flash  # type: ignore[import]
+        except Exception as exc:  # noqa: BLE001
+            QtWidgets.QMessageBox.critical(self, "Водяной знак", f"Не удалось загрузить watermark_detector: {exc}")
+            return
+
+        video_path = self._resolve_probe_video(prompt_if_missing=True)
+        if not video_path:
+            self._post_status("Выбери видео для проверки", state="error")
+            return
+
+        region = self._probe_region_tuple()
+        frames = int(self.sb_probe_frames.value()) if hasattr(self, "sb_probe_frames") else 120
+        brightness = int(self.sb_probe_brightness.value()) if hasattr(self, "sb_probe_brightness") else 245
+        coverage = float(self.dsb_probe_coverage.value()) if hasattr(self, "dsb_probe_coverage") else 0.02
+        flip_when = (self.cmb_probe_flip_when.currentData() if hasattr(self, "cmb_probe_flip_when") else None) or "missing"
+        flip_direction = (self.cmb_probe_direction.currentData() if hasattr(self, "cmb_probe_direction") else None) or "left"
+
+        try:
+            detected = scan_region_for_flash(
+                video_path,
+                region,
+                frames=frames,
+                brightness_threshold=brightness,
+                coverage_ratio=coverage,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._post_status(f"Ошибка проверки: {exc}", state="error")
+            if hasattr(self, "lbl_probe_status"):
+                self.lbl_probe_status.setText(f"Ошибка: {exc}")
+            return
+
+        status_parts = ["Знак" + (" найден" if detected else " не найден"), f"кадров: {frames}"]
+        if hasattr(self, "lbl_probe_status"):
+            self.lbl_probe_status.setText(" · ".join(status_parts))
+
+        if not flip:
+            self._append_activity(f"Проверка водяного знака: {'найден' if detected else 'не найден'}", kind="info")
+            return
+
+        output_dir = _project_path(self.ed_probe_output_dir.text().strip() or video_path.parent)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / video_path.name if bool(self.cb_probe_autosave.isChecked()) else None
+
+        res = flip_video_with_check(
+            video_path,
+            region=region,
+            output_path=output_path,
+            frames=frames,
+            brightness_threshold=brightness,
+            coverage_ratio=coverage,
+            flip_when=flip_when,
+            flip_direction=flip_direction,
+        )
+        flipped = bool(res.get("flipped"))
+        out_path = Path(res.get("output", video_path))
+        msg = (
+            f"Флип выполнен ({res.get('filter', 'hflip')}), знак {'найден' if res.get('detected') else 'не найден'}"
+            if flipped
+            else f"Флип пропущен (условие не выполнено), знак {'найден' if res.get('detected') else 'не найден'}"
+        )
+        self._append_activity(msg, kind="success" if flipped else "info")
+        self._post_status(msg, state="ok" if flipped else "warn")
+        if hasattr(self, "lbl_probe_status"):
+            self.lbl_probe_status.setText(msg + f" → {out_path}")
+        if flipped and not self.cb_probe_autosave.isChecked():
+            self._open_file(out_path)
+
     # ----- BLUR -----
     def _run_blur_presets_sync(self) -> bool:
         ff_cfg = self.cfg.get("ffmpeg", {}) or {}
@@ -10813,6 +11134,25 @@ class MainWindow(QtWidgets.QMainWindow):
         wmr_cfg["blend"] = self.cmb_wmr_blend.currentText().strip() or "normal"
         wmr_cfg["inpaint_radius"] = int(self.sb_wmr_inpaint_radius.value())
         wmr_cfg["inpaint_method"] = self.cmb_wmr_inpaint_method.currentText().strip() or "telea"
+
+        probe_cfg = self.cfg.setdefault("watermark_probe", {})
+        probe_cfg["source_dir"] = self.ed_probe_source.text().strip() or probe_cfg.get(
+            "source_dir", self.cfg.get("downloads_dir", str(DL_DIR))
+        )
+        probe_cfg["output_dir"] = self.ed_probe_output_dir.text().strip() or probe_cfg.get(
+            "output_dir", str(PROJECT_ROOT / "restored")
+        )
+        probe_cfg["region"] = {
+            "x": int(self.sb_probe_x.value()),
+            "y": int(self.sb_probe_y.value()),
+            "w": int(self.sb_probe_w.value()),
+            "h": int(self.sb_probe_h.value()),
+        }
+        probe_cfg["frames"] = int(self.sb_probe_frames.value())
+        probe_cfg["brightness_threshold"] = int(self.sb_probe_brightness.value())
+        probe_cfg["coverage_ratio"] = float(self.dsb_probe_coverage.value())
+        probe_cfg["flip_when"] = self.cmb_probe_flip_when.currentData() or "missing"
+        probe_cfg["flip_direction"] = self.cmb_probe_direction.currentData() or "left"
 
         ui_cfg = self.cfg.setdefault("ui", {})
         ui_cfg["show_activity"] = bool(self.cb_ui_show_activity.isChecked())

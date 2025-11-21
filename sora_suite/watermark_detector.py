@@ -731,6 +731,69 @@ def flip_video_if_no_watermark(
     }
 
 
+def flip_video_with_check(
+    video_path: Union[str, Path],
+    *,
+    region: Tuple[int, int, int, int],
+    output_path: Optional[Union[str, Path]] = None,
+    frames: int = 120,
+    brightness_threshold: int = 245,
+    coverage_ratio: float = 0.02,
+    flip_when: str = "missing",
+    flip_direction: str = "left",
+) -> Dict[str, object]:
+    """Горизонтально/вертикально отражает видео в зависимости от наличия вспышки.
+
+    flip_when:
+        - "missing" — флипнуть, если в зоне нет яркой вспышки (водяной знак не найден)
+        - "present" — флипнуть, если яркая вспышка обнаружена
+    flip_direction:
+        - "left"  — горизонтальное отражение (hflip)
+        - "right" — вертикальное отражение (vflip) для сохранения управляемости
+    """
+
+    video_path = Path(video_path)
+    if not video_path.exists():
+        raise FileNotFoundError(video_path)
+
+    detected = scan_region_for_flash(
+        video_path, region, frames=frames, brightness_threshold=brightness_threshold, coverage_ratio=coverage_ratio
+    )
+    should_flip = (flip_when == "present" and detected) or (flip_when != "present" and not detected)
+
+    target = Path(output_path) if output_path else video_path.with_name(f"{video_path.stem}_flipped{video_path.suffix}")
+
+    if not should_flip:
+        return {
+            "flipped": False,
+            "output": str(video_path),
+            "reason": "skip_condition",
+            "detected": detected,
+        }
+
+    filter_name = "vflip" if flip_direction == "right" else "hflip"
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-loglevel",
+        "warning",
+        "-i",
+        str(video_path),
+        "-vf",
+        filter_name,
+        str(target),
+    ]
+    result = subprocess.run(cmd, capture_output=True)
+    return {
+        "flipped": result.returncode == 0,
+        "output": str(target),
+        "rc": int(result.returncode),
+        "stderr": (result.stderr or b"").decode(errors="ignore"),
+        "detected": detected,
+        "filter": filter_name,
+    }
+
+
 __all__ = [
     "prepare_template",
     "detect_watermark",
@@ -738,4 +801,5 @@ __all__ = [
     "WaterMarkDetector",
     "scan_region_for_flash",
     "flip_video_if_no_watermark",
+    "flip_video_with_check",
 ]
