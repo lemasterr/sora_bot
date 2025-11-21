@@ -6,6 +6,7 @@ import math
 import sys
 import json
 import uuid
+import webbrowser
 try:
     import yaml
 except ModuleNotFoundError as exc:
@@ -514,6 +515,34 @@ def normalize_automator_steps(raw_steps: object) -> List[Dict[str, Any]]:
             step["group"] = group
 
         normalized.append(step)
+
+    return normalized
+
+
+def normalize_automator_presets(raw_presets: object) -> List[Dict[str, Any]]:
+    """Нормализует список пресетов автоматизатора."""
+
+    normalized: List[Dict[str, Any]] = []
+    if not isinstance(raw_presets, list):
+        return normalized
+
+    seen_ids: Set[str] = set()
+    for idx, item in enumerate(raw_presets, start=1):
+        if not isinstance(item, dict):
+            continue
+        preset = dict(item)
+        pid = str(preset.get("id") or "").strip() or uuid.uuid4().hex[:8]
+        while pid in seen_ids:
+            pid = uuid.uuid4().hex[:8]
+        seen_ids.add(pid)
+        preset["id"] = pid
+
+        name = str(preset.get("name") or "").strip() or f"Пресет {idx}"
+        preset["name"] = name
+
+        steps = normalize_automator_steps(preset.get("steps"))
+        preset["steps"] = steps
+        normalized.append(preset)
 
     return normalized
 
@@ -1541,6 +1570,10 @@ class MainWindow(QtWidgets.QMainWindow):
         automator_cfg = self.cfg.setdefault("automator", {})
         self._automator_steps: List[Dict[str, Any]] = normalize_automator_steps(automator_cfg.get("steps"))
         automator_cfg["steps"] = [dict(step) for step in self._automator_steps]
+        self._automator_presets: List[Dict[str, Any]] = normalize_automator_presets(
+            automator_cfg.get("presets")
+        )
+        automator_cfg["presets"] = [dict(preset) for preset in self._automator_presets]
 
         self._command_registry: Dict[str, Dict[str, Any]] = {}
         self._command_actions: Dict[str, QtGui.QAction] = {}
@@ -1599,6 +1632,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._build_ui()
         self._wire()
+        self._refresh_automator_presets()
         self._refresh_automator_list()
         self._init_state()
         self._refresh_update_buttons()
@@ -1847,6 +1881,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lst_sessions.blockSignals(False)
         self._refresh_command_palette_sessions()
         self._refresh_sessions_context()
+        self._refresh_automator_presets()
         self._refresh_automator_list()
         self._refresh_session_log_panel()
 
@@ -7327,6 +7362,26 @@ class MainWindow(QtWidgets.QMainWindow):
         intro.setStyleSheet("QLabel{color:#94a3b8;font-size:12px;}")
         outer.addWidget(intro)
 
+        preset_row = QtWidgets.QHBoxLayout()
+        preset_row.setSpacing(6)
+        self.cmb_automator_presets = QtWidgets.QComboBox()
+        self.cmb_automator_presets.setPlaceholderText("Выбери пресет…")
+        self.cmb_automator_presets.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
+        preset_row.addWidget(self.cmb_automator_presets, 1)
+        self.btn_automator_preset_apply = QtWidgets.QPushButton("Заменить")
+        self.btn_automator_preset_append = QtWidgets.QPushButton("Добавить")
+        self.btn_automator_preset_save = QtWidgets.QPushButton("Сохранить текущее")
+        self.btn_automator_preset_delete = QtWidgets.QPushButton("Удалить")
+        for btn in (
+            self.btn_automator_preset_apply,
+            self.btn_automator_preset_append,
+            self.btn_automator_preset_save,
+            self.btn_automator_preset_delete,
+        ):
+            btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+            preset_row.addWidget(btn)
+        outer.addLayout(preset_row)
+
         self.lst_automator = QtWidgets.QListWidget()
         self.lst_automator.setObjectName("automatorStepList")
         self.lst_automator.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
@@ -7354,6 +7409,21 @@ class MainWindow(QtWidgets.QMainWindow):
             controls.addWidget(btn)
         controls.addStretch(1)
         outer.addLayout(controls)
+
+        cf_tip = QtWidgets.QLabel(
+            "Если Cloudflare просит подтвердить, прогрей профиль: открой страницу Sora в браузере, реши проверку и запусти цепочку."
+        )
+        cf_tip.setWordWrap(True)
+        cf_tip.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
+        outer.addWidget(cf_tip)
+
+        cf_row = QtWidgets.QHBoxLayout()
+        cf_row.setSpacing(6)
+        self.btn_open_profile_page = QtWidgets.QPushButton("🛡️ Прогреть профиль Sora")
+        self.btn_open_profile_page.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        cf_row.addWidget(self.btn_open_profile_page)
+        cf_row.addStretch(1)
+        outer.addLayout(cf_row)
 
         self.btn_run_automator = QtWidgets.QPushButton("🚀 Запустить автоматизацию")
         self.btn_run_automator.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
@@ -7649,6 +7719,18 @@ class MainWindow(QtWidgets.QMainWindow):
             self.btn_automator_down.clicked.connect(lambda _, direction=1: self._on_automator_move(direction))
         if hasattr(self, "btn_automator_clear"):
             self.btn_automator_clear.clicked.connect(self._on_automator_clear)
+        if hasattr(self, "cmb_automator_presets"):
+            self.cmb_automator_presets.currentIndexChanged.connect(lambda *_: self._update_automator_buttons())
+        if hasattr(self, "btn_automator_preset_apply"):
+            self.btn_automator_preset_apply.clicked.connect(lambda *_: self._on_automator_preset_apply())
+        if hasattr(self, "btn_automator_preset_append"):
+            self.btn_automator_preset_append.clicked.connect(lambda *_: self._on_automator_preset_apply(append=True))
+        if hasattr(self, "btn_automator_preset_save"):
+            self.btn_automator_preset_save.clicked.connect(self._on_automator_preset_save)
+        if hasattr(self, "btn_automator_preset_delete"):
+            self.btn_automator_preset_delete.clicked.connect(self._on_automator_preset_delete)
+        if hasattr(self, "btn_open_profile_page"):
+            self.btn_open_profile_page.clicked.connect(self._open_sora_profile_page)
         if hasattr(self, "btn_run_automator"):
             self.btn_run_automator.clicked.connect(self._run_automator)
         if hasattr(self, "cb_quick_activity"):
@@ -9178,6 +9260,16 @@ class MainWindow(QtWidgets.QMainWindow):
     def _format_automator_step(self, step: Dict[str, Any], idx: int) -> str:
         return f"{idx}. {self._describe_automator_step(step)}"
 
+    def _refresh_automator_presets(self):
+        if not hasattr(self, "cmb_automator_presets"):
+            return
+        self.cmb_automator_presets.blockSignals(True)
+        self.cmb_automator_presets.clear()
+        for preset in self._automator_presets:
+            self.cmb_automator_presets.addItem(preset.get("name", ""), preset.get("id"))
+        self.cmb_automator_presets.blockSignals(False)
+        self._update_automator_buttons()
+
     def _refresh_automator_list(self):
         if not hasattr(self, "lst_automator"):
             return
@@ -9196,6 +9288,8 @@ class MainWindow(QtWidgets.QMainWindow):
         has_items = bool(self._automator_steps)
         current_row = self.lst_automator.currentRow()
         has_selection = current_row >= 0 and current_row < len(self._automator_steps)
+        has_presets = bool(self._automator_presets)
+        selected_preset = has_presets and hasattr(self, "cmb_automator_presets") and self.cmb_automator_presets.currentIndex() >= 0
         for attr in ("btn_automator_edit", "btn_automator_remove", "btn_automator_up", "btn_automator_down"):
             btn = getattr(self, attr, None)
             if btn:
@@ -9204,10 +9298,114 @@ class MainWindow(QtWidgets.QMainWindow):
             self.btn_automator_clear.setEnabled(has_items)
         if hasattr(self, "btn_run_automator"):
             self.btn_run_automator.setEnabled(has_items)
+        for attr, enabled in (
+            ("btn_automator_preset_apply", bool(selected_preset)),
+            ("btn_automator_preset_append", bool(selected_preset)),
+            ("btn_automator_preset_delete", bool(selected_preset)),
+            ("btn_automator_preset_save", bool(has_items)),
+        ):
+            btn = getattr(self, attr, None)
+            if btn:
+                btn.setEnabled(enabled)
 
     def _persist_automator(self):
-        self.cfg.setdefault("automator", {})["steps"] = [dict(step) for step in self._automator_steps]
+        automator = self.cfg.setdefault("automator", {})
+        automator["steps"] = [dict(step) for step in self._automator_steps]
+        automator["presets"] = [dict(preset) for preset in self._automator_presets]
         save_cfg(self.cfg)
+
+    def _selected_automator_preset(self) -> Tuple[Optional[Dict[str, Any]], int]:
+        if not hasattr(self, "cmb_automator_presets"):
+            return None, -1
+        idx = self.cmb_automator_presets.currentIndex()
+        if idx < 0 or idx >= len(self._automator_presets):
+            return None, idx
+        preset_id = self.cmb_automator_presets.currentData()
+        for preset_idx, preset in enumerate(self._automator_presets):
+            if preset.get("id") == preset_id:
+                return preset, preset_idx
+        return None, idx
+
+    def _on_automator_preset_apply(self, *, append: bool = False):
+        preset, _ = self._selected_automator_preset()
+        if not preset:
+            return
+        steps = [dict(step) for step in preset.get("steps", [])]
+        if not append:
+            if self._automator_steps:
+                confirm = QtWidgets.QMessageBox.question(
+                    self,
+                    "Заменить шаги",
+                    "Заменить текущий список шагов выбранным пресетом?",
+                    QtWidgets.QMessageBox.StandardButton.Yes,
+                    QtWidgets.QMessageBox.StandardButton.No,
+                )
+                if confirm != QtWidgets.QMessageBox.StandardButton.Yes:
+                    return
+            self._automator_steps = steps
+        else:
+            self._automator_steps.extend(steps)
+        self._persist_automator()
+        self._refresh_automator_list()
+
+    def _on_automator_preset_save(self):
+        if not self._automator_steps:
+            QtWidgets.QMessageBox.information(self, "Сохранение пресета", "Добавь хотя бы один шаг для сохранения")
+            return
+        current_name = ""
+        preset, idx = self._selected_automator_preset()
+        if preset and idx >= 0:
+            current_name = preset.get("name", "")
+        name, ok = QtWidgets.QInputDialog.getText(
+            self,
+            "Название пресета",
+            "Как подписать цепочку?",
+            text=current_name or "Новый пресет",
+        )
+        if not ok:
+            return
+        name = str(name).strip()
+        if not name:
+            return
+
+        existing = None
+        for preset_item in self._automator_presets:
+            if preset_item.get("name") == name:
+                existing = preset_item
+                break
+        if existing:
+            existing["steps"] = [dict(step) for step in self._automator_steps]
+        else:
+            self._automator_presets.append(
+                {
+                    "id": uuid.uuid4().hex[:8],
+                    "name": name,
+                    "steps": [dict(step) for step in self._automator_steps],
+                }
+            )
+        self._persist_automator()
+        self._refresh_automator_presets()
+        target_id = existing.get("id") if existing else self._automator_presets[-1].get("id")
+        idx = self.cmb_automator_presets.findData(target_id)
+        if idx >= 0:
+            self.cmb_automator_presets.setCurrentIndex(idx)
+
+    def _on_automator_preset_delete(self):
+        preset, idx = self._selected_automator_preset()
+        if not preset or idx < 0:
+            return
+        confirm = QtWidgets.QMessageBox.question(
+            self,
+            "Удалить пресет",
+            f"Удалить пресет “{preset.get('name', 'Без названия')}”?",
+            QtWidgets.QMessageBox.StandardButton.Yes,
+            QtWidgets.QMessageBox.StandardButton.No,
+        )
+        if confirm != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        self._automator_presets.pop(idx)
+        self._persist_automator()
+        self._refresh_automator_presets()
 
     def _on_automator_add(self):
         dialog = AutomatorStepDialog(self, self._automator_session_choices())
@@ -9273,6 +9471,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automator_steps.clear()
         self._persist_automator()
         self._refresh_automator_list()
+
+    def _open_sora_profile_page(self):
+        try:
+            webbrowser.open("https://sora.chatgpt.com/profile")
+            self._post_status("Открываю профиль Sora — реши проверку, если появится", state="info")
+        except Exception as exc:  # noqa: BLE001
+            self._post_status(f"Не удалось открыть профиль: {exc}", state="error")
 
     def _run_automator(self):
         steps = list(self._automator_steps)
