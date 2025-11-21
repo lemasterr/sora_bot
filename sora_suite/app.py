@@ -4928,7 +4928,7 @@ class MainWindow(QtWidgets.QMainWindow):
             fallback_note: Optional[str] = None
             frame_size: Optional[Tuple[int, int]] = None
             detection_info_msg: Optional[str] = None
-            clip_info_msg: Optional[str] = None
+            clip_info_notes: List[str] = []
             detection_applied = False
             timeline_zones: List[Dict[str, Any]] = []
             timeline_segment_count = 0
@@ -5196,26 +5196,88 @@ class MainWindow(QtWidgets.QMainWindow):
                     elif not bbox:
                         fallback_note = f"совпадение ниже порога ({auto_runtime['threshold']:.2f})"
 
-            if detection_applied and per_video_zones_result:
-                active_zones = [dict(z) for z in per_video_zones_result]
-
             if frame_size is None:
                 frame_size = _probe_frame_size(v)
 
-            if active_zones and frame_size:
-                clipped = _clip_zones_to_frame(active_zones, frame_size)
-                if clipped:
-                    if clipped != active_zones:
-                        active_zones = clipped
-                        if detection_applied and per_video_zones_result:
-                            per_video_zones_result = [dict(z) for z in clipped]
-                        clip_note = (
-                            f"[BLUR] {v.name}: зоны скорректированы под кадр {frame_size[0]}x{frame_size[1]}"
-                        )
-                        if clip_info_msg:
-                            clip_info_msg = f"{clip_info_msg}; {clip_note}"
-                        else:
-                            clip_info_msg = clip_note
+            def _sanitize_zone_collection(
+                zone_list: List[Dict[str, Any]],
+                *,
+                label: str,
+            ) -> List[Dict[str, Any]]:
+                if not zone_list:
+                    return []
+                sanitized: List[Dict[str, Any]] = []
+                if not frame_size:
+                    for zone in zone_list:
+                        if isinstance(zone, dict):
+                            sanitized.append(dict(zone))
+                    return sanitized
+
+                changed = False
+                dropped = 0
+                for zone in zone_list:
+                    if not isinstance(zone, dict):
+                        continue
+                    clipped = _clip_zones_to_frame([zone], frame_size)
+                    if not clipped:
+                        dropped += 1
+                        continue
+                    coords_clipped = clipped[0]
+                    try:
+                        original_coords = {
+                            "x": int(round(float(zone.get("x", 0)))),
+                            "y": int(round(float(zone.get("y", 0)))),
+                            "w": int(round(float(zone.get("w", 0)))),
+                            "h": int(round(float(zone.get("h", 0)))),
+                        }
+                    except Exception:
+                        original_coords = coords_clipped
+                    if coords_clipped != original_coords:
+                        changed = True
+                    updated_zone = dict(zone)
+                    updated_zone.update(coords_clipped)
+                    sanitized.append(updated_zone)
+
+                if changed:
+                    clip_info_notes.append(
+                        f"[BLUR] {v.name}: {label} подрезаны под кадр {frame_size[0]}x{frame_size[1]}"
+                    )
+                if dropped:
+                    clip_info_notes.append(
+                        f"[BLUR] {v.name}: {label} — отброшено {dropped} зон за пределами кадра"
+                    )
+                return sanitized
+
+            if timeline_zones:
+                timeline_zones = _sanitize_zone_collection(
+                    timeline_zones,
+                    label="таймлайн-зоны автодетекта",
+                )
+
+            active_zones: List[Dict[str, Any]] = []
+            preset_zones_for_static: List[Dict[str, Any]] = []
+            if detection_applied and per_video_zones_result:
+                per_video_zones_result = _sanitize_zone_collection(
+                    per_video_zones_result,
+                    label="зоны автодетекта",
+                )
+                if per_video_zones_result:
+                    active_zones = [dict(z) for z in per_video_zones_result]
+                else:
+                    detection_applied = False
+                    detection_info_msg = ""
+                    if not detection_error_text:
+                        detection_error_text = "санитизация зон автодетекта вернула пустой результат"
+                    if not fallback_note:
+                        fallback_note = "детектор выдал зоны вне кадра"
+
+            if not active_zones:
+                preset_zones_for_static = _sanitize_zone_collection(
+                    zones,
+                    label="пресетные зоны",
+                )
+                if preset_zones_for_static:
+                    active_zones = [dict(z) for z in preset_zones_for_static]
 
             def _build_filter_parts(zone_list: List[Dict[str, Any]], *, timeline: bool) -> List[str]:
                 parts: List[str] = []
@@ -5254,7 +5316,7 @@ class MainWindow(QtWidgets.QMainWindow):
             timeline_parts = _build_filter_parts(timeline_zones, timeline=True) if timeline_zones else []
             if timeline_zones and not timeline_parts:
                 timeline_zones = []
-            static_source = active_zones if active_zones else zones
+            static_source = active_zones if active_zones else preset_zones_for_static
             static_parts = _build_filter_parts(static_source, timeline=False)
 
             def _compose_vf(parts: List[str]) -> str:
@@ -5377,8 +5439,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.sig_log.emit(f"[BLUR] {v.name}: аудио сконвертировано в AAC для совместимости")
                 if detection_info_msg:
                     self.sig_log.emit(detection_info_msg)
-                if clip_info_msg:
-                    self.sig_log.emit(clip_info_msg)
+                for note in clip_info_notes:
+                    self.sig_log.emit(note)
                 if timeline_switch_note:
                     msg_switch = (
                         f"Автодетект водяного знака: таймлайн → статично → {v.name}: {timeline_switch_note}"
