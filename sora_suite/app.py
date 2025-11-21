@@ -2798,7 +2798,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 font-weight: 600;
                 letter-spacing: 0.2px;
                 min-height: 30px;
-                box-shadow: 0px 8px 18px rgba(0,0,0,0.22);
             }
             QPushButton:disabled { background: #131a2a; border-color: #1f2a3f; color: #475569; }
             QPushButton:hover {
@@ -3873,7 +3872,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "🧼 Водяной знак",
             self.tab_watermark,
             scrollable=True,
-            category="Рабочие процессы",
+            category="Водяные знаки",
             description="Замена логотипа подбором чистых фрагментов видео",
         )
 
@@ -4024,7 +4023,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "🧐 Проверка ВЗ",
             self.tab_watermark_probe,
             scrollable=True,
-            category="Рабочие процессы",
+            category="Водяные знаки",
             description="Проверка области на вспышку водяного знака и управляемый flip видео",
         )
 
@@ -7109,8 +7108,9 @@ class MainWindow(QtWidgets.QMainWindow):
         status_row.addWidget(self.btn_session_open_window)
         detail_layout.addLayout(status_row)
 
-        actions_row = QtWidgets.QHBoxLayout()
-        actions_row.setSpacing(10)
+        actions_grid = QtWidgets.QGridLayout()
+        actions_grid.setHorizontalSpacing(8)
+        actions_grid.setVerticalSpacing(6)
         self.btn_session_launch_chrome = QtWidgets.QPushButton("Запустить Chrome")
         self.btn_session_run_prompts = QtWidgets.QPushButton("Autogen промптов")
         self.btn_session_run_images = QtWidgets.QPushButton("Только картинки")
@@ -7118,7 +7118,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_session_run_watermark = QtWidgets.QPushButton("Замена водяного знака")
         self.btn_session_open_downloads = QtWidgets.QPushButton("Открыть RAW")
         self.btn_session_stop_runner = QtWidgets.QPushButton("Остановить")
-        for btn in (
+        action_buttons = [
             self.btn_session_launch_chrome,
             self.btn_session_run_prompts,
             self.btn_session_run_images,
@@ -7126,10 +7126,18 @@ class MainWindow(QtWidgets.QMainWindow):
             self.btn_session_run_watermark,
             self.btn_session_open_downloads,
             self.btn_session_stop_runner,
-        ):
+        ]
+        for idx, btn in enumerate(action_buttons):
             btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
-            actions_row.addWidget(btn)
-        detail_layout.addLayout(actions_row)
+            btn.setMinimumHeight(30)
+            btn.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Expanding,
+                QtWidgets.QSizePolicy.Policy.Fixed,
+            )
+            row = idx // 3
+            col = idx % 3
+            actions_grid.addWidget(btn, row, col)
+        detail_layout.addLayout(actions_grid)
 
         self.te_session_log = QtWidgets.QPlainTextEdit()
         self.te_session_log.setReadOnly(True)
