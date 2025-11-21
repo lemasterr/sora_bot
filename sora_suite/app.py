@@ -2526,7 +2526,13 @@ class MainWindow(QtWidgets.QMainWindow):
     def _run_session_images(self, session_id: str):
         self._run_session_autogen(session_id, force_images=True, images_only=True)
 
-    def _run_session_download(self, session_id: str, *, override_limit: Optional[int] = None):
+    def _run_session_download(
+        self,
+        session_id: str,
+        *,
+        override_limit: Optional[int] = None,
+        open_drafts_override: Optional[bool] = None,
+    ):
         session = self._session_cache.get(session_id)
         if not session:
             return
@@ -2553,7 +2559,12 @@ class MainWindow(QtWidgets.QMainWindow):
         env["DOWNLOAD_DIR"] = str(dest_dir)
         env["TITLES_FILE"] = str(titles_path)
         env["TITLES_CURSOR_FILE"] = str(cursor_path)
-        env["OPEN_DRAFTS_FIRST"] = "1" if self._session_open_drafts(session) else "0"
+        open_drafts = (
+            bool(open_drafts_override)
+            if open_drafts_override is not None
+            else self._session_open_drafts(session)
+        )
+        env["OPEN_DRAFTS_FIRST"] = "1" if open_drafts else "0"
         limit_value = (
             self._session_download_limit(session)
             if override_limit is None
@@ -9604,6 +9615,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         def start_task():
             try:
+                session = self._session_cache.get(session_id) or {}
                 if step_type == "session_prompts":
                     self._run_session_autogen(session_id)
                 elif step_type == "session_images":
@@ -9611,7 +9623,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 elif step_type == "session_mix":
                     self._run_session_autogen(session_id, force_images=True)
                 elif step_type == "session_download":
-                    self._run_session_download(session_id, override_limit=limit)
+                    self._run_session_download(
+                        session_id,
+                        override_limit=limit,
+                        open_drafts_override=self._session_open_drafts(session),
+                    )
                 elif step_type == "session_watermark":
                     self._run_session_watermark(session_id)
             finally:
