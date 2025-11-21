@@ -261,13 +261,32 @@ def _long_swipe_once(page) -> None:
     """Один длинный свайп вверх для переключения карточки."""
 
     try:
-        page.mouse.wheel(0, 2400)
+        viewport = page.viewport_size or {"width": 1280, "height": 720}
+        page.mouse.move(viewport["width"] / 2, viewport["height"] * 0.35)
     except Exception:
+        pass
+
+    def _wheel(delta: int) -> bool:
         try:
-            page.evaluate("window.scrollBy(0, arguments[0])", 2400)
+            page.mouse.wheel(0, delta)
+            return True
         except Exception:
-            return
-    page.wait_for_timeout(620)
+            try:
+                page.evaluate("window.scrollBy(0, arguments[0])", delta)
+                return True
+            except Exception:
+                return False
+
+    # один плавный жест из нескольких порций, но без спама
+    performed = False
+    for _ in range(3):
+        performed = _wheel(900) or performed
+        page.wait_for_timeout(160)
+
+    if not performed:
+        _wheel(2400)
+
+    page.wait_for_timeout(820)
 
 
 def _is_near_bottom(page) -> bool:
@@ -405,16 +424,28 @@ def download_current_card(page, save_dir: str) -> bool:
             return False
 
 
+def _current_video_src(page) -> str:
+    try:
+        return page.evaluate("() => document.querySelector('video')?.currentSrc || ''") or ""
+    except Exception:
+        return ""
+
+
 def scroll_to_next_card(page, *, pause_ms: int = 1400, timeout_ms: int = 8000) -> bool:
     """Листает ленту вниз одним длинным свайпом и ждёт смены карточки."""
 
     start_url = page.url
+    start_src = _current_video_src(page)
+
+    def _changed() -> bool:
+        return (page.url != start_url) or (_current_video_src(page) != start_src)
+
     _long_swipe_once(page)
     page.wait_for_timeout(pause_ms)
     try:
         page.wait_for_function(
-            "({ start }) => window.location.href !== start",
-            {"start": start_url},
+            "({ startUrl, startSrc }) => window.location.href !== startUrl || ((document.querySelector('video')?.currentSrc || '') !== startSrc)",
+            {"startUrl": start_url, "startSrc": start_src},
             timeout=timeout_ms,
         )
         try:
@@ -425,15 +456,16 @@ def scroll_to_next_card(page, *, pause_ms: int = 1400, timeout_ms: int = 8000) -
     except PwTimeout:
         pass
 
-    if page.url == start_url:
+    if not _changed():
         long_jitter(0.7, 1.2)
         _long_swipe_once(page)
-        page.wait_for_timeout(int(pause_ms * 0.85))
+        page.wait_for_timeout(int(pause_ms * 0.9))
+
     try:
         page.wait_for_function(
-            "({ start }) => window.location.href !== start",
-            {"start": start_url},
-            timeout=int(timeout_ms * 0.75),
+            "({ startUrl, startSrc }) => window.location.href !== startUrl || ((document.querySelector('video')?.currentSrc || '') !== startSrc)",
+            {"startUrl": start_url, "startSrc": start_src},
+            timeout=int(timeout_ms * 0.9),
         )
         try:
             page.locator(RIGHT_PANEL).wait_for(state="visible", timeout=6500)
@@ -441,7 +473,7 @@ def scroll_to_next_card(page, *, pause_ms: int = 1400, timeout_ms: int = 8000) -
             pass
         return True
     except PwTimeout:
-        return False
+        return _changed()
 
 
 def download_feed_mode(page, desired: int) -> None:
