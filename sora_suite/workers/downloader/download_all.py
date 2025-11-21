@@ -30,7 +30,6 @@ DOWNLOAD_DIR = os.path.abspath(os.getenv("DOWNLOAD_DIR", str(DEFAULT_DOWNLOAD_DI
 TITLES_FILE = os.getenv("TITLES_FILE", str(DEFAULT_TITLES_FILE)).strip()
 TITLES_CURSOR_FILE = os.getenv("TITLES_CURSOR_FILE", str(DEFAULT_CURSOR_FILE)).strip()
 MAX_VIDEOS = int(os.getenv("MAX_VIDEOS", "0") or "0")  # 0 = скачать все
-SCROLL_MODE = os.getenv("SCROLL_MODE", "").lower() in {"1", "true", "yes", "on"}
 
 # ===== UI =====
 DOWNLOAD_MENU_LABELS = ["Download", "Скачать", "Download video", "Save video", "Export"]
@@ -208,55 +207,6 @@ def click_download_in_menu(page, save_dir: str) -> str:
     return target_path
 
 
-def go_back_to_drafts(page) -> None:
-    try:
-        page.locator(BACK_BTN).click(timeout=2000)
-    except PwError:
-        page.go_back(wait_until="domcontentloaded")
-    page.locator(CARD_LINKS).first.wait_for(timeout=10000)
-
-
-def _wait_for_new_cards(page, previous_total: int, timeout_ms: int) -> bool:
-    """Ждёт появления новых карточек; возвращает True при успехе."""
-
-    try:
-        page.wait_for_function(
-            "(arg) => document.querySelectorAll(arg.selector).length > arg.count",
-            {
-                "selector": CARD_LINKS,
-                "count": int(previous_total),
-            },
-            timeout=timeout_ms,
-        )
-        return True
-    except Exception:
-        return False
-
-
-def _smooth_scroll(page, *, distance: int = 1400, pulses: int = 6, pause: tuple[float, float] = (0.1, 0.22)) -> None:
-    """Плавно прокручивает страницу небольшими импульсами."""
-
-    if pulses <= 0:
-        pulses = 1
-    step = max(int(distance / pulses), 120)
-    for _ in range(pulses):
-        try:
-            page.mouse.wheel(0, step)
-        except Exception:
-            try:
-                page.evaluate("window.scrollBy(0, arguments[0])", step)
-            except Exception:
-                break
-        page.wait_for_timeout(int(random.uniform(pause[0], pause[1]) * 1000))
-
-
-def _gentle_scroll_once(page) -> None:
-    """Один мягкий жест прокрутки без спама."""
-
-    _smooth_scroll(page, distance=900, pulses=3, pause=(0.12, 0.2))
-    page.wait_for_timeout(420)
-
-
 def _long_swipe_once(page) -> None:
     """Один длинный свайп вверх для переключения карточки."""
 
@@ -287,97 +237,6 @@ def _long_swipe_once(page) -> None:
         _wheel(2400)
 
     page.wait_for_timeout(820)
-
-
-def _is_near_bottom(page) -> bool:
-    try:
-        return bool(
-            page.evaluate(
-                "() => (window.innerHeight + window.scrollY + 120) >= (document.body ? document.body.scrollHeight : 0)"
-            )
-        )
-    except Exception:
-        return False
-
-
-def collect_card_links(page, desired: int) -> list[str]:
-    """Собирает уникальные ссылки карточек плавной прокруткой ленты."""
-
-    print("[i] Сканирую карточки Sora…")
-    links: list[str] = []
-    seen: set[str] = set()
-    stagnation = 0
-    satisfied_rounds = 0
-    rounds = 0
-
-    target_only = desired > 0
-    settle_rounds = 2 if target_only else 1
-
-    try:
-        page.evaluate("window.scrollTo(0, 0)")
-    except Exception:
-        pass
-
-    cards = page.locator(CARD_LINKS)
-    cards.first.wait_for(timeout=10000)
-
-    while True:
-        current = []
-        try:
-            current = page.eval_on_selector_all(
-                CARD_LINKS,
-                "elements => elements.map(el => el.href).filter(Boolean)",
-            )
-        except Exception:
-            current = []
-
-        dom_count = len(current)
-        added = 0
-        for href in current:
-            if href not in seen:
-                seen.add(href)
-                links.append(href)
-                added += 1
-
-        if added:
-            print(f"[i] Найдено карточек: {len(links)}")
-            stagnation = 0
-        else:
-            stagnation += 1
-
-        if target_only and len(links) >= desired:
-            satisfied_rounds += 1
-        else:
-            satisfied_rounds = 0
-
-        stagnation_limit = 12 if target_only else 6
-        if (
-            (target_only and satisfied_rounds >= settle_rounds)
-            or stagnation >= stagnation_limit
-            or rounds >= (220 if target_only else 120)
-        ):
-            break
-
-        rounds += 1
-
-        prev_total = dom_count
-        pulses = 8 if target_only else 5
-        distance = 1800 if target_only else 1200
-        _smooth_scroll(page, distance=distance, pulses=pulses)
-
-        waited = _wait_for_new_cards(page, prev_total, 2200 if target_only else 1400)
-        if not waited:
-            long_jitter(0.9, 1.4 if target_only else 1.0)
-        if target_only and _is_near_bottom(page):
-            # если дошли до конца, ждём возможной догрузки и завершаем
-            page.wait_for_timeout(700)
-            _wait_for_new_cards(page, len(current), 1400)
-            break
-
-        long_jitter(1.05, 1.55 if target_only else 1.2)
-
-    print(f"[i] Итого уникальных карточек: {len(links)}")
-    return links
 
 
 def ensure_card_open(page) -> bool:
@@ -524,39 +383,11 @@ def main() -> None:
 
             desired = MAX_VIDEOS if MAX_VIDEOS > 0 else 0
 
-            if SCROLL_MODE:
-                if not ensure_card_open(page):
-                    print("[x] Не удалось открыть первую карточку — остановка.")
-                    return
-                print("[i] Открыта первая карточка — перехожу в режим скролла.")
-                download_feed_mode(page, desired)
-            else:
-                links = collect_card_links(page, desired)
-
-                if desired:
-                    if len(links) < desired:
-                        print(
-                            f"[!] Найдено только {len(links)} карточек из {desired}. Будут скачаны все доступные."
-                        )
-                    links = links[:desired]
-                    print(f"[i] Скачаю первые {len(links)} карточек")
-                else:
-                    print(f"[i] Скачаю все найденные карточки: {len(links)}")
-
-                for k, href in enumerate(links, 1):
-                    print(f"[>] {k}/{len(links)} — открываю карточку…")
-                    if not open_card(page, href):
-                        print("[!] Карточка недоступна — пропускаю.")
-                        continue
-                    long_jitter()
-                    ok = download_current_card(page, DOWNLOAD_DIR)
-                    long_jitter()
-                    go_back_to_drafts(page)
-                    long_jitter()
-                    try:
-                        page.evaluate("window.scrollTo(0, 0)")
-                    except Exception:
-                        pass
+            if not ensure_card_open(page):
+                print("[x] Не удалось открыть первую карточку — остановка.")
+                return
+            print("[i] Открыта первая карточка — перехожу в режим скролла.")
+            download_feed_mode(page, desired)
 
             print("[i] Готово.")
         except Exception as exc:  # noqa: BLE001

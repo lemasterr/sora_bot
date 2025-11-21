@@ -472,9 +472,11 @@ def normalize_automator_steps(raw_steps: object) -> List[Dict[str, Any]]:
         "session_mix",
         "session_download",
         "session_watermark",
+        "session_chrome",
         "global_blur",
         "global_merge",
         "global_watermark",
+        "global_probe",
     }
 
     for item in raw_steps:
@@ -1349,6 +1351,7 @@ class AutomatorStepDialog(QtWidgets.QDialog):
         self.cmb_type.addItem("🪄 Промпты + картинки (сессии)", "session_mix")
         self.cmb_type.addItem("⬇️ Скачивание видео (сессии)", "session_download")
         self.cmb_type.addItem("🧼 Замена водяного знака (сессии)", "session_watermark")
+        self.cmb_type.addItem("🚀 Открыть Chrome (сессии)", "session_chrome")
         self.cmb_type.addItem("🌫️ Блюр (глобально)", "global_blur")
         self.cmb_type.addItem("🧵 Склейка (глобально)", "global_merge")
         self.cmb_type.addItem("🧼 Замена водяного знака (глобально)", "global_watermark")
@@ -8590,7 +8593,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._scenario_waiters[tag].set()
 
     # ----- Chrome (через тень профиля) -----
-    def _open_chrome(self, *, session: Optional[Dict[str, Any]] = None):
+    def _open_chrome(self, *, session: Optional[Dict[str, Any]] = None) -> bool:
         ch = self.cfg.get("chrome", {})
         if session:
             try:
@@ -8618,7 +8621,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # уже поднят CDP?
         if port_in_use(port) and cdp_ready(port):
             self._post_status(f"Chrome уже поднят (CDP {port})", state="idle")
-            return
+            return True
 
         # активный профиль
         active = None
@@ -8693,14 +8696,16 @@ class MainWindow(QtWidgets.QMainWindow):
                             "shadow": str(shadow_root),
                         },
                     )
-                    return
+                    return True
                 time.sleep(0.25)
 
             self._post_status("CDP не поднялся — проверь бинарь Chrome и порт", state="error")
+            return False
 
         except Exception as e:
             self._post_status(f"Ошибка запуска Chrome/shadow: {e}", state="error")
-
+            return False
+        return False
     # ----- Prompts/Titles -----
     def _prompts_path(self, key: Optional[str] = None) -> Path:
         active = key or self._current_prompt_profile_key or PROMPTS_DEFAULT_KEY
@@ -9103,6 +9108,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "session_mix": "🪄 Промпты + картинки",
             "session_download": "⬇️ Скачивание",
             "session_watermark": "🧼 Замена знака",
+            "session_chrome": "🚀 Chrome",
             "global_blur": "🌫️ Блюр",
             "global_merge": "🧵 Склейка",
             "global_watermark": "🧼 Замена знака (глобально)",
@@ -9287,6 +9293,24 @@ class MainWindow(QtWidgets.QMainWindow):
             sessions = step.get("sessions") or []
             if not sessions:
                 return False
+            if step_type == "session_chrome":
+                for sid in sessions:
+                    session = self._session_cache.get(sid)
+                    if not session:
+                        self._append_activity(f"Сессия {sid} не найдена", kind="error")
+                        return False
+                    label = self._session_instance_label(session)
+                    self._post_status(
+                        f"Шаг {idx}/{total}: {self._describe_automator_step(step)} → {label}",
+                        state="running",
+                    )
+                    ok = bool(self._open_chrome(session=session))
+                    if not ok:
+                        self._append_activity(
+                            f"Chrome не запущен для {label}", kind="error", card_text=False
+                        )
+                        return False
+                return True
             limit_override = int(step.get("limit", 0) or 0) if step_type == "session_download" else 0
             for sid in sessions:
                 session = self._session_cache.get(sid)
