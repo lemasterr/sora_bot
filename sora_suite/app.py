@@ -7703,27 +7703,30 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sig_set_status.connect(self._slot_set_status)
         self.sig_log.connect(self._slot_log)
 
-        def connect_if_alive(widget: QtWidgets.QWidget | None, signal_name: str, slot):
+        def connect_if_alive(widget: QtWidgets.QWidget | None, signal_name: str, slot) -> bool:
             """Safely connect a signal if the widget is still alive.
 
-            In the new layout some autopost widgets can be destroyed when cards are
+            In the new layout some widgets can be destroyed when cards are
             reconstructed; guard against deleted Qt wrappers or missing signals to
             keep startup stable.
             """
 
             if widget is None:
-                return
+                return False
 
             try:
                 if hasattr(widget, "isWidgetType") and sip.isdeleted(widget):
-                    return
+                    return False
                 signal = getattr(widget, signal_name, None)
-                if signal is None:
-                    return
+                if signal is None or not hasattr(signal, "connect"):
+                    return False
                 signal.connect(slot)
+                return True
             except RuntimeError:
                 # Widget might have been deleted between the guard and connect
-                return
+                return False
+            except Exception:
+                return False
 
         self.cmb_chrome_profile_top.currentIndexChanged.connect(self._on_top_chrome_profile_changed)
         self.cmb_chrome_profile_top.currentIndexChanged.connect(lambda *_: self._refresh_pipeline_context())
@@ -7909,26 +7912,26 @@ class MainWindow(QtWidgets.QMainWindow):
         connect_if_alive(self.btn_tt_secret, "clicked", lambda: self._browse_file(self.ed_tt_secret, "Выбери файл секретов", "JSON (*.json);;YAML (*.yaml *.yml);;Все файлы (*.*)"))
         connect_if_alive(self.btn_tt_secret_load, "clicked", self._load_tiktok_secret_file)
         if hasattr(self, "btn_context_session_window"):
-            self.btn_context_session_window.clicked.connect(self._on_session_open_window)
+            connect_if_alive(self.btn_context_session_window, "clicked", self._on_session_open_window)
         if hasattr(self, "btn_context_session_prompts"):
-            self.btn_context_session_prompts.clicked.connect(self._on_session_run_prompts)
+            connect_if_alive(self.btn_context_session_prompts, "clicked", self._on_session_run_prompts)
         if hasattr(self, "btn_context_session_images"):
-            self.btn_context_session_images.clicked.connect(self._on_session_run_images)
+            connect_if_alive(self.btn_context_session_images, "clicked", self._on_session_run_images)
         if hasattr(self, "btn_context_session_download"):
-            self.btn_context_session_download.clicked.connect(self._on_session_run_download)
+            connect_if_alive(self.btn_context_session_download, "clicked", self._on_session_run_download)
         if hasattr(self, "btn_context_session_watermark"):
-            self.btn_context_session_watermark.clicked.connect(self._on_session_run_watermark)
+            connect_if_alive(self.btn_context_session_watermark, "clicked", self._on_session_run_watermark)
         if hasattr(self, "btn_context_session_probe"):
-            self.btn_context_session_probe.clicked.connect(lambda: self._select_section("watermark_probe"))
+            connect_if_alive(self.btn_context_session_probe, "clicked", lambda: self._select_section("watermark_probe"))
         if hasattr(self, "btn_context_tg_test"):
-            self.btn_context_tg_test.clicked.connect(self._test_tg_settings)
+            connect_if_alive(self.btn_context_tg_test, "clicked", self._test_tg_settings)
         if hasattr(self, "btn_context_tg_open"):
-            self.btn_context_tg_open.clicked.connect(lambda: self._select_section("telegram"))
+            connect_if_alive(self.btn_context_tg_open, "clicked", lambda: self._select_section("telegram"))
         if hasattr(self, "btn_context_open_autopost"):
             connect_if_alive(self.btn_context_open_autopost, "clicked", lambda: self._select_section("autopost"))
         if hasattr(self, "btn_context_refresh_queues"):
-            self.btn_context_refresh_queues.clicked.connect(self._update_youtube_queue_label)
-            self.btn_context_refresh_queues.clicked.connect(self._update_tiktok_queue_label)
+            connect_if_alive(self.btn_context_refresh_queues, "clicked", self._update_youtube_queue_label)
+            connect_if_alive(self.btn_context_refresh_queues, "clicked", self._update_tiktok_queue_label)
         if hasattr(self, "btn_context_open_project"):
             self.btn_context_open_project.clicked.connect(
                 lambda: open_in_finder(self.cfg.get("project_root", str(PROJECT_ROOT)))
@@ -8032,7 +8035,7 @@ class MainWindow(QtWidgets.QMainWindow):
             button = getattr(self, button_attr, None)
             line = getattr(self, line_attr, None)
             if isinstance(button, QtWidgets.QAbstractButton) and isinstance(line, QtWidgets.QLineEdit):
-                button.clicked.connect(lambda _, l=line: self._open_path_from_edit(l))
+                connect_if_alive(button, "clicked", lambda _, l=line: self._open_path_from_edit(l))
 
     def _init_state(self):
         self.runner_autogen = ProcRunner("AUTOGEN")
