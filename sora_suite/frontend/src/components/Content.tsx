@@ -1,20 +1,44 @@
-import React, { useMemo, useState } from 'react';
-import { ContentFile, TitleEntry, WorkspaceProfile } from '../types';
-
-const defaultProfiles: WorkspaceProfile[] = [
-  { id: 'profile-1', name: 'Creator Alpha', port: 9222, status: 'running' },
-  { id: 'profile-2', name: 'Creator Beta', port: 9333, status: 'idle' },
-];
-
-const initialContent: ContentFile[] = [
-  { id: 'prompts', label: 'Prompts', value: '', path: '/prompts.txt' },
-  { id: 'imagePrompts', label: 'Image Prompts', value: '', path: '/image_prompts.txt' },
-];
+import React, { useEffect, useMemo, useState } from 'react';
+import { ContentFile, ContentPayload, ContentState, TitleEntry, WorkspaceProfile } from '../types';
+import { loadContent, loadConfig, saveContent } from '../api/backend';
 
 const Content: React.FC = () => {
-  const [files, setFiles] = useState<ContentFile[]>(initialContent);
+  const [files, setFiles] = useState<ContentFile[]>([]);
   const [titles, setTitles] = useState<TitleEntry[]>([]);
-  const [selectedProfile, setSelectedProfile] = useState<string>(defaultProfiles[0].id);
+  const [selectedProfile, setSelectedProfile] = useState<string>('');
+  const [paths, setPaths] = useState<ContentPayload>({});
+  const [profiles, setProfiles] = useState<WorkspaceProfile[]>([]);
+
+  useEffect(() => {
+    loadContent()?.then((content: ContentState | undefined) => {
+      if (!content) return;
+      setFiles([
+        { id: 'prompts', label: 'Prompts', value: content.prompts, path: content.promptsPath },
+        { id: 'imagePrompts', label: 'Image Prompts', value: content.imagePrompts, path: content.imagePromptsPath },
+      ]);
+      setPaths({
+        promptsPath: content.promptsPath,
+        imagePromptsPath: content.imagePromptsPath,
+        titlesPath: content.titlesPath,
+      });
+      setTitles([{ profileId: 'global', title: content.titles }]);
+      setSelectedProfile('global');
+    });
+
+    loadConfig()?.then((cfg) => {
+      const sessions = cfg?.autogen?.sessions || [];
+      const mapped = sessions.map((session) => ({
+        id: session.id || session.name || session.chrome_profile || 'session',
+        name: session.name || session.chrome_profile || 'Chrome Profile',
+        port: session.cdp_port || 0,
+        status: 'idle' as const,
+      }));
+      setProfiles(mapped.length > 0 ? mapped : [{ id: 'global', name: 'General', port: 0, status: 'idle' }]);
+      if (mapped.length > 0) {
+        setSelectedProfile(mapped[0].id);
+      }
+    });
+  }, []);
 
   const updateFile = (id: string, value: string) => {
     setFiles((prev) => prev.map((file) => (file.id === id ? { ...file, value } : file)));
@@ -35,6 +59,17 @@ const Content: React.FC = () => {
     [selectedProfile, titles],
   );
 
+  const persist = (payload: Partial<ContentPayload>) => {
+    const merged: ContentPayload = {
+      ...paths,
+      prompts: files.find((f) => f.id === 'prompts')?.value,
+      imagePrompts: files.find((f) => f.id === 'imagePrompts')?.value,
+      titles: titles.find((t) => t.profileId === selectedProfile)?.title,
+      ...payload,
+    };
+    void saveContent(merged);
+  };
+
   return (
     <div className="p-6 space-y-6">
       <div className="flex items-center justify-between">
@@ -49,7 +84,7 @@ const Content: React.FC = () => {
             value={selectedProfile}
             onChange={(event) => setSelectedProfile(event.target.value)}
           >
-            {defaultProfiles.map((profile) => (
+            {profiles.map((profile) => (
               <option key={profile.id} value={profile.id}>
                 {profile.name}
               </option>
@@ -66,7 +101,12 @@ const Content: React.FC = () => {
                 <p className="text-xs uppercase text-gray-400">{file.path}</p>
                 <h2 className="text-lg font-semibold text-white">{file.label}</h2>
               </div>
-              <button className="rounded-lg border border-gray-700 px-3 py-1 text-xs text-gray-200">Save</button>
+              <button
+                className="rounded-lg border border-gray-700 px-3 py-1 text-xs text-gray-200"
+                onClick={() => persist({})}
+              >
+                Save
+              </button>
             </div>
             <textarea
               className="mt-3 h-48 w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-gray-100 focus:border-indigo-500 focus:outline-none"
@@ -80,11 +120,16 @@ const Content: React.FC = () => {
         <div className="rounded-xl border border-gray-800 bg-gray-900 p-4 shadow-lg">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-xs uppercase text-gray-400">/titles.txt</p>
+              <p className="text-xs uppercase text-gray-400">{paths.titlesPath || '/titles.txt'}</p>
               <h2 className="text-lg font-semibold text-white">Titles (per profile)</h2>
               <p className="text-xs text-gray-400">Titles are stored for each Chrome profile independently.</p>
             </div>
-            <button className="rounded-lg border border-gray-700 px-3 py-1 text-xs text-gray-200">Save</button>
+            <button
+              className="rounded-lg border border-gray-700 px-3 py-1 text-xs text-gray-200"
+              onClick={() => persist({})}
+            >
+              Save
+            </button>
           </div>
           <textarea
             className="mt-3 h-48 w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-gray-100 focus:border-indigo-500 focus:outline-none"

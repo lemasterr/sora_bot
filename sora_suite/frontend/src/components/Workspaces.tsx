@@ -1,42 +1,81 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { RefreshCcw, Play, Square, Bug } from 'lucide-react';
-import { WorkspaceProfile } from '../types';
+import { AppConfigSession, BackendTaskEvent, WorkspaceProfile } from '../types';
+import { loadConfig, onTaskEvent, startTask, stopTask } from '../api/backend';
 
-const mockProfiles: WorkspaceProfile[] = [
-  {
-    id: 'profile-1',
-    name: 'Creator Alpha',
-    port: 9222,
-    status: 'running',
-    downloadLimit: 20,
-    mergeLimit: 5,
-    lastLog: {
-      timestamp: new Date().toISOString(),
-      level: 'info',
-      message: 'Downloading latest batch…',
-    },
-  },
-  {
-    id: 'profile-2',
-    name: 'Creator Beta',
-    port: 9333,
-    status: 'idle',
-    downloadLimit: 10,
-    mergeLimit: 3,
-    lastLog: {
-      timestamp: new Date().toISOString(),
-      level: 'warn',
-      message: 'Awaiting new prompts.',
-    },
-  },
-];
+const mapSessionToProfile = (session: AppConfigSession): WorkspaceProfile => ({
+  id: session.id || session.name || session.chrome_profile || 'session',
+  name: session.name || session.chrome_profile || 'Chrome Profile',
+  port: session.cdp_port || 9222,
+  status: 'idle',
+  downloadLimit: session.max_videos,
+  mergeLimit: undefined,
+});
 
 const Workspaces: React.FC = () => {
-  const [profiles, setProfiles] = useState<WorkspaceProfile[]>(mockProfiles);
+  const [profiles, setProfiles] = useState<WorkspaceProfile[]>([]);
+  const [running, setRunning] = useState<Record<string, number>>({});
+
+  useEffect(() => {
+    loadConfig()?.then((cfg) => {
+      const sessions = cfg?.autogen?.sessions || [];
+      const mapped = sessions.map(mapSessionToProfile);
+      setProfiles(mapped);
+    });
+
+    const unsub = onTaskEvent((event: BackendTaskEvent) => {
+      if (event.kind === 'log') {
+        setProfiles((current) =>
+          current.map((profile) =>
+            running[profile.id] === event.pid
+              ? {
+                  ...profile,
+                  lastLog: {
+                    timestamp: new Date().toISOString(),
+                    level: event.channel === 'stderr' ? 'error' : 'info',
+                    message: event.line || '',
+                  },
+                  status: 'running',
+                }
+              : profile,
+          ),
+        );
+      }
+      if (event.kind === 'exit') {
+        setProfiles((current) =>
+          current.map((profile) =>
+            running[profile.id] === event.pid
+              ? {
+                  ...profile,
+                  status: event.code === 0 ? 'idle' : 'error',
+                  lastLog: {
+                    timestamp: new Date().toISOString(),
+                    level: event.code === 0 ? 'info' : 'error',
+                    message: event.code === 0 ? 'Задача завершена' : `Ошибка (код ${event.code})`,
+                  },
+                }
+              : profile,
+          ),
+        );
+        setRunning((curr) => {
+          const next = { ...curr };
+          Object.entries(next).forEach(([key, pid]) => {
+            if (pid === event.pid) delete next[key];
+          });
+          return next;
+        });
+      }
+    });
+    return () => {
+      unsub?.();
+    };
+  }, [running]);
 
   const handleRefresh = () => {
-    // Placeholder: replace with IPC call to reload Chrome profiles
-    setProfiles([...mockProfiles]);
+    loadConfig()?.then((cfg) => {
+      const sessions = cfg?.autogen?.sessions || [];
+      setProfiles(sessions.map(mapSessionToProfile));
+    });
   };
 
   const handleLimitChange = (id: string, field: 'downloadLimit' | 'mergeLimit', value: number) => {
@@ -44,6 +83,37 @@ const Workspaces: React.FC = () => {
       current.map((profile) =>
         profile.id === id ? { ...profile, [field]: isNaN(value) ? undefined : value } : profile,
       ),
+    );
+  };
+
+  const handleStart = async (profile: WorkspaceProfile) => {
+    const env: Record<string, string> = {
+      SORA_INSTANCE_NAME: profile.id,
+    };
+    if (profile.port) {
+      env.CDP_ENDPOINT = `http://127.0.0.1:${profile.port}`;
+    }
+    const result = await startTask({ task: 'autogen', env });
+    if (result?.pid) {
+      setRunning((curr) => ({ ...curr, [profile.id]: result.pid }));
+      setProfiles((current) =>
+        current.map((p) => (p.id === profile.id ? { ...p, status: 'running' as const } : p)),
+      );
+    }
+  };
+
+  const handleStop = async (profile: WorkspaceProfile) => {
+    const pid = running[profile.id];
+    if (pid) {
+      await stopTask(pid);
+    }
+    setRunning((curr) => {
+      const next = { ...curr };
+      delete next[profile.id];
+      return next;
+    });
+    setProfiles((current) =>
+      current.map((p) => (p.id === profile.id ? { ...p, status: 'idle' as const } : p)),
     );
   };
 
@@ -125,13 +195,28 @@ const Workspaces: React.FC = () => {
             </div>
 
             <div className="mt-4 flex items-center gap-3">
-              <button className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-gradient-to-r from-blue-500 to-indigo-500 px-3 py-2 text-sm font-medium text-white shadow">
+              <button
+                className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-gradient-to-r from-blue-500 to-indigo-500 px-3 py-2 text-sm font-medium text-white shadow"
+                onClick={() => handleStart(profile)}
+                disabled={profile.status === 'running'}
+              >
                 <Play size={16} /> Start
               </button>
-              <button className="flex items-center justify-center gap-2 rounded-lg border border-gray-700 px-3 py-2 text-sm font-medium text-gray-100">
+              <button
+                className="flex items-center justify-center gap-2 rounded-lg border border-gray-700 px-3 py-2 text-sm font-medium text-gray-100"
+                onClick={() => handleStop(profile)}
+                disabled={!running[profile.id]}
+              >
                 <Square size={16} /> Stop
               </button>
-              <button className="flex items-center justify-center gap-2 rounded-lg border border-gray-700 px-3 py-2 text-sm font-medium text-gray-100">
+              <button
+                className="flex items-center justify-center gap-2 rounded-lg border border-gray-700 px-3 py-2 text-sm font-medium text-gray-100"
+                onClick={() => {
+                  if (profile.port) {
+                    window.open(`http://127.0.0.1:${profile.port}`, '_blank');
+                  }
+                }}
+              >
                 <Bug size={16} /> Debugger
               </button>
             </div>

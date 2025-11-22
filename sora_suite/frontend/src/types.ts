@@ -107,6 +107,36 @@ export interface SettingsState {
   maintenance: MaintenanceSettings;
 }
 
+export interface AppConfigSession {
+  id?: string;
+  name?: string;
+  chrome_profile?: string;
+  prompt_profile?: string;
+  cdp_port?: number;
+  prompts_file?: string;
+  image_prompts_file?: string;
+  submitted_log?: string;
+  failed_log?: string;
+  notes?: string;
+  auto_launch_chrome?: boolean;
+  auto_launch_autogen?: string;
+  download_dir?: string;
+  clean_dir?: string;
+  titles_file?: string;
+  cursor_file?: string;
+  max_videos?: number;
+  open_drafts?: boolean;
+}
+
+export interface AppConfig {
+  autogen?: { sessions?: AppConfigSession[]; workdir?: string; image_prompts_file?: string; prompts_file?: string };
+  downloader?: { max_videos?: number; open_drafts?: boolean; workdir?: string; entry?: string };
+  titles_file?: string;
+  youtube?: Record<string, unknown>;
+  tiktok?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
 export interface ErrorEvent {
   id: string;
   timestamp: string;
@@ -123,4 +153,33 @@ export interface HistoryEntry {
   action: string;
   status: 'pending' | 'running' | 'success' | 'failed';
   details?: string;
+}
+
+export interface BackendTaskEvent {
+  kind: 'start' | 'log' | 'exit';
+  pid: number;
+  task: string;
+  channel?: 'stdout' | 'stderr';
+  line?: string;
+  code?: number | null;
+  signal?: string | null;
+}
+
+export interface ContentState {
+  prompts: string;
+  imagePrompts: string;
+  titles: string;
+  promptsPath: string;
+  imagePromptsPath: string;
+  titlesPath: string;
+  config?: AppConfig;
+}
+
+export interface ContentPayload {
+  prompts?: string;
+  imagePrompts?: string;
+  titles?: string;
+  promptsPath?: string;
+  imagePromptsPath?: string;
+  titlesPath?: string;
 }

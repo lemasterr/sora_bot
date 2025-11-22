@@ -35,6 +35,11 @@
 - `src/components/` — страницы Dashboard, Workspaces (с переносом лимитов), Automator, Content (титулы по профилям), Settings (обновлённые вкладки), Telegram, Errors, History, Docs, Watermark Check.
 - `src/types.ts` — актуальные типы без старого пайлайна/автопостинга.
 
+### Интеграция с бэкендом
+- Кнопки Workspaces запускают `python -m workers.autogen.main` с параметрами сессии из `app_config.yaml` через IPC Electron. Логи/stdout прокидываются в UI.
+- Вкладка Content читает/сохраняет `prompts.txt`, `image_prompts.txt` и `titles.txt` из указанного в конфиге каталога.
+- История тянется из `history.jsonl` (берутся последние записи) без ручного перезапуска.
+
 ## Что осталось в бэкенде
 Воркеры и утилиты на Python (автоген, скачка, ffmpeg, watermark detector и др.) сохранены без изменений. Они могут вызываться через новый интерфейс/IPC, но визуальная оболочка PyQt больше не запускается.
 
