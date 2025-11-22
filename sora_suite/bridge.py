@@ -41,6 +41,7 @@ def _apply_common_env(payload: Dict[str, Any]) -> None:
     _set_env("SORA_FAILED_LOG", payload.get("failed_log"))
     _set_env("SORA_INSTANCE_NAME", payload.get("instance_name"))
     _set_env("GENAI_IMAGE_PROMPTS_FILE", payload.get("image_prompts_file"))
+    _set_env("APP_CONFIG_PATH", payload.get("app_config_path"))
 
     cdp = str(payload.get("cdp_endpoint", "")).strip()
     if cdp:

@@ -68,6 +68,7 @@ const App: React.FC = () => {
   >('idle');
   const [bootProgress, setBootProgress] = useState(0);
   const [isBooting, setIsBooting] = useState(true);
+  const [hasBridge, setHasBridge] = useState(() => typeof window !== 'undefined' && Boolean(window.electronAPI));
 
   const countdown = useCountdown(isRunning && activeTask === 'pipeline');
 
@@ -86,6 +87,8 @@ const App: React.FC = () => {
       setBootProgress(100);
       setTimeout(() => setIsBooting(false), 300);
     });
+
+    setHasBridge(typeof window !== 'undefined' && Boolean(window.electronAPI));
 
     return () => {
       dispose?.();
@@ -154,6 +157,7 @@ const App: React.FC = () => {
     submitted_log: submittedLog || undefined,
     failed_log: failedLog || undefined,
     image_prompts_file: imagePromptsFile || undefined,
+    app_config_path: appConfigPath || undefined,
     cdp_endpoint: cdpEndpoint,
     downloads_dir: downloadsDir,
     titles_file: titlesFile || undefined,
@@ -309,6 +313,16 @@ const App: React.FC = () => {
 
           <div className="relative grid flex-1 grid-cols-1 gap-6 overflow-y-auto px-4 py-6 md:grid-cols-[1.2fr_1fr] lg:px-8">
             <section className="space-y-6">
+              {!hasBridge && (
+                <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-4 text-sm text-amber-100 shadow-lg shadow-amber-900">
+                  <p className="font-semibold">Preload not detected.</p>
+                  <p className="text-amber-50/80">
+                    The Electron preload script did not attach. Run via <code className="font-mono">npm run dev</code> or rebuild with
+                    <code className="font-mono"> npm run build && npm run app:dist</code>. If you opened <code className="font-mono">dist/index.html</code> in a browser,
+                    IPC is unavailable.
+                  </p>
+                </div>
+              )}
               <div className="rounded-2xl border border-white/5 bg-white/5 p-6 shadow-xl shadow-black/30 backdrop-blur-xl">
                 <div className="mb-6 flex items-start justify-between gap-4">
                   <div>

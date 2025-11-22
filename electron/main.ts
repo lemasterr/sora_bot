@@ -1,4 +1,5 @@
 import { app, BrowserWindow, ipcMain, shell } from 'electron';
+import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 
@@ -30,7 +31,12 @@ const createWindow = () => {
     mainWindow.webContents.openDevTools({ mode: 'detach' });
   } else {
     const indexPath = path.join(__dirname, '../dist/index.html');
-    mainWindow.loadFile(indexPath);
+    if (fs.existsSync(indexPath)) {
+      mainWindow.loadFile(indexPath);
+    } else {
+      const message = `Renderer bundle missing at ${indexPath}. Run \`npm run build\` first.`;
+      mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(`<pre style="background:#0b0b0f;color:#e5e7eb;padding:24px;font-family:Inter, monospace">${message}</pre>`)}`);
+    }
   }
 
   mainWindow.webContents.setWindowOpenHandler(({ url }: { url: string }) => {
