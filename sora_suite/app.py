@@ -7773,15 +7773,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_save_titles.clicked.connect(self._save_titles)
         self.btn_reset_titles_cursor.clicked.connect(self._reset_titles_cursor)
 
-        self.btn_apply_dl.clicked.connect(self._apply_dl_limit)
+        if hasattr(self, "btn_apply_dl"):
+            self.btn_apply_dl.clicked.connect(self._apply_dl_limit)
         if hasattr(self, "sb_max_videos"):
             self.sb_max_videos.valueChanged.connect(lambda *_: self._refresh_pipeline_context())
         if hasattr(self, "sb_merge_group"):
             self.sb_merge_group.valueChanged.connect(lambda *_: self._refresh_pipeline_context())
-        self.btn_run_scenario.clicked.connect(self._run_scenario)
-        self.btn_run_autogen_images.clicked.connect(self._save_and_run_autogen_images)
-        self.btn_run_watermark.clicked.connect(self._run_watermark)
-        self.btn_open_genai_output.clicked.connect(self._open_genai_output_dir)
+        if hasattr(self, "btn_run_scenario"):
+            self.btn_run_scenario.clicked.connect(self._run_scenario)
+        if hasattr(self, "btn_run_autogen_images"):
+            self.btn_run_autogen_images.clicked.connect(self._save_and_run_autogen_images)
+        if hasattr(self, "btn_run_watermark"):
+            self.btn_run_watermark.clicked.connect(self._run_watermark)
+        if hasattr(self, "btn_open_genai_output"):
+            self.btn_open_genai_output.clicked.connect(self._open_genai_output_dir)
 
         self.btn_save_settings.clicked.connect(self._save_settings_clicked)
         self.btn_save_autogen_cfg.clicked.connect(self._save_autogen_cfg)
