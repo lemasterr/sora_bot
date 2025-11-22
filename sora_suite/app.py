@@ -26,6 +26,7 @@ from functools import partial
 from urllib.request import urlopen, Request
 from collections import deque
 from typing import Optional, List, Union, Tuple, Dict, Callable, Any, Set, Iterable
+import sip
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 
@@ -7684,6 +7685,54 @@ class MainWindow(QtWidgets.QMainWindow):
         # дополнительного состояния не требуется
         return
 
+    def _widget_alive(self, widget: Optional[QtWidgets.QWidget]) -> bool:
+        if widget is None:
+            return False
+        try:
+            return not sip.isdeleted(widget)
+        except Exception:
+            return True
+
+    def _wire_youtube_section(self) -> None:
+        if not self._widget_alive(getattr(self, "btn_youtube_src_browse", None)):
+            return
+
+        self.btn_youtube_src_browse.clicked.connect(
+            lambda: self._browse_dir(self.ed_youtube_src, "Выбери папку с клипами")
+        )
+        self.cb_youtube_draft_only.toggled.connect(self._toggle_youtube_schedule)
+        self.cb_youtube_draft_only.toggled.connect(lambda _: self._update_youtube_queue_label())
+        self.cb_youtube_schedule.toggled.connect(self._toggle_youtube_schedule)
+        self.cb_youtube_schedule.toggled.connect(lambda _: self._update_youtube_queue_label())
+        self.lst_youtube_channels.itemSelectionChanged.connect(self._on_youtube_selected)
+        self.btn_yt_add.clicked.connect(self._on_youtube_add_update)
+        self.btn_yt_delete.clicked.connect(self._on_youtube_delete)
+        self.btn_yt_set_active.clicked.connect(self._on_youtube_set_active)
+        self.btn_yt_client_browse.clicked.connect(
+            lambda: self._browse_file(self.ed_yt_client, "client_secret.json", "JSON (*.json);;Все файлы (*.*)")
+        )
+        self.btn_yt_credentials_browse.clicked.connect(
+            lambda: self._browse_file(self.ed_yt_credentials, "credentials.json", "JSON (*.json);;Все файлы (*.*)")
+        )
+        self.btn_youtube_archive_browse.clicked.connect(
+            lambda: self._browse_dir(self.ed_youtube_archive, "Выбери папку архива")
+        )
+        self.cb_youtube_default_draft.toggled.connect(self._sync_draft_checkbox)
+        self.sb_youtube_default_delay.valueChanged.connect(self._apply_default_delay)
+        self.sb_youtube_interval_default.valueChanged.connect(lambda val: self.sb_youtube_interval.setValue(int(val)))
+        self.sb_youtube_limit_default.valueChanged.connect(lambda val: self.sb_youtube_batch_limit.setValue(int(val)))
+        self.btn_wmr_source_browse.clicked.connect(lambda: self._browse_dir(self.ed_wmr_source, "Выбери папку RAW"))
+        self.btn_wmr_output_browse.clicked.connect(
+            lambda: self._browse_dir(self.ed_wmr_output, "Выбери папку для готовых клипов")
+        )
+        self.btn_wmr_template_browse.clicked.connect(
+            lambda: self._browse_file(
+                self.ed_wmr_template,
+                "Выбери шаблон водяного знака",
+                "Изображения (*.png *.jpg *.jpeg *.bmp);;Все файлы (*.*)",
+            )
+        )
+
     def _wire(self):
         # статусы/лог — безопасные слоты GUI-потока
         self.sig_set_status.connect(self._slot_set_status)
@@ -7803,31 +7852,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_preset_preview.clicked.connect(self._open_blur_preview)
         self.btn_aw_template.clicked.connect(lambda: self._browse_file(self.ed_aw_template, "Выбери шаблон водяного знака", "Изображения (*.png *.jpg *.jpeg *.bmp);;Все файлы (*.*)"))
 
-        self.btn_youtube_src_browse.clicked.connect(lambda: self._browse_dir(self.ed_youtube_src, "Выбери папку с клипами"))
-        self.cb_youtube_draft_only.toggled.connect(self._toggle_youtube_schedule)
-        self.cb_youtube_draft_only.toggled.connect(lambda _: self._update_youtube_queue_label())
-        self.cb_youtube_schedule.toggled.connect(self._toggle_youtube_schedule)
-        self.cb_youtube_schedule.toggled.connect(lambda _: self._update_youtube_queue_label())
-        self.lst_youtube_channels.itemSelectionChanged.connect(self._on_youtube_selected)
-        self.btn_yt_add.clicked.connect(self._on_youtube_add_update)
-        self.btn_yt_delete.clicked.connect(self._on_youtube_delete)
-        self.btn_yt_set_active.clicked.connect(self._on_youtube_set_active)
-        self.btn_yt_client_browse.clicked.connect(lambda: self._browse_file(self.ed_yt_client, "client_secret.json", "JSON (*.json);;Все файлы (*.*)"))
-        self.btn_yt_credentials_browse.clicked.connect(lambda: self._browse_file(self.ed_yt_credentials, "credentials.json", "JSON (*.json);;Все файлы (*.*)"))
-        self.btn_youtube_archive_browse.clicked.connect(lambda: self._browse_dir(self.ed_youtube_archive, "Выбери папку архива"))
-        self.cb_youtube_default_draft.toggled.connect(self._sync_draft_checkbox)
-        self.sb_youtube_default_delay.valueChanged.connect(self._apply_default_delay)
-        self.sb_youtube_interval_default.valueChanged.connect(lambda val: self.sb_youtube_interval.setValue(int(val)))
-        self.sb_youtube_limit_default.valueChanged.connect(lambda val: self.sb_youtube_batch_limit.setValue(int(val)))
-        self.btn_wmr_source_browse.clicked.connect(lambda: self._browse_dir(self.ed_wmr_source, "Выбери папку RAW"))
-        self.btn_wmr_output_browse.clicked.connect(lambda: self._browse_dir(self.ed_wmr_output, "Выбери папку для готовых клипов"))
-        self.btn_wmr_template_browse.clicked.connect(
-            lambda: self._browse_file(
-                self.ed_wmr_template,
-                "Выбери шаблон водяного знака",
-                "Изображения (*.png *.jpg *.jpeg *.bmp);;Все файлы (*.*)",
-            )
-        )
+        self._wire_youtube_section()
         if hasattr(self, "btn_probe_source_browse"):
             self.btn_probe_source_browse.clicked.connect(
                 lambda: self._browse_dir(self.ed_probe_source, "Выбери папку RAW для проверки")
@@ -7854,15 +7879,20 @@ class MainWindow(QtWidgets.QMainWindow):
             self.btn_probe_batch_scan.clicked.connect(lambda: self._run_watermark_probe_batch(flip=False))
         if hasattr(self, "btn_probe_batch_flip"):
             self.btn_probe_batch_flip.clicked.connect(lambda: self._run_watermark_probe_batch(flip=True))
-        self.btn_tiktok_archive_browse.clicked.connect(lambda: self._browse_dir(self.ed_tiktok_archive, "Выбери папку архива"))
-        self.sb_tiktok_default_delay.valueChanged.connect(self._apply_tiktok_default_delay)
-        self.sb_tiktok_interval_default.valueChanged.connect(lambda val: self.sb_tiktok_interval.setValue(int(val)))
-        self.sb_tiktok_limit_default.valueChanged.connect(lambda val: self.sb_tiktok_batch_limit.setValue(int(val)))
-        self.sb_youtube_interval.valueChanged.connect(self._reflect_youtube_interval)
-        self.sb_youtube_batch_limit.valueChanged.connect(self._reflect_youtube_limit)
-        self.btn_youtube_refresh.clicked.connect(self._update_youtube_queue_label)
-        self.btn_youtube_start.clicked.connect(self._start_youtube_single)
-        self.ed_youtube_src.textChanged.connect(lambda _: self._update_youtube_queue_label())
+        if self._widget_alive(getattr(self, "btn_tiktok_archive_browse", None)):
+            self.btn_tiktok_archive_browse.clicked.connect(
+                lambda: self._browse_dir(self.ed_tiktok_archive, "Выбери папку архива")
+            )
+            self.sb_tiktok_default_delay.valueChanged.connect(self._apply_tiktok_default_delay)
+            self.sb_tiktok_interval_default.valueChanged.connect(lambda val: self.sb_tiktok_interval.setValue(int(val)))
+            self.sb_tiktok_limit_default.valueChanged.connect(lambda val: self.sb_tiktok_batch_limit.setValue(int(val)))
+
+        if self._widget_alive(getattr(self, "btn_youtube_refresh", None)):
+            self.sb_youtube_interval.valueChanged.connect(self._reflect_youtube_interval)
+            self.sb_youtube_batch_limit.valueChanged.connect(self._reflect_youtube_limit)
+            self.btn_youtube_refresh.clicked.connect(self._update_youtube_queue_label)
+            self.btn_youtube_start.clicked.connect(self._start_youtube_single)
+            self.ed_youtube_src.textChanged.connect(lambda _: self._update_youtube_queue_label())
         self.dt_youtube_publish.dateTimeChanged.connect(self._sync_delay_from_datetime)
         self.btn_tg_test.clicked.connect(self._test_tg_settings)
 
