@@ -7848,7 +7848,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.btn_youtube_refresh.clicked.connect(self._update_youtube_queue_label)
             self.btn_youtube_start.clicked.connect(self._start_youtube_single)
             self.ed_youtube_src.textChanged.connect(lambda _: self._update_youtube_queue_label())
-        self.dt_youtube_publish.dateTimeChanged.connect(self._sync_delay_from_datetime)
+        if self._widget_alive(getattr(self, "dt_youtube_publish", None)):
+            self.dt_youtube_publish.dateTimeChanged.connect(self._sync_delay_from_datetime)
         self.btn_tg_test.clicked.connect(self._test_tg_settings)
 
         self.lst_tiktok_profiles.itemSelectionChanged.connect(self._on_tiktok_selected)
