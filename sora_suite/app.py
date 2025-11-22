@@ -46,6 +46,13 @@ IMAGES_DIR = PROJECT_ROOT / "generated_images"
 HIST_FILE = PROJECT_ROOT / "history.jsonl"   # JSONL по-умолчанию (с обратн. совместимостью)
 TITLES_FILE = PROJECT_ROOT / "titles.txt"
 
+# --- включаемые разделы интерфейса ---
+ENABLE_PIPELINE = False
+ENABLE_WATERMARK = False
+ENABLE_AUTPOST = False
+ENABLE_SOCIAL_UPLOAD = False  # YouTube и TikTok
+ENABLE_CHROME_SETTINGS = False
+
 
 # ---------- утилиты ----------
 
@@ -1008,14 +1015,16 @@ class SessionWorkspaceWindow(QtWidgets.QDialog):
         picker_row.setContentsMargins(0, 0, 0, 0)
         self.cmb_action = QtWidgets.QComboBox()
         self.cmb_action.setObjectName("sessionActionCombo")
-        self.cmb_action.addItems([
+        combo_actions = [
             "Выбери действие",
             "Запуск Chrome",
             "Промпты Sora",
             "Генерация картинок",
             "Скачивание видео",
-            "Замена водяного знака",
-        ])
+        ]
+        if ENABLE_WATERMARK:
+            combo_actions.append("Замена водяного знака")
+        self.cmb_action.addItems(combo_actions)
         self.cmb_action.setMinimumWidth(200)
         self.cmb_action.setEditable(False)
         self.btn_start_action = QtWidgets.QPushButton("Старт")
@@ -1042,10 +1051,13 @@ class SessionWorkspaceWindow(QtWidgets.QDialog):
             self.btn_run_prompts,
             self.btn_run_images,
             self.btn_run_download,
-            self.btn_run_watermark,
             self.btn_open_downloads,
             self.btn_stop,
         ]
+        if ENABLE_WATERMARK:
+            action_buttons.insert(4, self.btn_run_watermark)
+        else:
+            self.btn_run_watermark.hide()
         for idx, btn in enumerate(action_buttons):
             btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
             btn.setMinimumHeight(32)
@@ -3608,13 +3620,13 @@ class MainWindow(QtWidgets.QMainWindow):
         link_layout = QtWidgets.QHBoxLayout(quick_links)
         link_layout.setContentsMargins(16, 12, 16, 12)
         link_layout.setSpacing(10)
-        btn_to_workflow = QtWidgets.QPushButton("🧠 К пайплайну")
-        btn_to_workflow.clicked.connect(lambda: self._select_section("pipeline"))
         btn_to_automator = QtWidgets.QPushButton("🤖 Открыть автоматизатор")
         btn_to_automator.clicked.connect(lambda: self._select_section("automator"))
         btn_to_logs = QtWidgets.QPushButton("📜 Журналы")
         btn_to_logs.clicked.connect(lambda: self._select_section("logs"))
-        for btn in (btn_to_workflow, btn_to_automator, btn_to_logs):
+        btn_to_settings = QtWidgets.QPushButton("⚙️ Настройки")
+        btn_to_settings.clicked.connect(lambda: self._select_section("settings"))
+        for btn in (btn_to_automator, btn_to_logs, btn_to_settings):
             btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
             link_layout.addWidget(btn)
         link_layout.addStretch(1)
@@ -3659,14 +3671,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_context_session_prompts = QtWidgets.QPushButton("✍️ Промпты")
         self.btn_context_session_images = QtWidgets.QPushButton("🖼️ Картинки")
         self.btn_context_session_download = QtWidgets.QPushButton("⬇️ Скачка")
-        self.btn_context_session_watermark = QtWidgets.QPushButton("🧼 Очистка")
         self.btn_context_session_probe = QtWidgets.QPushButton("🧐 Проверка ВЗ")
         for btn in (
             self.btn_context_session_window,
             self.btn_context_session_prompts,
             self.btn_context_session_images,
             self.btn_context_session_download,
-            self.btn_context_session_watermark,
             self.btn_context_session_probe,
         ):
             btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
@@ -3684,34 +3694,35 @@ class MainWindow(QtWidgets.QMainWindow):
             description="Настройки отдельных Chrome-сессий и связанных файлов",
         )
 
-        pipeline_context, pipeline_ctx_layout = make_context_card(
-            "Пайплайн",
-            "Собери нужные этапы и контролируй лимиты перед запуском."
-        )
-        self.lbl_context_pipeline_profile = QtWidgets.QLabel("—")
-        self.lbl_context_pipeline_profile.setWordWrap(True)
-        self.lbl_context_pipeline_steps = QtWidgets.QLabel("—")
-        self.lbl_context_pipeline_steps.setWordWrap(True)
-        self.lbl_context_pipeline_limits = QtWidgets.QLabel("—")
-        self.lbl_context_pipeline_limits.setWordWrap(True)
-        pipeline_form = QtWidgets.QFormLayout()
-        pipeline_form.setHorizontalSpacing(8)
-        pipeline_form.setVerticalSpacing(6)
-        pipeline_form.addRow("Chrome:", self.lbl_context_pipeline_profile)
-        pipeline_form.addRow("Этапы:", self.lbl_context_pipeline_steps)
-        pipeline_form.addRow("Лимиты:", self.lbl_context_pipeline_limits)
-        pipeline_ctx_layout.addLayout(pipeline_form)
-        pipeline_ctx_layout.addStretch(1)
-        register_context("pipeline", pipeline_context)
-        pipeline_root = self._build_pipeline_page()
-        add_section(
-            "pipeline",
-            "🧠 Пайплайн",
-            pipeline_root,
-            scrollable=True,
-            category="Рабочие процессы",
-            description="Настройка последовательности действий и лимитов",
-        )
+        if ENABLE_PIPELINE:
+            pipeline_context, pipeline_ctx_layout = make_context_card(
+                "Пайплайн",
+                "Собери нужные этапы и контролируй лимиты перед запуском."
+            )
+            self.lbl_context_pipeline_profile = QtWidgets.QLabel("—")
+            self.lbl_context_pipeline_profile.setWordWrap(True)
+            self.lbl_context_pipeline_steps = QtWidgets.QLabel("—")
+            self.lbl_context_pipeline_steps.setWordWrap(True)
+            self.lbl_context_pipeline_limits = QtWidgets.QLabel("—")
+            self.lbl_context_pipeline_limits.setWordWrap(True)
+            pipeline_form = QtWidgets.QFormLayout()
+            pipeline_form.setHorizontalSpacing(8)
+            pipeline_form.setVerticalSpacing(6)
+            pipeline_form.addRow("Chrome:", self.lbl_context_pipeline_profile)
+            pipeline_form.addRow("Этапы:", self.lbl_context_pipeline_steps)
+            pipeline_form.addRow("Лимиты:", self.lbl_context_pipeline_limits)
+            pipeline_ctx_layout.addLayout(pipeline_form)
+            pipeline_ctx_layout.addStretch(1)
+            register_context("pipeline", pipeline_context)
+            pipeline_root = self._build_pipeline_page()
+            add_section(
+                "pipeline",
+                "🧠 Пайплайн",
+                pipeline_root,
+                scrollable=True,
+                category="Рабочие процессы",
+                description="Настройка последовательности действий и лимитов",
+            )
 
         automator_root = self._build_automator_page()
         automator_context, automator_ctx_layout = make_context_card(
@@ -3923,31 +3934,32 @@ class MainWindow(QtWidgets.QMainWindow):
 
         wm_layout.addStretch(1)
 
-        wm_context, wm_ctx_layout = make_context_card(
-            "Замена водяного знака",
-            "Следи за активной папкой и шаблоном, чтобы не запустить обработку не того проекта.",
-        )
-        self.lbl_context_wmr_source = QtWidgets.QLabel("—")
-        self.lbl_context_wmr_output = QtWidgets.QLabel("—")
-        self.lbl_context_wmr_template = QtWidgets.QLabel("—")
-        wm_form = QtWidgets.QFormLayout()
-        wm_form.setHorizontalSpacing(8)
-        wm_form.setVerticalSpacing(6)
-        wm_form.addRow("RAW:", self.lbl_context_wmr_source)
-        wm_form.addRow("Output:", self.lbl_context_wmr_output)
-        wm_form.addRow("Шаблон:", self.lbl_context_wmr_template)
-        wm_ctx_layout.addLayout(wm_form)
-        wm_ctx_layout.addStretch(1)
-        register_context("watermark", wm_context)
+        if ENABLE_WATERMARK:
+            wm_context, wm_ctx_layout = make_context_card(
+                "Замена водяного знака",
+                "Следи за активной папкой и шаблоном, чтобы не запустить обработку не того проекта.",
+            )
+            self.lbl_context_wmr_source = QtWidgets.QLabel("—")
+            self.lbl_context_wmr_output = QtWidgets.QLabel("—")
+            self.lbl_context_wmr_template = QtWidgets.QLabel("—")
+            wm_form = QtWidgets.QFormLayout()
+            wm_form.setHorizontalSpacing(8)
+            wm_form.setVerticalSpacing(6)
+            wm_form.addRow("RAW:", self.lbl_context_wmr_source)
+            wm_form.addRow("Output:", self.lbl_context_wmr_output)
+            wm_form.addRow("Шаблон:", self.lbl_context_wmr_template)
+            wm_ctx_layout.addLayout(wm_form)
+            wm_ctx_layout.addStretch(1)
+            register_context("watermark", wm_context)
 
-        add_section(
-            "watermark",
-            "🧼 Водяной знак",
-            self.tab_watermark,
-            scrollable=True,
-            category="Водяные знаки",
-            description="Замена логотипа подбором чистых фрагментов видео",
-        )
+            add_section(
+                "watermark",
+                "🧼 Водяной знак",
+                self.tab_watermark,
+                scrollable=True,
+                category="Водяные знаки",
+                description="Замена логотипа подбором чистых фрагментов видео",
+            )
 
         wm_probe_cfg = self.cfg.get("watermark_probe", {}) or {}
         self.tab_watermark_probe, wm_probe_layout = make_scroll_tab()
@@ -4725,30 +4737,31 @@ class MainWindow(QtWidgets.QMainWindow):
             description="Редакторы промптов, изображений и заголовков",
         )
 
-        autopost_host = QtWidgets.QWidget()
-        autopost_layout = QtWidgets.QVBoxLayout(autopost_host)
-        autopost_layout.setContentsMargins(0, 0, 0, 0)
-        self.autopost_tabs = QtWidgets.QTabWidget()
-        self.autopost_tabs.setTabPosition(QtWidgets.QTabWidget.TabPosition.North)
-        self.autopost_tabs.addTab(self.tab_youtube, "YouTube")
-        self.autopost_tabs.addTab(self.tab_tiktok, "TikTok")
-        autopost_layout.addWidget(self.autopost_tabs)
-        autopost_context, autopost_ctx_layout = make_context_card(
-            "Очереди",
-            "Контролируй количество роликов в очереди публикаций и обновляй данные перед стартом.",
-        )
-        queue_form = QtWidgets.QFormLayout()
-        queue_form.setHorizontalSpacing(8)
-        queue_form.setVerticalSpacing(6)
-        self.lbl_context_youtube_queue = QtWidgets.QLabel("—")
-        self.lbl_context_tiktok_queue = QtWidgets.QLabel("—")
-        queue_form.addRow("YouTube:", self.lbl_context_youtube_queue)
-        queue_form.addRow("TikTok:", self.lbl_context_tiktok_queue)
-        autopost_ctx_layout.addLayout(queue_form)
-        self.btn_context_refresh_queues = QtWidgets.QPushButton("Обновить очереди")
-        autopost_ctx_layout.addWidget(self.btn_context_refresh_queues)
-        autopost_ctx_layout.addStretch(1)
-        register_context("autopost", autopost_context)
+        if ENABLE_AUTPOST:
+            autopost_host = QtWidgets.QWidget()
+            autopost_layout = QtWidgets.QVBoxLayout(autopost_host)
+            autopost_layout.setContentsMargins(0, 0, 0, 0)
+            self.autopost_tabs = QtWidgets.QTabWidget()
+            self.autopost_tabs.setTabPosition(QtWidgets.QTabWidget.TabPosition.North)
+            self.autopost_tabs.addTab(self.tab_youtube, "YouTube")
+            self.autopost_tabs.addTab(self.tab_tiktok, "TikTok")
+            autopost_layout.addWidget(self.autopost_tabs)
+            autopost_context, autopost_ctx_layout = make_context_card(
+                "Очереди",
+                "Контролируй количество роликов в очереди публикаций и обновляй данные перед стартом.",
+            )
+            queue_form = QtWidgets.QFormLayout()
+            queue_form.setHorizontalSpacing(8)
+            queue_form.setVerticalSpacing(6)
+            self.lbl_context_youtube_queue = QtWidgets.QLabel("—")
+            self.lbl_context_tiktok_queue = QtWidgets.QLabel("—")
+            queue_form.addRow("YouTube:", self.lbl_context_youtube_queue)
+            queue_form.addRow("TikTok:", self.lbl_context_tiktok_queue)
+            autopost_ctx_layout.addLayout(queue_form)
+            self.btn_context_refresh_queues = QtWidgets.QPushButton("Обновить очереди")
+            autopost_ctx_layout.addWidget(self.btn_context_refresh_queues)
+            autopost_ctx_layout.addStretch(1)
+            register_context("autopost", autopost_context)
 
         self.telegram_panel = self._build_telegram_panel()
         telegram_context, telegram_ctx_layout = make_context_card(
@@ -4780,13 +4793,14 @@ class MainWindow(QtWidgets.QMainWindow):
             description="Уведомления, шаблоны и моментальные сообщения в Telegram",
         )
         self._refresh_telegram_history()
-        add_section(
-            "autopost",
-            "📤 Автопостинг",
-            autopost_host,
-            category="Публикации",
-            description="YouTube и TikTok: очереди, расписания и архивы",
-        )
+        if ENABLE_AUTPOST:
+            add_section(
+                "autopost",
+                "📤 Автопостинг",
+                autopost_host,
+                category="Публикации",
+                description="YouTube и TikTok: очереди, расписания и архивы",
+            )
 
         add_section(
             "settings",
@@ -5167,20 +5181,24 @@ class MainWindow(QtWidgets.QMainWindow):
         idx = self._context_index.get(key, getattr(self, "_context_default_idx", 0))
         if self.context_stack.currentIndex() != idx:
             self.context_stack.setCurrentIndex(idx)
-        refresher = {
+        refresher_map = {
             "overview": self._refresh_overview_context,
             "sessions": self._refresh_sessions_context,
-            "pipeline": self._refresh_pipeline_context,
             "automator": self._refresh_automation_context,
             "logs": self._refresh_logs_context,
             "session_logs": self._refresh_session_logs_context,
-            "watermark": self._refresh_watermark_context,
             "watermark_probe": self._refresh_watermark_probe_context,
             "content": self._refresh_content_context,
             "telegram": self._refresh_telegram_context,
-            "autopost": self._refresh_autopost_context,
             "settings": self._refresh_settings_context,
-        }.get(key)
+        }
+        if ENABLE_PIPELINE:
+            refresher_map["pipeline"] = self._refresh_pipeline_context
+        if ENABLE_WATERMARK:
+            refresher_map["watermark"] = self._refresh_watermark_context
+        if ENABLE_AUTPOST:
+            refresher_map["autopost"] = self._refresh_autopost_context
+        refresher = refresher_map.get(key)
         if callable(refresher):
             refresher()
 
@@ -5769,7 +5787,8 @@ class MainWindow(QtWidgets.QMainWindow):
         vlp.addLayout(footer)
         chrome_layout.addWidget(grp_prof)
 
-        self.settings_tabs.addTab(page_chrome, "Chrome")
+        if ENABLE_CHROME_SETTINGS:
+            self.settings_tabs.addTab(page_chrome, "Chrome")
 
         # --- FFmpeg ---
         ff = self.cfg.get("ffmpeg", {})
@@ -7202,10 +7221,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self.btn_session_run_prompts,
             self.btn_session_run_images,
             self.btn_session_run_download,
-            self.btn_session_run_watermark,
             self.btn_session_open_downloads,
             self.btn_session_stop_runner,
         ]
+        if ENABLE_WATERMARK:
+            action_buttons.insert(4, self.btn_session_run_watermark)
+        else:
+            self.btn_session_run_watermark.hide()
         for idx, btn in enumerate(action_buttons):
             btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
             btn.setMinimumHeight(30)
@@ -7307,7 +7329,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_session_run_prompts.clicked.connect(self._on_session_run_prompts)
         self.btn_session_run_images.clicked.connect(self._on_session_run_images)
         self.btn_session_run_download.clicked.connect(self._on_session_run_download)
-        self.btn_session_run_watermark.clicked.connect(self._on_session_run_watermark)
+        if ENABLE_WATERMARK:
+            self.btn_session_run_watermark.clicked.connect(self._on_session_run_watermark)
         self.btn_session_open_downloads.clicked.connect(self._on_session_open_downloads)
         self.btn_session_stop_runner.clicked.connect(self._on_session_stop)
         self.btn_session_open_window.clicked.connect(self._on_session_open_window)
@@ -7684,25 +7707,30 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sig_set_status.connect(self._slot_set_status)
         self.sig_log.connect(self._slot_log)
 
-        self.cmb_chrome_profile_top.currentIndexChanged.connect(self._on_top_chrome_profile_changed)
-        self.cmb_chrome_profile_top.currentIndexChanged.connect(lambda *_: self._refresh_pipeline_context())
-        self.btn_scan_profiles_top.clicked.connect(self._on_toolbar_scan_profiles)
+        if hasattr(self, "cmb_chrome_profile_top"):
+            self.cmb_chrome_profile_top.currentIndexChanged.connect(self._on_top_chrome_profile_changed)
+            self.cmb_chrome_profile_top.currentIndexChanged.connect(lambda *_: self._refresh_pipeline_context())
+        if hasattr(self, "btn_scan_profiles_top"):
+            self.btn_scan_profiles_top.clicked.connect(self._on_toolbar_scan_profiles)
         if hasattr(self, "btn_toggle_commands"):
             self.btn_toggle_commands.toggled.connect(self._on_toolbar_commands_toggle)
-        self.btn_open_chrome.clicked.connect(self._open_chrome)
+        if hasattr(self, "btn_open_chrome"):
+            self.btn_open_chrome.clicked.connect(self._open_chrome)
         self.btn_open_root.clicked.connect(lambda: open_in_finder(self.cfg.get("project_root", PROJECT_ROOT)))
         self.btn_open_raw.clicked.connect(lambda: open_in_finder(self.cfg.get("downloads_dir", DL_DIR)))
         self.btn_collect_raw.clicked.connect(self._gather_session_downloads)
         self.btn_open_blur.clicked.connect(lambda: open_in_finder(self.cfg.get("blurred_dir", BLUR_DIR)))
         self.btn_open_merge.clicked.connect(lambda: open_in_finder(self.cfg.get("merged_dir", MERG_DIR)))
-        self.btn_open_images_top.clicked.connect(self._open_genai_output_dir)
-        self.btn_open_restored_top.clicked.connect(
-            lambda: open_in_finder(
-                _project_path(
-                    self.cfg.get("watermark_cleaner", {}).get("output_dir", str(PROJECT_ROOT / "restored"))
+        if hasattr(self, "btn_open_images_top"):
+            self.btn_open_images_top.clicked.connect(self._open_genai_output_dir)
+        if hasattr(self, "btn_open_restored_top"):
+            self.btn_open_restored_top.clicked.connect(
+                lambda: open_in_finder(
+                    _project_path(
+                        self.cfg.get("watermark_cleaner", {}).get("output_dir", str(PROJECT_ROOT / "restored"))
+                    )
                 )
             )
-        )
         self.btn_stop_all.clicked.connect(self._stop_all)
         self.btn_start_selected.clicked.connect(self._run_scenario)
         self.btn_activity_clear.clicked.connect(self._clear_activity)
@@ -7776,7 +7804,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.sb_merge_group.valueChanged.connect(lambda *_: self._refresh_pipeline_context())
         self.btn_run_scenario.clicked.connect(self._run_scenario)
         self.btn_run_autogen_images.clicked.connect(self._save_and_run_autogen_images)
-        self.btn_run_watermark.clicked.connect(self._run_watermark)
+        if hasattr(self, "btn_run_watermark") and ENABLE_WATERMARK:
+            self.btn_run_watermark.clicked.connect(self._run_watermark)
         self.btn_open_genai_output.clicked.connect(self._open_genai_output_dir)
 
         self.btn_save_settings.clicked.connect(self._save_settings_clicked)
@@ -7798,31 +7827,35 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_preset_preview.clicked.connect(self._open_blur_preview)
         self.btn_aw_template.clicked.connect(lambda: self._browse_file(self.ed_aw_template, "Выбери шаблон водяного знака", "Изображения (*.png *.jpg *.jpeg *.bmp);;Все файлы (*.*)"))
 
-        self.btn_youtube_src_browse.clicked.connect(lambda: self._browse_dir(self.ed_youtube_src, "Выбери папку с клипами"))
-        self.cb_youtube_draft_only.toggled.connect(self._toggle_youtube_schedule)
-        self.cb_youtube_draft_only.toggled.connect(lambda _: self._update_youtube_queue_label())
-        self.cb_youtube_schedule.toggled.connect(self._toggle_youtube_schedule)
-        self.cb_youtube_schedule.toggled.connect(lambda _: self._update_youtube_queue_label())
-        self.lst_youtube_channels.itemSelectionChanged.connect(self._on_youtube_selected)
-        self.btn_yt_add.clicked.connect(self._on_youtube_add_update)
-        self.btn_yt_delete.clicked.connect(self._on_youtube_delete)
-        self.btn_yt_set_active.clicked.connect(self._on_youtube_set_active)
-        self.btn_yt_client_browse.clicked.connect(lambda: self._browse_file(self.ed_yt_client, "client_secret.json", "JSON (*.json);;Все файлы (*.*)"))
-        self.btn_yt_credentials_browse.clicked.connect(lambda: self._browse_file(self.ed_yt_credentials, "credentials.json", "JSON (*.json);;Все файлы (*.*)"))
-        self.btn_youtube_archive_browse.clicked.connect(lambda: self._browse_dir(self.ed_youtube_archive, "Выбери папку архива"))
-        self.cb_youtube_default_draft.toggled.connect(self._sync_draft_checkbox)
-        self.sb_youtube_default_delay.valueChanged.connect(self._apply_default_delay)
-        self.sb_youtube_interval_default.valueChanged.connect(lambda val: self.sb_youtube_interval.setValue(int(val)))
-        self.sb_youtube_limit_default.valueChanged.connect(lambda val: self.sb_youtube_batch_limit.setValue(int(val)))
-        self.btn_wmr_source_browse.clicked.connect(lambda: self._browse_dir(self.ed_wmr_source, "Выбери папку RAW"))
-        self.btn_wmr_output_browse.clicked.connect(lambda: self._browse_dir(self.ed_wmr_output, "Выбери папку для готовых клипов"))
-        self.btn_wmr_template_browse.clicked.connect(
-            lambda: self._browse_file(
-                self.ed_wmr_template,
-                "Выбери шаблон водяного знака",
-                "Изображения (*.png *.jpg *.jpeg *.bmp);;Все файлы (*.*)",
+        if ENABLE_SOCIAL_UPLOAD:
+            self.btn_youtube_src_browse.clicked.connect(lambda: self._browse_dir(self.ed_youtube_src, "Выбери папку с клипами"))
+            self.cb_youtube_draft_only.toggled.connect(self._toggle_youtube_schedule)
+            self.cb_youtube_draft_only.toggled.connect(lambda _: self._update_youtube_queue_label())
+            self.cb_youtube_schedule.toggled.connect(self._toggle_youtube_schedule)
+            self.cb_youtube_schedule.toggled.connect(lambda _: self._update_youtube_queue_label())
+            self.lst_youtube_channels.itemSelectionChanged.connect(self._on_youtube_selected)
+            self.btn_yt_add.clicked.connect(self._on_youtube_add_update)
+            self.btn_yt_delete.clicked.connect(self._on_youtube_delete)
+            self.btn_yt_set_active.clicked.connect(self._on_youtube_set_active)
+            self.btn_yt_client_browse.clicked.connect(lambda: self._browse_file(self.ed_yt_client, "client_secret.json", "JSON (*.json);;Все файлы (*.*)"))
+            self.btn_yt_credentials_browse.clicked.connect(lambda: self._browse_file(self.ed_yt_credentials, "credentials.json", "JSON (*.json);;Все файлы (*.*)"))
+            self.btn_youtube_archive_browse.clicked.connect(lambda: self._browse_dir(self.ed_youtube_archive, "Выбери папку архива"))
+            self.cb_youtube_default_draft.toggled.connect(self._sync_draft_checkbox)
+            self.sb_youtube_default_delay.valueChanged.connect(self._apply_default_delay)
+            self.sb_youtube_interval_default.valueChanged.connect(lambda val: self.sb_youtube_interval.setValue(int(val)))
+            self.sb_youtube_limit_default.valueChanged.connect(lambda val: self.sb_youtube_batch_limit.setValue(int(val)))
+        if ENABLE_WATERMARK:
+            self.btn_wmr_source_browse.clicked.connect(lambda: self._browse_dir(self.ed_wmr_source, "Выбери папку RAW"))
+            self.btn_wmr_output_browse.clicked.connect(
+                lambda: self._browse_dir(self.ed_wmr_output, "Выбери папку для готовых клипов")
             )
-        )
+            self.btn_wmr_template_browse.clicked.connect(
+                lambda: self._browse_file(
+                    self.ed_wmr_template,
+                    "Выбери шаблон водяного знака",
+                    "Изображения (*.png *.jpg *.jpeg *.bmp);;Все файлы (*.*)",
+                )
+            )
         if hasattr(self, "btn_probe_source_browse"):
             self.btn_probe_source_browse.clicked.connect(
                 lambda: self._browse_dir(self.ed_probe_source, "Выбери папку RAW для проверки")
@@ -7849,24 +7882,26 @@ class MainWindow(QtWidgets.QMainWindow):
             self.btn_probe_batch_scan.clicked.connect(lambda: self._run_watermark_probe_batch(flip=False))
         if hasattr(self, "btn_probe_batch_flip"):
             self.btn_probe_batch_flip.clicked.connect(lambda: self._run_watermark_probe_batch(flip=True))
-        self.btn_tiktok_archive_browse.clicked.connect(lambda: self._browse_dir(self.ed_tiktok_archive, "Выбери папку архива"))
-        self.sb_tiktok_default_delay.valueChanged.connect(self._apply_tiktok_default_delay)
-        self.sb_tiktok_interval_default.valueChanged.connect(lambda val: self.sb_tiktok_interval.setValue(int(val)))
-        self.sb_tiktok_limit_default.valueChanged.connect(lambda val: self.sb_tiktok_batch_limit.setValue(int(val)))
-        self.sb_youtube_interval.valueChanged.connect(self._reflect_youtube_interval)
-        self.sb_youtube_batch_limit.valueChanged.connect(self._reflect_youtube_limit)
-        self.btn_youtube_refresh.clicked.connect(self._update_youtube_queue_label)
-        self.btn_youtube_start.clicked.connect(self._start_youtube_single)
-        self.ed_youtube_src.textChanged.connect(lambda _: self._update_youtube_queue_label())
-        self.dt_youtube_publish.dateTimeChanged.connect(self._sync_delay_from_datetime)
+        if ENABLE_SOCIAL_UPLOAD:
+            self.btn_tiktok_archive_browse.clicked.connect(lambda: self._browse_dir(self.ed_tiktok_archive, "Выбери папку архива"))
+            self.sb_tiktok_default_delay.valueChanged.connect(self._apply_tiktok_default_delay)
+            self.sb_tiktok_interval_default.valueChanged.connect(lambda val: self.sb_tiktok_interval.setValue(int(val)))
+            self.sb_tiktok_limit_default.valueChanged.connect(lambda val: self.sb_tiktok_batch_limit.setValue(int(val)))
+            self.sb_youtube_interval.valueChanged.connect(self._reflect_youtube_interval)
+            self.sb_youtube_batch_limit.valueChanged.connect(self._reflect_youtube_limit)
+            self.btn_youtube_refresh.clicked.connect(self._update_youtube_queue_label)
+            self.btn_youtube_start.clicked.connect(self._start_youtube_single)
+            self.ed_youtube_src.textChanged.connect(lambda _: self._update_youtube_queue_label())
+            self.dt_youtube_publish.dateTimeChanged.connect(self._sync_delay_from_datetime)
         self.btn_tg_test.clicked.connect(self._test_tg_settings)
 
-        self.lst_tiktok_profiles.itemSelectionChanged.connect(self._on_tiktok_selected)
-        self.btn_tt_add.clicked.connect(self._on_tiktok_add_update)
-        self.btn_tt_delete.clicked.connect(self._on_tiktok_delete)
-        self.btn_tt_set_active.clicked.connect(self._on_tiktok_set_active)
-        self.btn_tt_secret.clicked.connect(lambda: self._browse_file(self.ed_tt_secret, "Выбери файл секретов", "JSON (*.json);;YAML (*.yaml *.yml);;Все файлы (*.*)"))
-        self.btn_tt_secret_load.clicked.connect(self._load_tiktok_secret_file)
+        if ENABLE_SOCIAL_UPLOAD:
+            self.lst_tiktok_profiles.itemSelectionChanged.connect(self._on_tiktok_selected)
+            self.btn_tt_add.clicked.connect(self._on_tiktok_add_update)
+            self.btn_tt_delete.clicked.connect(self._on_tiktok_delete)
+            self.btn_tt_set_active.clicked.connect(self._on_tiktok_set_active)
+            self.btn_tt_secret.clicked.connect(lambda: self._browse_file(self.ed_tt_secret, "Выбери файл секретов", "JSON (*.json);;YAML (*.yaml *.yml);;Все файлы (*.*)"))
+            self.btn_tt_secret_load.clicked.connect(self._load_tiktok_secret_file)
         if hasattr(self, "btn_context_session_window"):
             self.btn_context_session_window.clicked.connect(self._on_session_open_window)
         if hasattr(self, "btn_context_session_prompts"):
@@ -7875,8 +7910,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.btn_context_session_images.clicked.connect(self._on_session_run_images)
         if hasattr(self, "btn_context_session_download"):
             self.btn_context_session_download.clicked.connect(self._on_session_run_download)
-        if hasattr(self, "btn_context_session_watermark"):
-            self.btn_context_session_watermark.clicked.connect(self._on_session_run_watermark)
         if hasattr(self, "btn_context_session_probe"):
             self.btn_context_session_probe.clicked.connect(lambda: self._select_section("watermark_probe"))
         if hasattr(self, "btn_context_tg_test"):
