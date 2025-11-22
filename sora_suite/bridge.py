@@ -21,16 +21,41 @@ def _write_prompt_file(prompt_text: str) -> str:
     return str(path)
 
 
-def apply_env(payload: Dict[str, Any]) -> None:
-    if prompt := str(payload.get("prompt_text", "")).strip():
-        os.environ["SORA_PROMPTS_FILE"] = _write_prompt_file(prompt)
+def _set_env(key: str, value: str | None) -> None:
+    if value is None:
+        return
+    text = str(value).strip()
+    if text:
+        os.environ[key] = text
 
-    if cdp := str(payload.get("cdp_endpoint", "")).strip():
+
+def _apply_common_env(payload: Dict[str, Any]) -> None:
+    """Map renderer payload into worker-friendly environment variables."""
+
+    prompt_text = str(payload.get("prompt_text", "")).strip()
+    if prompt_text:
+        os.environ["SORA_PROMPTS_FILE"] = _write_prompt_file(prompt_text)
+
+    _set_env("SORA_PROMPTS_FILE", payload.get("prompts_file"))
+    _set_env("SORA_SUBMITTED_LOG", payload.get("submitted_log"))
+    _set_env("SORA_FAILED_LOG", payload.get("failed_log"))
+    _set_env("SORA_INSTANCE_NAME", payload.get("instance_name"))
+    _set_env("GENAI_IMAGE_PROMPTS_FILE", payload.get("image_prompts_file"))
+
+    cdp = str(payload.get("cdp_endpoint", "")).strip()
+    if cdp:
         os.environ["SORA_CDP_ENDPOINT"] = cdp
         os.environ["CDP_ENDPOINT"] = cdp
 
-    if downloads := str(payload.get("downloads_dir", "")).strip():
+    _set_env("GENAI_BASE_DIR", payload.get("genai_base_dir"))
+    _set_env("GENAI_PROMPTS_DIR", payload.get("genai_prompts_dir"))
+
+    downloads = str(payload.get("downloads_dir", "")).strip()
+    if downloads:
         os.environ["DOWNLOAD_DIR"] = downloads
+
+    _set_env("TITLES_FILE", payload.get("titles_file"))
+    _set_env("TITLES_CURSOR_FILE", payload.get("titles_cursor_file"))
 
     max_videos = payload.get("max_videos")
     if max_videos is not None:
@@ -50,6 +75,12 @@ def apply_env(payload: Dict[str, Any]) -> None:
     if payload.get("attach_to_sora") is not None:
         os.environ["GENAI_ATTACH_TO_SORA"] = "1" if bool(payload.get("attach_to_sora")) else "0"
 
+    extra_env = payload.get("env") or {}
+    if isinstance(extra_env, dict):
+        for key, value in extra_env.items():
+            if isinstance(key, str):
+                _set_env(key, value)
+
 
 def run_autogen() -> None:
     from sora_suite.workers.autogen import main as autogen_main
@@ -63,6 +94,24 @@ def run_downloader() -> None:
     download_all.main()
 
 
+def run_watermark() -> None:
+    from sora_suite.workers.watermark_cleaner import restore
+
+    restore.main()
+
+
+def run_youtube() -> None:
+    from sora_suite.workers.uploader import upload_queue
+
+    upload_queue.main()
+
+
+def run_tiktok() -> None:
+    from sora_suite.workers.tiktok import upload_queue
+
+    upload_queue.main()
+
+
 def run_pipeline(payload: Dict[str, Any]) -> None:
     print("[BRIDGE] -> starting autogen")
     run_autogen()
@@ -73,7 +122,11 @@ def run_pipeline(payload: Dict[str, Any]) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Sora Suite bridge entrypoint")
-    parser.add_argument("--task", choices=["pipeline", "autogen", "downloader"], default="pipeline")
+    parser.add_argument(
+        "--task",
+        choices=["pipeline", "autogen", "downloader", "watermark", "youtube", "tiktok"],
+        default="pipeline",
+    )
     parser.add_argument("--payload", default="{}", help="JSON payload passed from Electron")
     args = parser.parse_args(argv)
 
@@ -85,13 +138,19 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[BRIDGE] invalid payload: {exc}")
         return 1
 
-    apply_env(payload)
+    _apply_common_env(payload)
 
     try:
         if args.task == "autogen":
             run_autogen()
         elif args.task == "downloader":
             run_downloader()
+        elif args.task == "watermark":
+            run_watermark()
+        elif args.task == "youtube":
+            run_youtube()
+        elif args.task == "tiktok":
+            run_tiktok()
         else:
             run_pipeline(payload)
     except Exception as exc:  # noqa: BLE001

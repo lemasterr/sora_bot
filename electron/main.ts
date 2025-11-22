@@ -3,7 +3,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 
 const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
-let mainWindow: BrowserWindow | null = null;
+let mainWindow: any | null = null;
 
 const createWindow = () => {
   mainWindow = new BrowserWindow({
@@ -33,7 +33,7 @@ const createWindow = () => {
     mainWindow.loadFile(indexPath);
   }
 
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+  mainWindow.webContents.setWindowOpenHandler(({ url }: { url: string }) => {
     shell.openExternal(url);
     return { action: 'deny' };
   });
@@ -67,7 +67,7 @@ const sendLog = (payload: { message: string; source: 'stdout' | 'stderr'; pid?: 
   });
 };
 
-ipcMain.handle('run-python', async (_event, command: PythonCommand) => {
+ipcMain.handle('run-python', async (_event: any, command: PythonCommand) => {
   const pythonExecutable = process.env.PYTHON || process.env.PYTHON_PATH || 'python';
   const payloadString = JSON.stringify(command?.payload ?? {});
   const args = ['-m', 'sora_suite.bridge', '--task', command?.task ?? 'pipeline', '--payload', payloadString];
@@ -100,7 +100,7 @@ ipcMain.handle('run-python', async (_event, command: PythonCommand) => {
         .forEach((line) => sendLog({ message: line, source: 'stderr', pid: child.pid ?? undefined }));
     });
 
-    child.on('close', (code) => {
+    child.on('close', (code: number | null) => {
       sendLog({
         message: `[main] Python exited with code ${code ?? 'null'}`,
         source: code && code > 0 ? 'stderr' : 'stdout',
@@ -109,7 +109,7 @@ ipcMain.handle('run-python', async (_event, command: PythonCommand) => {
       resolve({ code: code ?? undefined });
     });
 
-    child.on('error', (err) => {
+    child.on('error', (err: any) => {
       sendLog({ message: `[main] Failed to start Python: ${err.message}`, source: 'stderr' });
       resolve({ code: -1 });
     });

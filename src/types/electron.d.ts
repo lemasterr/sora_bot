@@ -1,5 +1,5 @@
 export interface RunPythonCommand {
-  task: 'pipeline' | 'autogen' | 'downloader';
+  task: 'pipeline' | 'autogen' | 'downloader' | 'watermark' | 'youtube' | 'tiktok';
   payload?: Record<string, unknown>;
 }
 

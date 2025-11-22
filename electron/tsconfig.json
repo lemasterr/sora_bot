@@ -8,5 +8,5 @@
     "sourceMap": true,
     "declaration": false
   },
-  "include": ["./**/*.ts"]
+  "include": ["./**/*.ts", "./**/*.d.ts"]
 }

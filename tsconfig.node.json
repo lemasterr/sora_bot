@@ -9,8 +9,7 @@
     "strict": true,
     "skipLibCheck": true,
     "noEmit": false,
-    "rootDir": "./",
-    "types": ["node"]
+    "rootDir": "./"
   },
   "include": ["electron/**/*.ts", "vite.config.ts"]
 }

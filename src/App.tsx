@@ -40,15 +40,32 @@ const App: React.FC = () => {
   const [promptText, setPromptText] = useState('A cinematic, neon-lit lab with holographic UI panels and floating drones.');
   const [cdpEndpoint, setCdpEndpoint] = useState('http://localhost:9222');
   const [downloadsDir, setDownloadsDir] = useState('downloads');
+  const [promptsFile, setPromptsFile] = useState('');
+  const [submittedLog, setSubmittedLog] = useState('');
+  const [failedLog, setFailedLog] = useState('');
+  const [imagePromptsFile, setImagePromptsFile] = useState('');
+  const [titlesFile, setTitlesFile] = useState('');
+  const [titlesCursorFile, setTitlesCursorFile] = useState('');
   const [maxVideos, setMaxVideos] = useState(3);
   const [runDownloader, setRunDownloader] = useState(true);
   const [openDraftsFirst, setOpenDraftsFirst] = useState(true);
   const [imagesOnly, setImagesOnly] = useState(false);
   const [attachToSora, setAttachToSora] = useState(true);
+  const [appConfigPath, setAppConfigPath] = useState('');
+  const [youtubeChannel, setYoutubeChannel] = useState('');
+  const [youtubeSrcDir, setYoutubeSrcDir] = useState('');
+  const [tiktokProfile, setTiktokProfile] = useState('');
+  const [tiktokSrcDir, setTiktokSrcDir] = useState('');
+  const [watermarkSource, setWatermarkSource] = useState('downloads');
+  const [watermarkOutput, setWatermarkOutput] = useState('restored');
+  const [watermarkTemplate, setWatermarkTemplate] = useState('watermark.png');
+  const [extraEnvText, setExtraEnvText] = useState('');
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [isRunning, setIsRunning] = useState(false);
   const [lastExitCode, setLastExitCode] = useState<number | null>(null);
-  const [activeTask, setActiveTask] = useState<'idle' | 'autogen' | 'downloader' | 'pipeline'>('idle');
+  const [activeTask, setActiveTask] = useState<
+    'idle' | 'autogen' | 'downloader' | 'pipeline' | 'watermark' | 'youtube' | 'tiktok'
+  >('idle');
 
   const countdown = useCountdown(isRunning && activeTask === 'pipeline');
 
@@ -98,20 +115,83 @@ const App: React.FC = () => {
     }
   };
 
+  const parsedExtraEnv = useMemo(() => {
+    const env: Record<string, string> = {};
+    extraEnvText
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .forEach((line) => {
+        const [key, ...rest] = line.split('=');
+        if (key && rest.length > 0) {
+          env[key.trim()] = rest.join('=').trim();
+        }
+      });
+    return env;
+  }, [extraEnvText]);
+
+  const buildPayload = (overrides?: Record<string, unknown>) => ({
+    prompt_text: promptText,
+    prompts_file: promptsFile || undefined,
+    submitted_log: submittedLog || undefined,
+    failed_log: failedLog || undefined,
+    image_prompts_file: imagePromptsFile || undefined,
+    cdp_endpoint: cdpEndpoint,
+    downloads_dir: downloadsDir,
+    titles_file: titlesFile || undefined,
+    titles_cursor_file: titlesCursorFile || undefined,
+    max_videos: maxVideos,
+    open_drafts_first: openDraftsFirst,
+    run_downloader: runDownloader,
+    images_only: imagesOnly,
+    attach_to_sora: attachToSora,
+    env: parsedExtraEnv,
+    ...overrides,
+  });
+
   const handleStartPipeline = async () => {
+    await sendCommand({ task: 'pipeline', payload: buildPayload() });
+  };
+
+  const handleAutogenOnly = async () => {
+    await sendCommand({ task: 'autogen', payload: buildPayload() });
+  };
+
+  const handleDownloaderOnly = async () => {
     await sendCommand({
-      task: 'pipeline',
-      payload: {
-        prompt_text: promptText,
-        cdp_endpoint: cdpEndpoint,
-        downloads_dir: downloadsDir,
-        max_videos: maxVideos,
-        open_drafts_first: openDraftsFirst,
-        run_downloader: runDownloader,
-        images_only: imagesOnly,
-        attach_to_sora: attachToSora,
-      },
+      task: 'downloader',
+      payload: buildPayload({ run_downloader: true }),
     });
+  };
+
+  const handleWatermark = async () => {
+    const env = {
+      ...parsedExtraEnv,
+      WMR_SOURCE_DIR: watermarkSource,
+      WMR_OUTPUT_DIR: watermarkOutput,
+      WMR_TEMPLATE: watermarkTemplate,
+    };
+    await sendCommand({ task: 'watermark', payload: buildPayload({ env }) });
+  };
+
+  const handleYoutube = async () => {
+    const env = {
+      ...parsedExtraEnv,
+      APP_CONFIG_PATH: appConfigPath || undefined,
+      YOUTUBE_CHANNEL_NAME: youtubeChannel,
+      YOUTUBE_SRC_DIR: youtubeSrcDir,
+    };
+    await sendCommand({ task: 'youtube', payload: buildPayload({ env }) });
+  };
+
+  const handleTiktok = async () => {
+    const env = {
+      ...parsedExtraEnv,
+      APP_CONFIG_PATH: appConfigPath || undefined,
+      TIKTOK_PROFILE_NAME: tiktokProfile,
+      TIKTOK_SRC_DIR: tiktokSrcDir,
+    };
+    await sendCommand({ task: 'tiktok', payload: buildPayload({ env }) });
   };
 
   const statusBadge = useMemo(() => {
@@ -301,23 +381,101 @@ const App: React.FC = () => {
                         <span>Open drafts page first (existing Chrome session)</span>
                       </label>
                     </div>
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <label className="space-y-1 text-sm text-slate-300">
+                        <span className="text-xs uppercase tracking-[0.2em] text-slate-400">Prompts file</span>
+                        <input
+                          className="w-full rounded-lg border border-white/5 bg-white/5 px-3 py-2 text-sm text-slate-100 outline-none focus:border-indigo-500/60 focus:ring-2 focus:ring-indigo-500/30"
+                          value={promptsFile}
+                          onChange={(e) => setPromptsFile(e.target.value)}
+                          placeholder="path/to/prompts.txt (optional)"
+                        />
+                      </label>
+                      <label className="space-y-1 text-sm text-slate-300">
+                        <span className="text-xs uppercase tracking-[0.2em] text-slate-400">Image prompts</span>
+                        <input
+                          className="w-full rounded-lg border border-white/5 bg-white/5 px-3 py-2 text-sm text-slate-100 outline-none focus:border-indigo-500/60 focus:ring-2 focus:ring-indigo-500/30"
+                          value={imagePromptsFile}
+                          onChange={(e) => setImagePromptsFile(e.target.value)}
+                          placeholder="path/to/image_prompts.txt"
+                        />
+                      </label>
+                      <label className="space-y-1 text-sm text-slate-300">
+                        <span className="text-xs uppercase tracking-[0.2em] text-slate-400">Submitted log</span>
+                        <input
+                          className="w-full rounded-lg border border-white/5 bg-white/5 px-3 py-2 text-sm text-slate-100 outline-none focus:border-indigo-500/60 focus:ring-2 focus:ring-indigo-500/30"
+                          value={submittedLog}
+                          onChange={(e) => setSubmittedLog(e.target.value)}
+                          placeholder="autogen/submitted.log"
+                        />
+                      </label>
+                      <label className="space-y-1 text-sm text-slate-300">
+                        <span className="text-xs uppercase tracking-[0.2em] text-slate-400">Failed log</span>
+                        <input
+                          className="w-full rounded-lg border border-white/5 bg-white/5 px-3 py-2 text-sm text-slate-100 outline-none focus:border-indigo-500/60 focus:ring-2 focus:ring-indigo-500/30"
+                          value={failedLog}
+                          onChange={(e) => setFailedLog(e.target.value)}
+                          placeholder="autogen/failed.log"
+                        />
+                      </label>
+                    </div>
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <label className="space-y-1 text-sm text-slate-300">
+                        <span className="text-xs uppercase tracking-[0.2em] text-slate-400">Titles list</span>
+                        <input
+                          className="w-full rounded-lg border border-white/5 bg-white/5 px-3 py-2 text-sm text-slate-100 outline-none focus:border-indigo-500/60 focus:ring-2 focus:ring-indigo-500/30"
+                          value={titlesFile}
+                          onChange={(e) => setTitlesFile(e.target.value)}
+                          placeholder="titles.txt for downloader"
+                        />
+                      </label>
+                      <label className="space-y-1 text-sm text-slate-300">
+                        <span className="text-xs uppercase tracking-[0.2em] text-slate-400">Titles cursor</span>
+                        <input
+                          className="w-full rounded-lg border border-white/5 bg-white/5 px-3 py-2 text-sm text-slate-100 outline-none focus:border-indigo-500/60 focus:ring-2 focus:ring-indigo-500/30"
+                          value={titlesCursorFile}
+                          onChange={(e) => setTitlesCursorFile(e.target.value)}
+                          placeholder="titles.cursor (optional)"
+                        />
+                      </label>
+                    </div>
                   </div>
                 </div>
 
                 <div className="mt-6 flex flex-wrap items-center gap-4">
-                  <button
-                    type="button"
-                    onClick={handleStartPipeline}
-                    disabled={isRunning}
-                    className={`flex items-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold shadow-lg shadow-indigo-900 transition focus:outline-none focus:ring-2 focus:ring-indigo-500/60 ${
-                      isRunning
-                        ? 'cursor-not-allowed border border-white/10 bg-white/10 text-slate-300'
-                        : 'border border-indigo-500/50 bg-indigo-500/20 text-indigo-100 hover:-translate-y-0.5 hover:border-indigo-400 hover:bg-indigo-500/25'
-                    }`}
-                  >
-                    <Play className="h-4 w-4" />
-                    {isRunning ? 'Running…' : 'Start Pipeline'}
-                  </button>
+                  <div className="flex flex-wrap gap-3">
+                    <button
+                      type="button"
+                      onClick={handleStartPipeline}
+                      disabled={isRunning}
+                      className={`flex items-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold shadow-lg shadow-indigo-900 transition focus:outline-none focus:ring-2 focus:ring-indigo-500/60 ${
+                        isRunning
+                          ? 'cursor-not-allowed border border-white/10 bg-white/10 text-slate-300'
+                          : 'border border-indigo-500/50 bg-indigo-500/20 text-indigo-100 hover:-translate-y-0.5 hover:border-indigo-400 hover:bg-indigo-500/25'
+                      }`}
+                    >
+                      <Play className="h-4 w-4" />
+                      {isRunning && activeTask === 'pipeline' ? 'Running…' : 'Start Pipeline'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleAutogenOnly}
+                      disabled={isRunning}
+                      className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/10 px-4 py-3 text-sm font-semibold text-slate-100 shadow-lg shadow-black/40 transition hover:border-blue-400/60 hover:bg-blue-500/10 focus:outline-none focus:ring-2 focus:ring-blue-500/40 disabled:cursor-not-allowed disabled:opacity-70"
+                    >
+                      <Zap className="h-4 w-4" />
+                      Autogen only
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleDownloaderOnly}
+                      disabled={isRunning}
+                      className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/10 px-4 py-3 text-sm font-semibold text-slate-100 shadow-lg shadow-black/40 transition hover:border-emerald-400/60 hover:bg-emerald-500/10 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 disabled:cursor-not-allowed disabled:opacity-70"
+                    >
+                      <Download className="h-4 w-4" />
+                      Downloader only
+                    </button>
+                  </div>
                   <div className="flex flex-wrap gap-3 text-xs text-slate-400">
                     <span className="rounded-full border border-white/10 px-3 py-1">cdp: {cdpEndpoint}</span>
                     <span className="rounded-full border border-white/10 px-3 py-1">downloads: {downloadsDir}</span>
@@ -361,6 +519,116 @@ const App: React.FC = () => {
             </section>
 
             <section className="space-y-4">
+              <div className="rounded-2xl border border-indigo-500/30 bg-indigo-500/5 p-6 shadow-xl shadow-black/30">
+                <div className="mb-4 flex items-center gap-2 text-sm font-semibold text-indigo-100">
+                  <Cpu className="h-4 w-4" /> Worker triggers
+                </div>
+                <div className="space-y-4">
+                  <label className="space-y-1 text-sm text-slate-200">
+                    <span className="text-xs uppercase tracking-[0.2em] text-slate-400">app_config.yaml (optional)</span>
+                    <input
+                      className="w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm text-slate-100 outline-none focus:border-indigo-400/60 focus:ring-2 focus:ring-indigo-500/30"
+                      value={appConfigPath}
+                      onChange={(e) => setAppConfigPath(e.target.value)}
+                      placeholder="sora_suite/app_config.yaml"
+                    />
+                  </label>
+
+                  <div className="grid gap-3 md:grid-cols-2">
+                    <div className="rounded-xl border border-white/10 bg-black/40 p-4">
+                      <p className="text-sm font-semibold text-white">Watermark cleaner</p>
+                      <div className="mt-3 space-y-2 text-sm text-slate-300">
+                        <input
+                          className="w-full rounded-lg border border-white/10 bg-black/60 px-3 py-2 text-sm text-slate-100 outline-none focus:border-emerald-400/60 focus:ring-2 focus:ring-emerald-500/30"
+                          value={watermarkSource}
+                          onChange={(e) => setWatermarkSource(e.target.value)}
+                          placeholder="WMR_SOURCE_DIR (input folder)"
+                        />
+                        <input
+                          className="w-full rounded-lg border border-white/10 bg-black/60 px-3 py-2 text-sm text-slate-100 outline-none focus:border-emerald-400/60 focus:ring-2 focus:ring-emerald-500/30"
+                          value={watermarkOutput}
+                          onChange={(e) => setWatermarkOutput(e.target.value)}
+                          placeholder="WMR_OUTPUT_DIR (output folder)"
+                        />
+                        <input
+                          className="w-full rounded-lg border border-white/10 bg-black/60 px-3 py-2 text-sm text-slate-100 outline-none focus:border-emerald-400/60 focus:ring-2 focus:ring-emerald-500/30"
+                          value={watermarkTemplate}
+                          onChange={(e) => setWatermarkTemplate(e.target.value)}
+                          placeholder="WMR_TEMPLATE (watermark.png)"
+                        />
+                        <button
+                          type="button"
+                          onClick={handleWatermark}
+                          disabled={isRunning}
+                          className="w-full rounded-lg border border-emerald-500/50 bg-emerald-500/20 px-3 py-2 text-sm font-semibold text-emerald-50 shadow-md shadow-emerald-900 transition hover:-translate-y-0.5 hover:border-emerald-400 hover:bg-emerald-500/25 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 disabled:cursor-not-allowed disabled:opacity-70"
+                        >
+                          Run watermark cleaner
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="rounded-xl border border-white/10 bg-black/40 p-4 space-y-3">
+                      <p className="text-sm font-semibold text-white">Upload queues</p>
+                      <div className="space-y-2 text-sm text-slate-300">
+                        <input
+                          className="w-full rounded-lg border border-white/10 bg-black/60 px-3 py-2 text-sm text-slate-100 outline-none focus:border-blue-400/60 focus:ring-2 focus:ring-blue-500/30"
+                          value={youtubeChannel}
+                          onChange={(e) => setYoutubeChannel(e.target.value)}
+                          placeholder="YouTube channel name"
+                        />
+                        <input
+                          className="w-full rounded-lg border border-white/10 bg-black/60 px-3 py-2 text-sm text-slate-100 outline-none focus:border-blue-400/60 focus:ring-2 focus:ring-blue-500/30"
+                          value={youtubeSrcDir}
+                          onChange={(e) => setYoutubeSrcDir(e.target.value)}
+                          placeholder="YouTube source dir"
+                        />
+                        <button
+                          type="button"
+                          onClick={handleYoutube}
+                          disabled={isRunning}
+                          className="w-full rounded-lg border border-blue-500/50 bg-blue-500/20 px-3 py-2 text-sm font-semibold text-blue-50 shadow-md shadow-blue-900 transition hover:-translate-y-0.5 hover:border-blue-400 hover:bg-blue-500/25 focus:outline-none focus:ring-2 focus:ring-blue-500/40 disabled:cursor-not-allowed disabled:opacity-70"
+                        >
+                          Run YouTube queue
+                        </button>
+                      </div>
+                      <div className="space-y-2 text-sm text-slate-300">
+                        <input
+                          className="w-full rounded-lg border border-white/10 bg-black/60 px-3 py-2 text-sm text-slate-100 outline-none focus:border-pink-400/60 focus:ring-2 focus:ring-pink-500/30"
+                          value={tiktokProfile}
+                          onChange={(e) => setTiktokProfile(e.target.value)}
+                          placeholder="TikTok profile name"
+                        />
+                        <input
+                          className="w-full rounded-lg border border-white/10 bg-black/60 px-3 py-2 text-sm text-slate-100 outline-none focus:border-pink-400/60 focus:ring-2 focus:ring-pink-500/30"
+                          value={tiktokSrcDir}
+                          onChange={(e) => setTiktokSrcDir(e.target.value)}
+                          placeholder="TikTok source dir"
+                        />
+                        <button
+                          type="button"
+                          onClick={handleTiktok}
+                          disabled={isRunning}
+                          className="w-full rounded-lg border border-pink-500/50 bg-pink-500/20 px-3 py-2 text-sm font-semibold text-pink-50 shadow-md shadow-pink-900 transition hover:-translate-y-0.5 hover:border-pink-400 hover:bg-pink-500/25 focus:outline-none focus:ring-2 focus:ring-pink-500/40 disabled:cursor-not-allowed disabled:opacity-70"
+                        >
+                          Run TikTok queue
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl border border-white/10 bg-black/40 p-4">
+                    <p className="text-sm font-semibold text-white">Extra env overrides</p>
+                    <p className="text-xs text-slate-400">One KEY=VALUE per line. These merge into every task run.</p>
+                    <textarea
+                      className="mt-2 h-28 w-full rounded-lg border border-white/10 bg-black/60 px-3 py-2 font-mono text-xs text-slate-100 outline-none focus:border-indigo-400/60 focus:ring-2 focus:ring-indigo-500/30"
+                      value={extraEnvText}
+                      onChange={(e) => setExtraEnvText(e.target.value)}
+                      placeholder="GENAI_API_KEY=...\nTELEGRAM_BOT_TOKEN=..."
+                    />
+                  </div>
+                </div>
+              </div>
+
               <div className="rounded-2xl border border-white/5 bg-white/5 p-6 shadow-xl shadow-black/30">
                 <div className="flex items-center gap-2 text-sm font-semibold text-slate-100">
                   <Cpu className="h-4 w-4 text-indigo-300" /> System status
