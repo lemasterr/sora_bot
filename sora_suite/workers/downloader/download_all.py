@@ -346,6 +346,52 @@ def _current_video_src(page) -> str:
         return ""
 
 
+def _cloudflare_detected(page) -> bool:
+    """Проверяем типичные элементы Cloudflare/Turnstile."""
+
+    try:
+        return bool(
+            page.evaluate(
+                """
+                () => {
+                    const text = document.body?.innerText?.toLowerCase?.() || '';
+                    if (text.includes('checking if the site connection is secure') || text.includes('verify you are human')) {
+                        return true;
+                    }
+                    const cfForm = document.querySelector('form#challenge-form') || document.querySelector('form[action*="challenge"]');
+                    const cfFrame = Array.from(document.querySelectorAll('iframe')).some(f => (f.src || '').includes('challenges.cloudflare.com'));
+                    const turnstile = document.querySelector('[data-sitekey][data-cf-challenge]') || document.querySelector('iframe[src*="turnstile"]');
+                    const overlay = document.querySelector('.challenge-container, #cf-stage, #challenge-stage');
+                    return Boolean(cfForm || cfFrame || turnstile || overlay);
+                }
+                """
+            )
+        )
+    except Exception:
+        return False
+
+
+def _wait_for_cloudflare(page) -> bool:
+    """Если всплыло окно Cloudflare, ждём решения и уведомляем пользователя."""
+
+    if not _cloudflare_detected(page):
+        return False
+
+    print("[NOTIFY] CLOUDFLARE_ALERT")
+    print("[!] Похоже, появился Cloudflare. Пройди проверку — я подожду.")
+
+    loops = 0
+    while _cloudflare_detected(page):
+        page.wait_for_timeout(1200)
+        loops += 1
+        if loops % 5 == 0:
+            print("[!] Всё ещё жду прохождения Cloudflare…")
+
+    print("[i] Проверка завершена, продолжаю работу.")
+    page.wait_for_timeout(800)
+    return True
+
+
 def scroll_to_next_card(page, *, pause_ms: int = 1800, timeout_ms: int = 9000) -> bool:
     """Листает ленту вниз одним длинным свайпом и ждёт смены карточки.
 
@@ -356,9 +402,15 @@ def scroll_to_next_card(page, *, pause_ms: int = 1800, timeout_ms: int = 9000) -
     start_url = page.url
     start_src = _current_video_src(page)
 
+    if _wait_for_cloudflare(page):
+        start_url = page.url
+        start_src = _current_video_src(page)
+
     def _wait_for_change(total_ms: int) -> bool:
         deadline = time.time() + (total_ms / 1000)
         while time.time() < deadline:
+            if _cloudflare_detected(page):
+                return False
             if (page.url != start_url) or (_current_video_src(page) != start_src):
                 return True
             page.wait_for_timeout(180)
@@ -369,6 +421,11 @@ def scroll_to_next_card(page, *, pause_ms: int = 1800, timeout_ms: int = 9000) -
 
     _long_swipe_once(page)
     page.wait_for_timeout(pause_ms)
+
+    if _cloudflare_detected(page):
+        _wait_for_cloudflare(page)
+        start_url = page.url
+        start_src = _current_video_src(page)
     if _wait_for_change(timeout_ms):
         page.wait_for_timeout(700)
         try:
@@ -405,6 +462,8 @@ def download_feed_mode(page, desired: int) -> None:
         return
 
     while True:
+        _wait_for_cloudflare(page)
+
         current_url = page.url
         if current_url in seen:
             print("[!] Карточка уже была, листать дальше не получается — стоп.")

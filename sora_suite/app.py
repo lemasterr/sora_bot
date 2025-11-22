@@ -2344,6 +2344,17 @@ class MainWindow(QtWidgets.QMainWindow):
                 else:
                     self._session_waiters.pop(sid, None)
 
+    def _cancel_all_session_waiters(self, rc: int = 1):
+        with self._scenario_wait_lock:
+            tokens = list(self._session_wait_events.keys())
+            for token in tokens:
+                self._session_wait_results[token] = rc
+                event = self._session_wait_events.get(token)
+                if event:
+                    event.set()
+            self._session_wait_events.clear()
+            self._session_waiters.clear()
+
     def _wait_for_session(self, token: str, waiter: threading.Event, timeout: Optional[float] = None) -> int:
         deadline = time.monotonic() + timeout if timeout else None
         while True:
@@ -8461,15 +8472,23 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # лёгкие нотификации по маркерам
         markers = {
-            "[NOTIFY] AUTOGEN_START": ("Autogen", "Началась вставка промптов"),
-            "[NOTIFY] AUTOGEN_FINISH_OK": ("Autogen", "Вставка промптов — успешно"),
-            "[NOTIFY] AUTOGEN_FINISH_PARTIAL": ("Autogen", "Вставка промптов — частично (были отказы)"),
-            "[NOTIFY] DOWNLOAD_START": ("Downloader", "Началась автоскачка"),
-            "[NOTIFY] DOWNLOAD_FINISH": ("Downloader", "Автоскачка завершена"),
+            "[NOTIFY] AUTOGEN_START": ("Autogen", "Началась вставка промптов", None),
+            "[NOTIFY] AUTOGEN_FINISH_OK": ("Autogen", "Вставка промптов — успешно", None),
+            "[NOTIFY] AUTOGEN_FINISH_PARTIAL": ("Autogen", "Вставка промптов — частично (были отказы)", None),
+            "[NOTIFY] DOWNLOAD_START": ("Downloader", "Началась автоскачка", None),
+            "[NOTIFY] DOWNLOAD_FINISH": ("Downloader", "Автоскачка завершена", None),
+            "[NOTIFY] CLOUDFLARE_ALERT": (
+                "Downloader",
+                "Похоже, Cloudflare просит проверку. Реши капчу вручную — скачка на паузе.",
+                "⚠️ Cloudflare: появилось окно проверки. Пройди её и продолжай скачивание.",
+            ),
         }
         notif = markers.get(clean.strip())
         if notif:
-            self._notify(*notif)
+            title, message, tg = notif
+            self._notify(title, message)
+            if tg:
+                self._send_tg(tg)
             return
 
         # форматируем строку для панели событий
@@ -11687,11 +11706,21 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ----- Stop -----
     def _stop_all(self):
+        self._automator_queue = []
+        self._automator_running = False
+        self._automator_waiting = False
+        self._automator_index = 0
+        self._automator_total = 0
+        self._automator_ok_all = False
+        self._cancel_all_session_waiters()
+
         self.runner_autogen.stop()
         self.runner_dl.stop()
         self.runner_upload.stop()
         self.runner_tiktok.stop()
         self.runner_watermark.stop()
+        for runner in list(self._session_runners.values()):
+            runner.stop()
         # стоп ffmpeg / любые активные
         with self._procs_lock:
             procs = list(self._active_procs)
