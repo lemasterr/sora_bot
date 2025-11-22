@@ -1579,6 +1579,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automator_index: int = 0
         self._automator_ok_all: bool = True
         self._automator_running: bool = False
+        self._automator_waiting: bool = False
 
         self._command_registry: Dict[str, Dict[str, Any]] = {}
         self._command_actions: Dict[str, QtGui.QAction] = {}
@@ -9512,6 +9513,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automator_index = 0
         self._automator_ok_all = True
         self._automator_running = True
+        self._automator_waiting = False
 
         self._post_status(
             "Автоматизация запускается…",
@@ -9523,6 +9525,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _automator_tick(self):
         if not self._automator_running:
+            return
+        if self._automator_waiting:
             return
         if self._automator_index >= self._automator_total:
             state = "ok" if self._automator_ok_all else "error"
@@ -9547,37 +9551,57 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
         def run_step():
-            ok = self._execute_automator_step(step, idx, self._automator_total)
-            if not ok:
-                self._automator_ok_all = False
-                self._append_activity(
-                    f"Автоматизация: шаг {idx} завершился ошибкой", kind="error", card_text=False
-                )
-                self._post_status(
-                    f"Автоматизация остановлена на шаге {idx}",
-                    progress=max(0, idx - 1),
-                    total=self._automator_total,
-                    state="error",
-                )
-                self._automator_running = False
-                self._refresh_stats()
-                return
+            def on_done(ok: bool):
+                self._automator_waiting = False
+                self._finish_automator_step(ok, idx)
 
-            self._append_activity(
-                f"Автоматизация: шаг {idx} выполнен", kind="success", card_text=False
+            result = self._execute_automator_step(
+                step, idx, self._automator_total, async_done=on_done
             )
-            self._post_status(
-                f"Шаг {idx}/{self._automator_total} завершён",
-                progress=idx,
-                total=self._automator_total,
-                state="running",
-            )
-            self._automator_index += 1
-            QtCore.QTimer.singleShot(0, self._automator_tick)
+            if result is not None:
+                self._automator_waiting = False
+                self._finish_automator_step(bool(result), idx)
+            else:
+                self._automator_waiting = True
 
         QtCore.QTimer.singleShot(0, run_step)
 
-    def _execute_automator_step(self, step: Dict[str, Any], idx: int, total: int) -> bool:
+    def _finish_automator_step(self, ok: bool, idx: int):
+        if not ok:
+            self._automator_ok_all = False
+            self._append_activity(
+                f"Автоматизация: шаг {idx} завершился ошибкой", kind="error", card_text=False
+            )
+            self._post_status(
+                f"Автоматизация остановлена на шаге {idx}",
+                progress=max(0, idx - 1),
+                total=self._automator_total,
+                state="error",
+            )
+            self._automator_running = False
+            self._refresh_stats()
+            return
+
+        self._append_activity(
+            f"Автоматизация: шаг {idx} выполнен", kind="success", card_text=False
+        )
+        self._post_status(
+            f"Шаг {idx}/{self._automator_total} завершён",
+            progress=idx,
+            total=self._automator_total,
+            state="running",
+        )
+        self._automator_index += 1
+        QtCore.QTimer.singleShot(0, self._automator_tick)
+
+    def _execute_automator_step(
+        self,
+        step: Dict[str, Any],
+        idx: int,
+        total: int,
+        *,
+        async_done: Optional[Callable[[bool], None]] = None,
+    ) -> Optional[bool]:
         step_type = step.get("type", "")
         if step_type.startswith("session_"):
             sessions = step.get("sessions") or []
@@ -9602,6 +9626,41 @@ class MainWindow(QtWidgets.QMainWindow):
                         return False
                 return True
             limit_override = int(step.get("limit", 0) or 0) if step_type == "session_download" else 0
+            if async_done:
+                remaining = list(sessions)
+
+                def run_next():
+                    if not remaining:
+                        async_done(True)
+                        return
+                    sid = remaining.pop(0)
+                    session = self._session_cache.get(sid)
+                    if not session:
+                        self._append_activity(f"Сессия {sid} не найдена", kind="error")
+                        async_done(False)
+                        return
+                    label = self._session_instance_label(session)
+                    self._post_status(
+                        f"Шаг {idx}/{total}: {self._describe_automator_step(step)} → {label}",
+                        state="running",
+                    )
+
+                    def after(ok: bool):
+                        if not ok:
+                            async_done(False)
+                        else:
+                            run_next()
+
+                    self._automator_run_session_task(
+                        sid,
+                        step_type,
+                        limit=(limit_override if limit_override > 0 else None),
+                        async_done=after,
+                    )
+
+                run_next()
+                return None
+
             for sid in sessions:
                 session = self._session_cache.get(sid)
                 if not session:
@@ -9638,6 +9697,7 @@ class MainWindow(QtWidgets.QMainWindow):
         step_type: str,
         *,
         limit: Optional[int] = None,
+        async_done: Optional[Callable[[bool], None]] = None,
     ) -> bool:
         expected_task = {
             "session_prompts": "autogen_prompts",
@@ -9681,14 +9741,33 @@ class MainWindow(QtWidgets.QMainWindow):
             QtCore.Qt.ConnectionType.QueuedConnection,
             QtCore.Q_ARG(object, start_task),
         )
-        if not done.wait(5.0):
-            self._append_activity(
-                f"Сессия {session_id}: задача не запустилась вовремя", kind="error", card_text=False
-            )
-            self._cancel_session_waiter(token)
-            return False
-        if not started["ok"]:
-            self._cancel_session_waiter(token)
+        
+        def handle_launch_timeout() -> bool:
+            if not done.wait(5.0):
+                self._append_activity(
+                    f"Сессия {session_id}: задача не запустилась вовремя", kind="error", card_text=False
+                )
+                self._cancel_session_waiter(token)
+                return False
+            if not started["ok"]:
+                self._cancel_session_waiter(token)
+                return False
+            return True
+
+        if async_done:
+            def waiter_thread():
+                launch_ok = handle_launch_timeout()
+                if not launch_ok:
+                    self._run_on_ui(lambda: async_done(False))
+                    return
+                rc = self._wait_for_session(token, waiter)
+                self._run_on_ui(lambda: async_done(rc == 0))
+
+            threading.Thread(target=waiter_thread, daemon=True).start()
+            return True
+
+        launch_ok = handle_launch_timeout()
+        if not launch_ok:
             return False
         rc = self._wait_for_session(token, waiter)
         return rc == 0
