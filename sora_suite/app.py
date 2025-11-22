@@ -3620,13 +3620,11 @@ class MainWindow(QtWidgets.QMainWindow):
         link_layout = QtWidgets.QHBoxLayout(quick_links)
         link_layout.setContentsMargins(16, 12, 16, 12)
         link_layout.setSpacing(10)
-        btn_to_workflow = QtWidgets.QPushButton("🧠 К пайплайну")
-        btn_to_workflow.clicked.connect(lambda: self._select_section("pipeline"))
         btn_to_automator = QtWidgets.QPushButton("🤖 Открыть автоматизатор")
         btn_to_automator.clicked.connect(lambda: self._select_section("automator"))
         btn_to_logs = QtWidgets.QPushButton("📜 Журналы")
         btn_to_logs.clicked.connect(lambda: self._select_section("logs"))
-        for btn in (btn_to_workflow, btn_to_automator, btn_to_logs):
+        for btn in (btn_to_automator, btn_to_logs):
             btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
             link_layout.addWidget(btn)
         link_layout.addStretch(1)
@@ -3671,14 +3669,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_context_session_prompts = QtWidgets.QPushButton("✍️ Промпты")
         self.btn_context_session_images = QtWidgets.QPushButton("🖼️ Картинки")
         self.btn_context_session_download = QtWidgets.QPushButton("⬇️ Скачка")
-        self.btn_context_session_watermark = QtWidgets.QPushButton("🧼 Очистка")
         self.btn_context_session_probe = QtWidgets.QPushButton("🧐 Проверка ВЗ")
         for btn in (
             self.btn_context_session_window,
             self.btn_context_session_prompts,
             self.btn_context_session_images,
             self.btn_context_session_download,
-            self.btn_context_session_watermark,
             self.btn_context_session_probe,
         ):
             btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
@@ -3694,35 +3690,6 @@ class MainWindow(QtWidgets.QMainWindow):
             scrollable=True,
             category="Рабочие процессы",
             description="Настройки отдельных Chrome-сессий и связанных файлов",
-        )
-
-        pipeline_context, pipeline_ctx_layout = make_context_card(
-            "Пайплайн",
-            "Собери нужные этапы и контролируй лимиты перед запуском."
-        )
-        self.lbl_context_pipeline_profile = QtWidgets.QLabel("—")
-        self.lbl_context_pipeline_profile.setWordWrap(True)
-        self.lbl_context_pipeline_steps = QtWidgets.QLabel("—")
-        self.lbl_context_pipeline_steps.setWordWrap(True)
-        self.lbl_context_pipeline_limits = QtWidgets.QLabel("—")
-        self.lbl_context_pipeline_limits.setWordWrap(True)
-        pipeline_form = QtWidgets.QFormLayout()
-        pipeline_form.setHorizontalSpacing(8)
-        pipeline_form.setVerticalSpacing(6)
-        pipeline_form.addRow("Chrome:", self.lbl_context_pipeline_profile)
-        pipeline_form.addRow("Этапы:", self.lbl_context_pipeline_steps)
-        pipeline_form.addRow("Лимиты:", self.lbl_context_pipeline_limits)
-        pipeline_ctx_layout.addLayout(pipeline_form)
-        pipeline_ctx_layout.addStretch(1)
-        register_context("pipeline", pipeline_context)
-        pipeline_root = self._build_pipeline_page()
-        add_section(
-            "pipeline",
-            "🧠 Пайплайн",
-            pipeline_root,
-            scrollable=True,
-            category="Рабочие процессы",
-            description="Настройка последовательности действий и лимитов",
         )
 
         automator_root = self._build_automator_page()
@@ -3932,34 +3899,6 @@ class MainWindow(QtWidgets.QMainWindow):
         replace_form.addWidget(self.cmb_wmr_inpaint_method, r, 1)
         replace_form.addItem(QtWidgets.QSpacerItem(20, 20, QtWidgets.QSizePolicy.Policy.Minimum, QtWidgets.QSizePolicy.Policy.Minimum), r, 2, 1, 2)
         wm_layout.addWidget(grp_replace)
-
-        wm_layout.addStretch(1)
-
-        wm_context, wm_ctx_layout = make_context_card(
-            "Замена водяного знака",
-            "Следи за активной папкой и шаблоном, чтобы не запустить обработку не того проекта.",
-        )
-        self.lbl_context_wmr_source = QtWidgets.QLabel("—")
-        self.lbl_context_wmr_output = QtWidgets.QLabel("—")
-        self.lbl_context_wmr_template = QtWidgets.QLabel("—")
-        wm_form = QtWidgets.QFormLayout()
-        wm_form.setHorizontalSpacing(8)
-        wm_form.setVerticalSpacing(6)
-        wm_form.addRow("RAW:", self.lbl_context_wmr_source)
-        wm_form.addRow("Output:", self.lbl_context_wmr_output)
-        wm_form.addRow("Шаблон:", self.lbl_context_wmr_template)
-        wm_ctx_layout.addLayout(wm_form)
-        wm_ctx_layout.addStretch(1)
-        register_context("watermark", wm_context)
-
-        add_section(
-            "watermark",
-            "🧼 Водяной знак",
-            self.tab_watermark,
-            scrollable=True,
-            category="Водяные знаки",
-            description="Замена логотипа подбором чистых фрагментов видео",
-        )
 
         wm_probe_cfg = self.cfg.get("watermark_probe", {}) or {}
         self.tab_watermark_probe, wm_probe_layout = make_scroll_tab()
@@ -5176,15 +5115,12 @@ class MainWindow(QtWidgets.QMainWindow):
         refresher = {
             "overview": self._refresh_overview_context,
             "sessions": self._refresh_sessions_context,
-            "pipeline": self._refresh_pipeline_context,
             "automator": self._refresh_automation_context,
             "logs": self._refresh_logs_context,
             "session_logs": self._refresh_session_logs_context,
-            "watermark": self._refresh_watermark_context,
             "watermark_probe": self._refresh_watermark_probe_context,
             "content": self._refresh_content_context,
             "telegram": self._refresh_telegram_context,
-            "autopost": self._refresh_autopost_context,
             "settings": self._refresh_settings_context,
         }.get(key)
         if callable(refresher):
@@ -7910,8 +7846,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.btn_context_session_images.clicked.connect(self._on_session_run_images)
         if hasattr(self, "btn_context_session_download"):
             self.btn_context_session_download.clicked.connect(self._on_session_run_download)
-        if hasattr(self, "btn_context_session_watermark"):
-            self.btn_context_session_watermark.clicked.connect(self._on_session_run_watermark)
         if hasattr(self, "btn_context_session_probe"):
             self.btn_context_session_probe.clicked.connect(lambda: self._select_section("watermark_probe"))
         if hasattr(self, "btn_context_tg_test"):
