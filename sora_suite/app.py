@@ -4760,6 +4760,14 @@ class MainWindow(QtWidgets.QMainWindow):
         autopost_ctx_layout.addWidget(self.btn_context_refresh_queues)
         autopost_ctx_layout.addStretch(1)
         register_context("autopost", autopost_context)
+        add_section(
+            "autopost",
+            "📤 Автопостинг",
+            autopost_host,
+            scrollable=True,
+            category="Интеграции",
+            description="Публикация роликов на YouTube и TikTok с управлением очередями.",
+        )
 
         self.telegram_panel = self._build_telegram_panel()
         telegram_context, telegram_ctx_layout = make_context_card(
