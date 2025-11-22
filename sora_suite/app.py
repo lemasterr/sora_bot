@@ -7685,9 +7685,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sig_set_status.connect(self._slot_set_status)
         self.sig_log.connect(self._slot_log)
 
-        self.cmb_chrome_profile_top.currentIndexChanged.connect(self._on_top_chrome_profile_changed)
-        self.cmb_chrome_profile_top.currentIndexChanged.connect(lambda *_: self._refresh_pipeline_context())
-        self.btn_scan_profiles_top.clicked.connect(self._on_toolbar_scan_profiles)
+        if hasattr(self, "cmb_chrome_profile_top"):
+            self.cmb_chrome_profile_top.currentIndexChanged.connect(self._on_top_chrome_profile_changed)
+            self.cmb_chrome_profile_top.currentIndexChanged.connect(lambda *_: self._refresh_pipeline_context())
+        if hasattr(self, "btn_scan_profiles_top"):
+            self.btn_scan_profiles_top.clicked.connect(self._on_toolbar_scan_profiles)
         if hasattr(self, "btn_toggle_commands"):
             self.btn_toggle_commands.toggled.connect(self._on_toolbar_commands_toggle)
         self.btn_open_chrome.clicked.connect(self._open_chrome)
