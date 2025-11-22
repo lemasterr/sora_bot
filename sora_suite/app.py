@@ -26,7 +26,15 @@ from functools import partial
 from urllib.request import urlopen, Request
 from collections import deque
 from typing import Optional, List, Union, Tuple, Dict, Callable, Any, Set, Iterable
-import sip
+try:
+    from PyQt6 import sip  # PyQt6 bundles sip under its namespace
+except Exception:  # pragma: no cover - fallback for environments without sip
+    class _SipStub:
+        @staticmethod
+        def isdeleted(obj: object) -> bool:
+            return False
+
+    sip = _SipStub()
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 
