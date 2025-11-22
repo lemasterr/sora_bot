@@ -7852,12 +7852,24 @@ class MainWindow(QtWidgets.QMainWindow):
             self.dt_youtube_publish.dateTimeChanged.connect(self._sync_delay_from_datetime)
         self.btn_tg_test.clicked.connect(self._test_tg_settings)
 
-        self.lst_tiktok_profiles.itemSelectionChanged.connect(self._on_tiktok_selected)
-        self.btn_tt_add.clicked.connect(self._on_tiktok_add_update)
-        self.btn_tt_delete.clicked.connect(self._on_tiktok_delete)
-        self.btn_tt_set_active.clicked.connect(self._on_tiktok_set_active)
-        self.btn_tt_secret.clicked.connect(lambda: self._browse_file(self.ed_tt_secret, "Выбери файл секретов", "JSON (*.json);;YAML (*.yaml *.yml);;Все файлы (*.*)"))
-        self.btn_tt_secret_load.clicked.connect(self._load_tiktok_secret_file)
+        if self._widget_alive(getattr(self, "lst_tiktok_profiles", None)):
+            self.lst_tiktok_profiles.itemSelectionChanged.connect(self._on_tiktok_selected)
+        if self._widget_alive(getattr(self, "btn_tt_add", None)):
+            self.btn_tt_add.clicked.connect(self._on_tiktok_add_update)
+        if self._widget_alive(getattr(self, "btn_tt_delete", None)):
+            self.btn_tt_delete.clicked.connect(self._on_tiktok_delete)
+        if self._widget_alive(getattr(self, "btn_tt_set_active", None)):
+            self.btn_tt_set_active.clicked.connect(self._on_tiktok_set_active)
+        if self._widget_alive(getattr(self, "btn_tt_secret", None)):
+            self.btn_tt_secret.clicked.connect(
+                lambda: self._browse_file(
+                    self.ed_tt_secret,
+                    "Выбери файл секретов",
+                    "JSON (*.json);;YAML (*.yaml *.yml);;Все файлы (*.*)",
+                )
+            )
+        if self._widget_alive(getattr(self, "btn_tt_secret_load", None)):
+            self.btn_tt_secret_load.clicked.connect(self._load_tiktok_secret_file)
         if hasattr(self, "btn_context_session_window"):
             self.btn_context_session_window.clicked.connect(self._on_session_open_window)
         if hasattr(self, "btn_context_session_prompts"):
