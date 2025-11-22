@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pdb
+*.egg-info/
+.env
+.venv/
+
+# Node
+node_modules/
+.sass-cache/
+.npm/
+.pnpm-store/
+bun.lockb
+package-lock.json
+pnpm-lock.yaml
+yarn.lock
+
+# Builds
+sora_suite/frontend/dist/
+.vite/
+.DS_Store
+
+# Editor
+.idea/
+.vscode/
