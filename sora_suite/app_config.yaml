@@ -1,7 +1,7 @@
-project_root: /Users/lemaster/Downloads/sora_bot-codex-add-video-download-and-autoplay-feature/sora_suite
-downloads_dir: /Users/lemaster/Downloads/sora_bot-codex-add-video-download-and-autoplay-feature/sora_suite/downloads
-blurred_dir: /Users/lemaster/Downloads/sora_bot-codex-add-video-download-and-autoplay-feature/sora_suite/blurred
-merged_dir: /Users/lemaster/Downloads/sora_bot-codex-add-video-download-and-autoplay-feature/sora_suite/merged
+project_root: .
+downloads_dir: ./downloads
+blurred_dir: ./blurred
+merged_dir: ./merged
 history_file: ./history.jsonl
 titles_file: ./titles.txt
 autogen:
@@ -13,99 +13,38 @@ autogen:
   instances: []
   active_prompts_profile: __general__
   sessions:
-  - id: default
-    name: Сессия 1
-    chrome_profile: ''
-    prompt_profile: __general__
-    cdp_port: null
-    prompts_file: ''
-    image_prompts_file: ''
-    submitted_log: ''
-    failed_log: ''
-    notes: ''
-    auto_launch_chrome: false
-    auto_launch_autogen: idle
-    download_dir: ''
-    clean_dir: ''
-    titles_file: ''
-    cursor_file: ''
-    max_videos: 0
-    open_drafts: true
-  - id: efbc15cd
-    name: Сессия 2
-    chrome_profile: Profile 4
-    prompt_profile: Profile 4
-    cdp_port: 8222
-    prompts_file: ''
-    image_prompts_file: ''
-    submitted_log: ''
-    failed_log: ''
-    notes: ''
-    auto_launch_chrome: false
-    auto_launch_autogen: idle
-    download_dir: ''
-    clean_dir: ''
-    titles_file: ''
-    cursor_file: ''
-    max_videos: 0
-    open_drafts: true
-  - id: 612e735a
-    name: Сессия 3
-    chrome_profile: Profile 6
-    prompt_profile: Profile 6
-    cdp_port: 8333
-    prompts_file: ''
-    image_prompts_file: ''
-    submitted_log: ''
-    failed_log: ''
-    notes: ''
-    auto_launch_chrome: false
-    auto_launch_autogen: idle
-    download_dir: ''
-    clean_dir: ''
-    titles_file: ''
-    cursor_file: ''
-    max_videos: 0
-    open_drafts: true
-  - id: f58f1fb6
-    name: Сессия 4
-    chrome_profile: ''
-    prompt_profile: __general__
-    cdp_port: null
-    prompts_file: ''
-    image_prompts_file: ''
-    submitted_log: ''
-    failed_log: ''
-    notes: ''
-    auto_launch_chrome: false
-    auto_launch_autogen: idle
-    download_dir: ''
-    clean_dir: ''
-    titles_file: ''
-    cursor_file: ''
-    max_videos: 0
-    open_drafts: true
-  image_prompts_file: /Users/lemaster/Downloads/sora_bot-codex-add-video-download-and-autoplay-feature/sora_suite/workers/autogen/image_prompts.txt
+    - id: default
+      name: "Сессия 1"
+      prompt_profile: __general__
+      chrome_profile: ""
+      cdp_port: null
+      prompts_file: ""
+      image_prompts_file: ""
+      submitted_log: ""
+      failed_log: ""
+      notes: ""
+      auto_launch_chrome: false
+      auto_launch_autogen: idle
 google_genai:
   enabled: false
-  api_key: ''
+  api_key: ""
   model: models/imagen-4.0-generate-001
-  aspect_ratio: '1:1'
+  aspect_ratio: "1:1"
   image_size: 1K
   number_of_images: 1
-  output_dir: /Users/lemaster/Downloads/sora_bot-codex-add-video-download-and-autoplay-feature/sora_suite/generated_images
-  manifest_file: /Users/lemaster/Downloads/sora_bot-codex-add-video-download-and-autoplay-feature/sora_suite/generated_images/manifest.json
+  output_dir: ./generated_images
+  manifest_file: ./generated_images/manifest.json
   rate_limit_per_minute: 0
   max_retries: 3
-  person_generation: По умолчанию (без явного запрета)
+  person_generation: ""
   output_mime_type: image/jpeg
   attach_to_sora: true
-  seeds: ''
+  seeds: ""
   consistent_character_design: false
-  lens_type: ''
-  color_palette: ''
-  style: ''
-  reference_prompt: ''
+  lens_type: ""
+  color_palette: ""
+  style: ""
+  reference_prompt: ""
   notifications_enabled: true
   daily_quota: 0
   quota_warning_prompts: 5
@@ -114,8 +53,7 @@ google_genai:
 downloader:
   workdir: ./workers/downloader
   entry: download_all.py
-  max_videos: 1
-  open_drafts: true
+  max_videos: 0
 watermark_cleaner:
   workdir: ./workers/watermark_cleaner
   entry: restore.py
@@ -144,26 +82,26 @@ youtube:
   entry: upload_queue.py
   channels: []
   active_channel: ''
-  upload_src_dir: /Users/lemaster/Downloads/sora_bot-codex-add-video-download-and-autoplay-feature/sora_suite/merged
+  upload_src_dir: ./merged
   schedule_minutes_from_now: 60
   draft_only: false
-  archive_dir: /Users/lemaster/Downloads/sora_bot-codex-add-video-download-and-autoplay-feature/sora_suite/uploaded
+  archive_dir: ./uploaded
   batch_step_minutes: 60
   batch_limit: 0
-  last_publish_at: '2025-11-22T02:36:13'
+  last_publish_at: ''
 tiktok:
   workdir: ./workers/tiktok
   entry: upload_queue.py
   profiles: []
   active_profile: ''
-  upload_src_dir: /Users/lemaster/Downloads/sora_bot-codex-add-video-download-and-autoplay-feature/sora_suite/merged
-  archive_dir: /Users/lemaster/Downloads/sora_bot-codex-add-video-download-and-autoplay-feature/sora_suite/uploaded_tiktok
+  upload_src_dir: ./merged
+  archive_dir: ./uploaded_tiktok
   schedule_minutes_from_now: 0
   schedule_enabled: true
   batch_step_minutes: 60
   batch_limit: 0
   draft_only: false
-  last_publish_at: '2025-11-22T01:36:12'
+  last_publish_at: ''
   github_workflow: .github/workflows/tiktok-upload.yml
   github_ref: main
 ffmpeg:
@@ -219,67 +157,25 @@ merge:
   pattern: '*.mp4'
 chrome:
   cdp_port: 9222
-  binary: /Applications/Google Chrome.app/Contents/MacOS/Google Chrome
+  binary: ''
   profiles:
   - name: Default (Windows)
-    user_data_dir: '%LOCALAPPDATA%/Google/Chrome/User Data'
+    user_data_dir: "%LOCALAPPDATA%/Google/Chrome/User Data"
     profile_directory: Default
   - name: Default (macOS)
-    user_data_dir: ~/Library/Application Support/Google/Chrome
+    user_data_dir: "~/Library/Application Support/Google/Chrome"
     profile_directory: Default
   - name: Default (Linux)
-    user_data_dir: ~/.config/google-chrome
+    user_data_dir: "~/.config/google-chrome"
     profile_directory: Default
-  - name: Default
-    user_data_dir: /Users/lemaster/Library/Application Support/Google/Chrome
-    profile_directory: Default
-  - name: Profile 10
-    user_data_dir: /Users/lemaster/Library/Application Support/Google/Chrome
-    profile_directory: Profile 10
-  - name: Profile 19
-    user_data_dir: /Users/lemaster/Library/Application Support/Google/Chrome
-    profile_directory: Profile 19
-  - name: Profile 11
-    user_data_dir: /Users/lemaster/Library/Application Support/Google/Chrome
-    profile_directory: Profile 11
-  - name: Profile 7
-    user_data_dir: /Users/lemaster/Library/Application Support/Google/Chrome
-    profile_directory: Profile 7
-  - name: Profile 9
-    user_data_dir: /Users/lemaster/Library/Application Support/Google/Chrome
-    profile_directory: Profile 9
-  - name: Profile 6
-    user_data_dir: /Users/lemaster/Library/Application Support/Google/Chrome
-    profile_directory: Profile 6
-  - name: Profile 1
-    user_data_dir: /Users/lemaster/Library/Application Support/Google/Chrome
-    profile_directory: Profile 1
-  - name: Profile 13
-    user_data_dir: /Users/lemaster/Library/Application Support/Google/Chrome
-    profile_directory: Profile 13
-  - name: Profile 15
-    user_data_dir: /Users/lemaster/Library/Application Support/Google/Chrome
-    profile_directory: Profile 15
-  - name: Profile 12
-    user_data_dir: /Users/lemaster/Library/Application Support/Google/Chrome
-    profile_directory: Profile 12
-  - name: Profile 4
-    user_data_dir: /Users/lemaster/Library/Application Support/Google/Chrome
-    profile_directory: Profile 4
-  - name: Profile 2
-    user_data_dir: /Users/lemaster/Library/Application Support/Google/Chrome
-    profile_directory: Profile 2
-  active_profile: Default (Windows)
+  active_profile: ''
   user_data_dir: ''
-blur_src_dir: /Users/lemaster/Downloads/sora_bot-codex-add-video-download-and-autoplay-feature/sora_suite/downloads
-merge_src_dir: /Users/lemaster/Downloads/sora_bot-codex-add-video-download-and-autoplay-feature/sora_suite/blurred
+blur_src_dir: ./downloads
+merge_src_dir: ./blurred
 telegram:
   enabled: false
   bot_token: ''
   chat_id: ''
-  templates: []
-  last_template: ''
-  quick_delay_minutes: 0
 maintenance:
   auto_cleanup_on_start: false
   retention_days:
@@ -290,36 +186,5 @@ ui:
   show_activity: true
   accent_kind: info
   activity_density: compact
-  show_context: false
+  show_context: true
   custom_commands: []
-  nav_collapsed:
-    Мониторинг: true
-    Рабочие процессы: false
-automator:
-  steps:
-  - type: session_download
-    sessions:
-    - efbc15cd
-    limit: 0
-  - type: session_download
-    sessions:
-    - 612e735a
-    limit: 0
-  presets: []
-watermark_probe:
-  source_dir: /Users/lemaster/Downloads/sora_bot-codex-add-video-download-and-autoplay-feature/sora_suite/downloads
-  output_dir: /Users/lemaster/Downloads/sora_bot-codex-add-video-download-and-autoplay-feature/sora_suite/restored
-  region:
-    x: 0
-    y: 0
-    w: 320
-    h: 120
-  frames: 120
-  brightness_threshold: 245
-  coverage_ratio: 0.002
-  method: hybrid
-  edge_ratio: 0.006
-  min_hits: 1
-  downscale: 2.0
-  flip_when: missing
-  flip_direction: left
