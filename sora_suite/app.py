@@ -7640,6 +7640,14 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             return True
 
+    def _tiktok_schedule_enabled(self) -> bool:
+        cb = getattr(self, "cb_tiktok_schedule", None)
+        return bool(cb.isChecked()) if self._widget_alive(cb) else False
+
+    def _tiktok_draft_enabled(self) -> bool:
+        cb = getattr(self, "cb_tiktok_draft", None)
+        return bool(cb.isChecked()) if self._widget_alive(cb) else False
+
     def _wire_youtube_section(self) -> None:
         if not self._widget_alive(getattr(self, "btn_youtube_src_browse", None)):
             return
@@ -7925,9 +7933,17 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         if hasattr(self, "btn_preset_clear"):
             self.btn_preset_clear.clicked.connect(lambda: self._apply_task_preset("Сброс", []))
-        self.cb_tiktok_schedule.toggled.connect(self._toggle_tiktok_schedule)
-        self.cb_tiktok_schedule.toggled.connect(lambda _: self._update_tiktok_queue_label())
-        self.cb_tiktok_draft.toggled.connect(lambda _: self._update_tiktok_queue_label())
+        if self._widget_alive(getattr(self, "cb_tiktok_schedule", None)):
+            try:
+                self.cb_tiktok_schedule.toggled.connect(self._toggle_tiktok_schedule)
+                self.cb_tiktok_schedule.toggled.connect(lambda _: self._update_tiktok_queue_label())
+            except RuntimeError:
+                self.cb_tiktok_schedule = None
+        if self._widget_alive(getattr(self, "cb_tiktok_draft", None)):
+            try:
+                self.cb_tiktok_draft.toggled.connect(lambda _: self._update_tiktok_queue_label())
+            except RuntimeError:
+                self.cb_tiktok_draft = None
         self.sb_tiktok_interval.valueChanged.connect(self._reflect_tiktok_interval)
         self.sb_tiktok_batch_limit.valueChanged.connect(lambda _: self._update_tiktok_queue_label())
         self.ed_tiktok_src.textChanged.connect(lambda _: self._update_tiktok_queue_label())
@@ -11821,7 +11837,7 @@ class MainWindow(QtWidgets.QMainWindow):
         tk_cfg["github_ref"] = self.ed_tiktok_ref_settings.text().strip() or tk_cfg.get("github_ref", "main")
         tk_cfg["last_publish_at"] = self.dt_tiktok_publish.dateTime().toString(QtCore.Qt.DateFormat.ISODate)
         if hasattr(self, "cb_tiktok_schedule"):
-            tk_cfg["schedule_enabled"] = bool(self.cb_tiktok_schedule.isChecked())
+            tk_cfg["schedule_enabled"] = self._tiktok_schedule_enabled()
 
         tg_cfg = self.cfg.setdefault("telegram", {})
         tg_cfg["enabled"] = bool(self.cb_tg_enabled.isChecked())
@@ -12913,18 +12929,20 @@ class MainWindow(QtWidgets.QMainWindow):
         parts = [f"найдено {count}"]
         if limit > 0:
             parts.append(f"будет загружено {effective}")
-        if self.cb_tiktok_draft.isChecked():
+        if self._tiktok_draft_enabled():
             parts.append("черновики")
-        elif self.cb_tiktok_schedule.isChecked() and interval > 0 and effective > 1:
+        elif self._tiktok_schedule_enabled() and interval > 0 and effective > 1:
             parts.append(f"шаг {interval} мин")
         self.lbl_tiktok_queue.setText("Очередь: " + ", ".join(parts))
         self._refresh_autopost_context()
 
     def _toggle_tiktok_schedule(self):
-        enable = self.cb_tiktok_schedule.isChecked() and not self.cb_tiktok_draft.isChecked()
+        if not self._widget_alive(getattr(self, "dt_tiktok_publish", None)):
+            return
+        enable = self._tiktok_schedule_enabled() and not self._tiktok_draft_enabled()
         self.dt_tiktok_publish.setEnabled(enable)
         self.sb_tiktok_interval.setEnabled(enable)
-        self.cfg.setdefault("tiktok", {})["schedule_enabled"] = bool(self.cb_tiktok_schedule.isChecked())
+        self.cfg.setdefault("tiktok", {})["schedule_enabled"] = self._tiktok_schedule_enabled()
 
     def _reflect_tiktok_interval(self, value: int):
         try:
@@ -12940,7 +12958,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _sync_tiktok_from_datetime(self):
         if not hasattr(self, "sb_tiktok_default_delay"):
             return
-        if not self.cb_tiktok_schedule.isChecked() or self.cb_tiktok_draft.isChecked():
+        if not self._tiktok_schedule_enabled() or self._tiktok_draft_enabled():
             return
         target = self.dt_tiktok_publish.dateTime()
         if not target.isValid():
@@ -12988,7 +13006,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         publish_at_iso = ""
         schedule_text = ""
-        if self.cb_tiktok_schedule.isChecked() and not self.cb_tiktok_draft.isChecked():
+        if self._tiktok_schedule_enabled() and not self._tiktok_draft_enabled():
             dt_local = self.dt_tiktok_publish.dateTime()
             tk_cfg["last_publish_at"] = dt_local.toString(QtCore.Qt.DateFormat.ISODate)
             publish_at_iso = dt_local.toUTC().toString("yyyy-MM-dd'T'HH:mm:ss'Z'")
@@ -13008,11 +13026,11 @@ class MainWindow(QtWidgets.QMainWindow):
         env["TIKTOK_ARCHIVE_DIR"] = str(_project_path(tk_cfg.get("archive_dir", str(PROJECT_ROOT / "uploaded_tiktok"))))
         env["TIKTOK_BATCH_LIMIT"] = str(int(self.sb_tiktok_batch_limit.value()))
         env["TIKTOK_BATCH_STEP_MINUTES"] = str(int(self.sb_tiktok_interval.value()))
-        env["TIKTOK_DRAFT_ONLY"] = "1" if self.cb_tiktok_draft.isChecked() else "0"
+        env["TIKTOK_DRAFT_ONLY"] = "1" if self._tiktok_draft_enabled() else "0"
         if publish_at_iso:
             env["TIKTOK_PUBLISH_AT"] = publish_at_iso
 
-        draft_note = " (черновики)" if self.cb_tiktok_draft.isChecked() else ""
+        draft_note = " (черновики)" if self._tiktok_draft_enabled() else ""
         self._send_tg(f"📤 TikTok запускается: {len(videos)} роликов{draft_note}")
         self._post_status("Загрузка в TikTok…", state="running")
         rc = self._await_runner(self.runner_tiktok, "TT", lambda: self.runner_tiktok.run([python, entry], cwd=workdir, env=env))
@@ -13044,9 +13062,9 @@ class MainWindow(QtWidgets.QMainWindow):
             "profile": profile,
             "limit": str(int(self.sb_tiktok_batch_limit.value())),
             "interval": str(int(self.sb_tiktok_interval.value())),
-            "draft": "1" if self.cb_tiktok_draft.isChecked() else "0",
+            "draft": "1" if self._tiktok_draft_enabled() else "0",
         }
-        if self.cb_tiktok_schedule.isChecked() and not self.cb_tiktok_draft.isChecked():
+        if self._tiktok_schedule_enabled() and not self._tiktok_draft_enabled():
             inputs["publish_at"] = self.dt_tiktok_publish.toUTC().toString("yyyy-MM-dd'T'HH:mm:ss'Z'")
         src = self.ed_tiktok_src.text().strip() or self.cfg.get("tiktok", {}).get("upload_src_dir", "")
         if src:
