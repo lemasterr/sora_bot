@@ -1,55 +1,62 @@
-# Sora Suite — PyQt6 контрольный центр
+# Sora Suite — Electron + React shell
 
-Sora Suite управляет полным циклом создания и публикации роликов Sora: генерация промптов, автоген изображений через Google AI Studio, отправка в Sora, скачивание, блюр/склейка через FFmpeg и автопостинг на YouTube и TikTok. Интерфейс — десктопное приложение на PyQt6; воркеры запускаются рядом как CLI‑скрипты.
+This repository now ships a frameless Electron application that drives the existing Python automation workers (`sora_suite/workers`). The Python code remains the execution engine (Playwright, FFmpeg, GenAI). Electron + React only provides the cyberpunk UI, streams logs, and passes environment variables to the Python scripts.
 
-## Быстрый старт
-1. Создайте виртуальное окружение и установите зависимости:
-   ```bash
-   python -m venv .venv
-   # Windows: .venv\\Scripts\\activate
-   # macOS/Linux: source .venv/bin/activate
-   python -m pip install --upgrade pip
-   python -m pip install -r sora_suite/requirements.txt
-   python -m playwright install chromium
-   ```
-   Или одной командой:
-   ```bash
-   python scripts/bootstrap.py
-   ```
-2. Запустите контроллер:
-   ```bash
-   python -m sora_suite.app
-   ```
-3. Первый запуск создаст `sora_suite/app_config.yaml` с дефолтами путей (downloads/blurred/merged, каталоги воркеров, профили Chrome, YouTube/TikTok и т.д.).
+## Prerequisites
+- Python 3.10+
+- Node.js 20+
+- Chrome/Chromium running with `--remote-debugging-port=9222` for the downloader
 
-## Структура и основные модули
-- **GUI**: `sora_suite/app.py` — главное окно с вкладками «Обзор», «Рабочие пространства», «Логи сессий», «Водяной знак», «Проверка ВЗ», YouTube, TikTok, «Контент», Telegram и «Настройки».
-- **Конфиг**: `sora_suite/app_config.yaml` — пути проектов, профили автогена и сессий Chrome, параметры FFmpeg, Google GenAI, очереди загрузки и UI‑настройки.
-- **Утилиты**:
-  - `scripts/bootstrap.py` — установка Python-зависимостей и браузера Playwright.
-  - `scripts/self_update.py` — обновление репозитория через `git fetch` + `git pull --ff-only`.
-- **Воркеры/CLI**:
-  - `sora_suite/workers/autogen/main.py` — автоген промптов и картинок, интеграция Google AI Studio.
-  - `sora_suite/workers/downloader/download_all.py` — скачивание драфтов Sora через CDP.
-  - `sora_suite/workers/watermark_cleaner/restore.py` — замена водяного знака по шаблону.
-  - `sora_suite/workers/uploader/upload_queue.py` — пакетная загрузка на YouTube.
-  - `sora_suite/workers/tiktok/upload_queue.py` — загрузка на TikTok + GitHub Actions workflow.
+## Python setup
+```bash
+python -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
+python -m pip install --upgrade pip
+python -m pip install -r sora_suite/requirements.txt
+python -m playwright install chromium
+```
 
-## Запуск и сценарии
-- Открывайте вкладку **Обзор**, чтобы отмечать этапы пайплайна (автоген, скачивание, блюр/склейка, публикация) и запускать сценарии.
-- Во вкладке **Рабочие пространства** редактируйте профили Chrome/CDP и файлы промптов, запускайте автоген/скачивание по сессиям.
-- **YouTube** и **TikTok** управляют очередями, метаданными и расписанием, используют OAuth/секреты из `sora_suite/secrets/`.
-- **Водяной знак** и **Проверка ВЗ** дают инструменты поиска/замены логотипа, поддерживают пакетную обработку.
-- **Настройки** содержат каталоги проекта, параметры FFmpeg, Playwright/Chrome, Telegram и пользовательские команды.
+## Node/Electron setup
+```bash
+npm install
+```
 
-## Обновления и обслуживание
-- Для обновления из репозитория выполните:
-  ```bash
-  python scripts/self_update.py
-  ```
-- Файл `history.jsonl` ротуируется при достижении 10 МБ. Очистку старых файлов и автоматический запуск Chrome/воркеров настраивайте во вкладке «Настройки».
+### Development
+Run Vite + Electron in watch mode (renders from the dev server and rebuilds the main/preload process automatically):
+```bash
+npm run dev
+```
+The renderer lives at <http://localhost:5173> and Electron will load it via `VITE_DEV_SERVER_URL`.
 
-## Полезные советы
-- Если Playwright не видит Chromium, повторите `python -m playwright install chromium`.
-- Для работы CDP убедитесь, что Chrome/Chromium запускается с нужным `--remote-debugging-port` (порт хранится в конфиге).
-- FFmpeg можно переопределить в конфиге; для аппаратного ускорения используйте `vcodec: auto_hw`.
+### Production build
+```bash
+npm run build   # outputs dist/ for the renderer and dist-electron/ for main/preload
+npm run preview # optional, serve the built renderer only
+```
+Start the packaged app locally after a build:
+```bash
+cross-env VITE_DEV_SERVER_URL= electron dist-electron/main.js
+```
+
+## How it works
+- Electron spawns `python -m sora_suite.bridge` through IPC (`runPython`).
+- The `bridge.py` adapter turns renderer inputs into environment variables (e.g., `SORA_PROMPTS_FILE`, `SORA_CDP_ENDPOINT`, `DOWNLOAD_DIR`, `MAX_VIDEOS`, `GENAI_IMAGES_ONLY`).
+- `bridge.py` calls the existing workers:
+  - `sora_suite.workers.autogen.main.main()`
+  - `sora_suite.workers.downloader.download_all.main()`
+- stdout/stderr from Python are streamed back to the React UI in real time.
+
+## UI mapping to worker settings
+- **Prompt textarea** → written to a temp file and passed as `SORA_PROMPTS_FILE`.
+- **CDP endpoint** → `SORA_CDP_ENDPOINT` + `CDP_ENDPOINT`.
+- **Downloads dir** → `DOWNLOAD_DIR`.
+- **Max videos** → `MAX_VIDEOS` (0 = all drafts).
+- **Open drafts first** → `OPEN_DRAFTS_FIRST`.
+- **Generate images only** → `GENAI_IMAGES_ONLY=1`.
+- **Attach GenAI output to Sora** → `GENAI_ATTACH_TO_SORA`.
+- **Run downloader after autogen** → runs `download_all.py` after `autogen/main.py` completes.
+
+## Notes
+- The legacy PyQt6 interface is removed from the dependency list; only the Python worker stack is required.
+- Keep Playwright browsers installed (`python -m playwright install chromium`).
+- You can override the Python binary via `PYTHON` or `PYTHON_PATH` when launching Electron.
