@@ -21,6 +21,13 @@ python -m playwright install chromium
 npm install
 ```
 
+### One-shot setup, build, and launch
+Run everything (Python deps, Playwright browser, Node deps, build, and the packaged app) in one command:
+```bash
+./scripts/full_setup.sh
+```
+Set `PYTHON=/path/to/python` if you need a non-default interpreter.
+
 ### Development
 Run Vite + Electron in watch mode (renders from the dev server and rebuilds the main/preload process automatically):
 ```bash
