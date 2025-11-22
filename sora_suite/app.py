@@ -4757,6 +4757,11 @@ class MainWindow(QtWidgets.QMainWindow):
         queue_form.addRow("YouTube:", self.lbl_context_youtube_queue)
         queue_form.addRow("TikTok:", self.lbl_context_tiktok_queue)
         autopost_ctx_layout.addLayout(queue_form)
+        autopost_btns = QtWidgets.QHBoxLayout()
+        self.btn_context_open_autopost = QtWidgets.QPushButton("Открыть автопостинг")
+        autopost_btns.addWidget(self.btn_context_open_autopost)
+        autopost_btns.addStretch(1)
+        autopost_ctx_layout.addLayout(autopost_btns)
         self.btn_context_refresh_queues = QtWidgets.QPushButton("Обновить очереди")
         autopost_ctx_layout.addWidget(self.btn_context_refresh_queues)
         autopost_ctx_layout.addStretch(1)
@@ -7699,11 +7704,26 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sig_log.connect(self._slot_log)
 
         def connect_if_alive(widget: QtWidgets.QWidget | None, signal_name: str, slot):
+            """Safely connect a signal if the widget is still alive.
+
+            In the new layout some autopost widgets can be destroyed when cards are
+            reconstructed; guard against deleted Qt wrappers or missing signals to
+            keep startup stable.
+            """
+
             if widget is None:
                 return
-            if hasattr(widget, "isWidgetType") and sip.isdeleted(widget):
+
+            try:
+                if hasattr(widget, "isWidgetType") and sip.isdeleted(widget):
+                    return
+                signal = getattr(widget, signal_name, None)
+                if signal is None:
+                    return
+                signal.connect(slot)
+            except RuntimeError:
+                # Widget might have been deleted between the guard and connect
                 return
-            getattr(widget, signal_name).connect(slot)
 
         self.cmb_chrome_profile_top.currentIndexChanged.connect(self._on_top_chrome_profile_changed)
         self.cmb_chrome_profile_top.currentIndexChanged.connect(lambda *_: self._refresh_pipeline_context())
@@ -7904,6 +7924,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.btn_context_tg_test.clicked.connect(self._test_tg_settings)
         if hasattr(self, "btn_context_tg_open"):
             self.btn_context_tg_open.clicked.connect(lambda: self._select_section("telegram"))
+        if hasattr(self, "btn_context_open_autopost"):
+            connect_if_alive(self.btn_context_open_autopost, "clicked", lambda: self._select_section("autopost"))
         if hasattr(self, "btn_context_refresh_queues"):
             self.btn_context_refresh_queues.clicked.connect(self._update_youtube_queue_label)
             self.btn_context_refresh_queues.clicked.connect(self._update_tiktok_queue_label)
