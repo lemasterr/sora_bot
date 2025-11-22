@@ -7692,7 +7692,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.btn_scan_profiles_top.clicked.connect(self._on_toolbar_scan_profiles)
         if hasattr(self, "btn_toggle_commands"):
             self.btn_toggle_commands.toggled.connect(self._on_toolbar_commands_toggle)
-        self.btn_open_chrome.clicked.connect(self._open_chrome)
+        if hasattr(self, "btn_open_chrome"):
+            self.btn_open_chrome.clicked.connect(self._open_chrome)
         self.btn_open_root.clicked.connect(lambda: open_in_finder(self.cfg.get("project_root", PROJECT_ROOT)))
         self.btn_open_raw.clicked.connect(lambda: open_in_finder(self.cfg.get("downloads_dir", DL_DIR)))
         self.btn_collect_raw.clicked.connect(self._gather_session_downloads)
