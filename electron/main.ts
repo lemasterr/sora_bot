@@ -55,8 +55,10 @@ app.on('window-all-closed', () => {
   }
 });
 
+type PythonTask = 'pipeline' | 'autogen' | 'downloader' | 'watermark' | 'youtube' | 'tiktok';
+
 interface PythonCommand {
-  task: 'pipeline' | 'autogen' | 'downloader';
+  task: PythonTask;
   payload?: Record<string, unknown>;
 }
 

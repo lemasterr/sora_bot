@@ -66,6 +66,8 @@ const App: React.FC = () => {
   const [activeTask, setActiveTask] = useState<
     'idle' | 'autogen' | 'downloader' | 'pipeline' | 'watermark' | 'youtube' | 'tiktok'
   >('idle');
+  const [bootProgress, setBootProgress] = useState(0);
+  const [isBooting, setIsBooting] = useState(true);
 
   const countdown = useCountdown(isRunning && activeTask === 'pipeline');
 
@@ -81,11 +83,27 @@ const App: React.FC = () => {
           pid: entry.pid,
         },
       ]);
+      setBootProgress(100);
+      setTimeout(() => setIsBooting(false), 300);
     });
 
     return () => {
       dispose?.();
     };
+  }, []);
+
+  useEffect(() => {
+    let current = 0;
+    const timer = setInterval(() => {
+      current = Math.min(100, current + Math.random() * 18 + 5);
+      setBootProgress(Math.round(current));
+      if (current >= 100) {
+        clearInterval(timer);
+        setTimeout(() => setIsBooting(false), 300);
+      }
+    }, 180);
+
+    return () => clearInterval(timer);
   }, []);
 
   const sendCommand = async (command: RunPythonCommand) => {
@@ -226,7 +244,20 @@ const App: React.FC = () => {
   ];
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-zinc-950 via-zinc-900 to-black text-slate-100">
+    <div className="relative min-h-screen bg-gradient-to-br from-zinc-950 via-zinc-900 to-black text-slate-100">
+      {isBooting && (
+        <div className="pointer-events-auto absolute inset-0 z-50 flex flex-col items-center justify-center bg-gradient-to-br from-black via-zinc-950 to-black/90">
+          <div className="mb-4 h-16 w-16 animate-pulse rounded-full border border-indigo-500/40 bg-indigo-500/10 shadow-[0_0_40px_rgba(59,130,246,0.45)]" />
+          <p className="text-sm font-semibold text-indigo-100">Booting control lab…</p>
+          <div className="mt-3 h-2 w-72 overflow-hidden rounded-full border border-white/10 bg-white/5">
+            <div
+              className="h-full rounded-full bg-gradient-to-r from-indigo-500 via-blue-400 to-emerald-400 shadow-[0_0_20px_rgba(59,130,246,0.6)] transition-all duration-200"
+              style={{ width: `${Math.min(100, bootProgress)}%` }}
+            />
+          </div>
+          <p className="mt-2 text-xs text-slate-300">{bootProgress}%</p>
+        </div>
+      )}
       <div className="grid min-h-screen grid-cols-[240px_1fr] overflow-hidden">
         <aside className="relative hidden bg-gradient-to-b from-black/80 via-zinc-950/90 to-black/70 backdrop-blur-xl md:block">
           <div className="absolute inset-0 bg-[radial-gradient(circle_at_20%_20%,rgba(59,130,246,0.08),transparent_35%),radial-gradient(circle_at_80%_10%,rgba(16,185,129,0.06),transparent_30%)]" />
