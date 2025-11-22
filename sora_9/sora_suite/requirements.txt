@@ -1,0 +1,14 @@
+PyQt6==6.7.0
+PyQt6-Qt6==6.7.0
+PyQt6-Qt6-DBus==6.7.0; sys_platform == "linux"
+opencv-python==4.10.0.84
+playwright==1.48.0
+PyYAML==6.0.2
+platformdirs==4.2.2
+requests==2.32.3
+google-api-python-client==2.129.0
+google-auth==2.34.0
+google-auth-oauthlib==1.2.1
+google-auth-httplib2==0.2.0
+google-genai==1.45.0
+backports.zoneinfo==0.2.1; python_version < "3.9"
