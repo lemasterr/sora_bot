@@ -6,6 +6,16 @@ import { spawn } from 'node:child_process';
 const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
 let mainWindow: any | null = null;
 
+const resolveRendererIndex = () => {
+  const appDist = path.join(app.getAppPath(), 'dist', 'index.html');
+  if (fs.existsSync(appDist)) return appDist;
+
+  const bundledDist = path.join(__dirname, '../dist/index.html');
+  if (fs.existsSync(bundledDist)) return bundledDist;
+
+  return '';
+};
+
 const createWindow = () => {
   mainWindow = new BrowserWindow({
     width: 1320,
@@ -30,14 +40,25 @@ const createWindow = () => {
     mainWindow.loadURL(devURL);
     mainWindow.webContents.openDevTools({ mode: 'detach' });
   } else {
-    const indexPath = path.join(__dirname, '../dist/index.html');
-    if (fs.existsSync(indexPath)) {
+    const indexPath = resolveRendererIndex();
+    if (indexPath) {
       mainWindow.loadFile(indexPath);
     } else {
-      const message = `Renderer bundle missing at ${indexPath}. Run \`npm run build\` first.`;
-      mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(`<pre style="background:#0b0b0f;color:#e5e7eb;padding:24px;font-family:Inter, monospace">${message}</pre>`)}`);
+      const message = 'Renderer bundle missing. Run `npm run build` to generate dist assets.';
+      mainWindow.loadURL(
+        `data:text/html;charset=utf-8,${encodeURIComponent(
+          `<pre style="background:#0b0b0f;color:#e5e7eb;padding:24px;font-family:Inter, monospace">${message}</pre>`,
+        )}`,
+      );
     }
   }
+
+  mainWindow.webContents.on('did-fail-load', (_event, code, desc) => {
+    const message = `[main] Renderer failed to load: ${code} ${desc}`;
+    // Emit into devtools console for packaged builds to avoid silent black screens.
+    console.error(message);
+    sendLog({ message, source: 'stderr' });
+  });
 
   mainWindow.webContents.setWindowOpenHandler(({ url }: { url: string }) => {
     shell.openExternal(url);
