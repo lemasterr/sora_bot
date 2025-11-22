@@ -28,6 +28,7 @@ from collections import deque
 from typing import Optional, List, Union, Tuple, Dict, Callable, Any, Set, Iterable
 
 from PyQt6 import QtCore, QtGui, QtWidgets
+import sip
 
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
@@ -7697,6 +7698,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sig_set_status.connect(self._slot_set_status)
         self.sig_log.connect(self._slot_log)
 
+        def connect_if_alive(widget: QtWidgets.QWidget | None, signal_name: str, slot):
+            if widget is None:
+                return
+            if hasattr(widget, "isWidgetType") and sip.isdeleted(widget):
+                return
+            getattr(widget, signal_name).connect(slot)
+
         self.cmb_chrome_profile_top.currentIndexChanged.connect(self._on_top_chrome_profile_changed)
         self.cmb_chrome_profile_top.currentIndexChanged.connect(lambda *_: self._refresh_pipeline_context())
         self.btn_scan_profiles_top.clicked.connect(self._on_toolbar_scan_profiles)
@@ -7811,22 +7819,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_preset_preview.clicked.connect(self._open_blur_preview)
         self.btn_aw_template.clicked.connect(lambda: self._browse_file(self.ed_aw_template, "Выбери шаблон водяного знака", "Изображения (*.png *.jpg *.jpeg *.bmp);;Все файлы (*.*)"))
 
-        self.btn_youtube_src_browse.clicked.connect(lambda: self._browse_dir(self.ed_youtube_src, "Выбери папку с клипами"))
-        self.cb_youtube_draft_only.toggled.connect(self._toggle_youtube_schedule)
-        self.cb_youtube_draft_only.toggled.connect(lambda _: self._update_youtube_queue_label())
-        self.cb_youtube_schedule.toggled.connect(self._toggle_youtube_schedule)
-        self.cb_youtube_schedule.toggled.connect(lambda _: self._update_youtube_queue_label())
-        self.lst_youtube_channels.itemSelectionChanged.connect(self._on_youtube_selected)
-        self.btn_yt_add.clicked.connect(self._on_youtube_add_update)
-        self.btn_yt_delete.clicked.connect(self._on_youtube_delete)
-        self.btn_yt_set_active.clicked.connect(self._on_youtube_set_active)
-        self.btn_yt_client_browse.clicked.connect(lambda: self._browse_file(self.ed_yt_client, "client_secret.json", "JSON (*.json);;Все файлы (*.*)"))
-        self.btn_yt_credentials_browse.clicked.connect(lambda: self._browse_file(self.ed_yt_credentials, "credentials.json", "JSON (*.json);;Все файлы (*.*)"))
-        self.btn_youtube_archive_browse.clicked.connect(lambda: self._browse_dir(self.ed_youtube_archive, "Выбери папку архива"))
-        self.cb_youtube_default_draft.toggled.connect(self._sync_draft_checkbox)
-        self.sb_youtube_default_delay.valueChanged.connect(self._apply_default_delay)
-        self.sb_youtube_interval_default.valueChanged.connect(lambda val: self.sb_youtube_interval.setValue(int(val)))
-        self.sb_youtube_limit_default.valueChanged.connect(lambda val: self.sb_youtube_batch_limit.setValue(int(val)))
+        connect_if_alive(self.btn_youtube_src_browse, "clicked", lambda: self._browse_dir(self.ed_youtube_src, "Выбери папку с клипами"))
+        connect_if_alive(self.cb_youtube_draft_only, "toggled", self._toggle_youtube_schedule)
+        connect_if_alive(self.cb_youtube_draft_only, "toggled", lambda _: self._update_youtube_queue_label())
+        connect_if_alive(self.cb_youtube_schedule, "toggled", self._toggle_youtube_schedule)
+        connect_if_alive(self.cb_youtube_schedule, "toggled", lambda _: self._update_youtube_queue_label())
+        connect_if_alive(self.lst_youtube_channels, "itemSelectionChanged", self._on_youtube_selected)
+        connect_if_alive(self.btn_yt_add, "clicked", self._on_youtube_add_update)
+        connect_if_alive(self.btn_yt_delete, "clicked", self._on_youtube_delete)
+        connect_if_alive(self.btn_yt_set_active, "clicked", self._on_youtube_set_active)
+        connect_if_alive(self.btn_yt_client_browse, "clicked", lambda: self._browse_file(self.ed_yt_client, "client_secret.json", "JSON (*.json);;Все файлы (*.*)"))
+        connect_if_alive(self.btn_yt_credentials_browse, "clicked", lambda: self._browse_file(self.ed_yt_credentials, "credentials.json", "JSON (*.json);;Все файлы (*.*)"))
+        connect_if_alive(self.btn_youtube_archive_browse, "clicked", lambda: self._browse_dir(self.ed_youtube_archive, "Выбери папку архива"))
+        connect_if_alive(self.cb_youtube_default_draft, "toggled", self._sync_draft_checkbox)
+        connect_if_alive(self.sb_youtube_default_delay, "valueChanged", self._apply_default_delay)
+        connect_if_alive(self.sb_youtube_interval_default, "valueChanged", lambda val: self.sb_youtube_interval.setValue(int(val)))
+        connect_if_alive(self.sb_youtube_limit_default, "valueChanged", lambda val: self.sb_youtube_batch_limit.setValue(int(val)))
         self.btn_wmr_source_browse.clicked.connect(lambda: self._browse_dir(self.ed_wmr_source, "Выбери папку RAW"))
         self.btn_wmr_output_browse.clicked.connect(lambda: self._browse_dir(self.ed_wmr_output, "Выбери папку для готовых клипов"))
         self.btn_wmr_template_browse.clicked.connect(
@@ -7862,24 +7870,24 @@ class MainWindow(QtWidgets.QMainWindow):
             self.btn_probe_batch_scan.clicked.connect(lambda: self._run_watermark_probe_batch(flip=False))
         if hasattr(self, "btn_probe_batch_flip"):
             self.btn_probe_batch_flip.clicked.connect(lambda: self._run_watermark_probe_batch(flip=True))
-        self.btn_tiktok_archive_browse.clicked.connect(lambda: self._browse_dir(self.ed_tiktok_archive, "Выбери папку архива"))
-        self.sb_tiktok_default_delay.valueChanged.connect(self._apply_tiktok_default_delay)
-        self.sb_tiktok_interval_default.valueChanged.connect(lambda val: self.sb_tiktok_interval.setValue(int(val)))
-        self.sb_tiktok_limit_default.valueChanged.connect(lambda val: self.sb_tiktok_batch_limit.setValue(int(val)))
-        self.sb_youtube_interval.valueChanged.connect(self._reflect_youtube_interval)
-        self.sb_youtube_batch_limit.valueChanged.connect(self._reflect_youtube_limit)
-        self.btn_youtube_refresh.clicked.connect(self._update_youtube_queue_label)
-        self.btn_youtube_start.clicked.connect(self._start_youtube_single)
-        self.ed_youtube_src.textChanged.connect(lambda _: self._update_youtube_queue_label())
-        self.dt_youtube_publish.dateTimeChanged.connect(self._sync_delay_from_datetime)
+        connect_if_alive(self.btn_tiktok_archive_browse, "clicked", lambda: self._browse_dir(self.ed_tiktok_archive, "Выбери папку архива"))
+        connect_if_alive(self.sb_tiktok_default_delay, "valueChanged", self._apply_tiktok_default_delay)
+        connect_if_alive(self.sb_tiktok_interval_default, "valueChanged", lambda val: self.sb_tiktok_interval.setValue(int(val)))
+        connect_if_alive(self.sb_tiktok_limit_default, "valueChanged", lambda val: self.sb_tiktok_batch_limit.setValue(int(val)))
+        connect_if_alive(self.sb_youtube_interval, "valueChanged", self._reflect_youtube_interval)
+        connect_if_alive(self.sb_youtube_batch_limit, "valueChanged", self._reflect_youtube_limit)
+        connect_if_alive(self.btn_youtube_refresh, "clicked", self._update_youtube_queue_label)
+        connect_if_alive(self.btn_youtube_start, "clicked", self._start_youtube_single)
+        connect_if_alive(self.ed_youtube_src, "textChanged", lambda _: self._update_youtube_queue_label())
+        connect_if_alive(self.dt_youtube_publish, "dateTimeChanged", self._sync_delay_from_datetime)
         self.btn_tg_test.clicked.connect(self._test_tg_settings)
 
-        self.lst_tiktok_profiles.itemSelectionChanged.connect(self._on_tiktok_selected)
-        self.btn_tt_add.clicked.connect(self._on_tiktok_add_update)
-        self.btn_tt_delete.clicked.connect(self._on_tiktok_delete)
-        self.btn_tt_set_active.clicked.connect(self._on_tiktok_set_active)
-        self.btn_tt_secret.clicked.connect(lambda: self._browse_file(self.ed_tt_secret, "Выбери файл секретов", "JSON (*.json);;YAML (*.yaml *.yml);;Все файлы (*.*)"))
-        self.btn_tt_secret_load.clicked.connect(self._load_tiktok_secret_file)
+        connect_if_alive(self.lst_tiktok_profiles, "itemSelectionChanged", self._on_tiktok_selected)
+        connect_if_alive(self.btn_tt_add, "clicked", self._on_tiktok_add_update)
+        connect_if_alive(self.btn_tt_delete, "clicked", self._on_tiktok_delete)
+        connect_if_alive(self.btn_tt_set_active, "clicked", self._on_tiktok_set_active)
+        connect_if_alive(self.btn_tt_secret, "clicked", lambda: self._browse_file(self.ed_tt_secret, "Выбери файл секретов", "JSON (*.json);;YAML (*.yaml *.yml);;Все файлы (*.*)"))
+        connect_if_alive(self.btn_tt_secret_load, "clicked", self._load_tiktok_secret_file)
         if hasattr(self, "btn_context_session_window"):
             self.btn_context_session_window.clicked.connect(self._on_session_open_window)
         if hasattr(self, "btn_context_session_prompts"):
@@ -7937,17 +7945,17 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         if hasattr(self, "btn_preset_clear"):
             self.btn_preset_clear.clicked.connect(lambda: self._apply_task_preset("Сброс", []))
-        self.cb_tiktok_schedule.toggled.connect(self._toggle_tiktok_schedule)
-        self.cb_tiktok_schedule.toggled.connect(lambda _: self._update_tiktok_queue_label())
-        self.cb_tiktok_draft.toggled.connect(lambda _: self._update_tiktok_queue_label())
-        self.sb_tiktok_interval.valueChanged.connect(self._reflect_tiktok_interval)
-        self.sb_tiktok_batch_limit.valueChanged.connect(lambda _: self._update_tiktok_queue_label())
-        self.ed_tiktok_src.textChanged.connect(lambda _: self._update_tiktok_queue_label())
-        self.dt_tiktok_publish.dateTimeChanged.connect(self._sync_tiktok_from_datetime)
-        self.btn_tiktok_src_browse.clicked.connect(lambda: self._browse_dir(self.ed_tiktok_src, "Выбери папку с клипами"))
-        self.btn_tiktok_refresh.clicked.connect(self._update_tiktok_queue_label)
-        self.btn_tiktok_start.clicked.connect(self._start_tiktok_single)
-        self.btn_tiktok_dispatch.clicked.connect(self._dispatch_tiktok_workflow)
+        connect_if_alive(self.cb_tiktok_schedule, "toggled", self._toggle_tiktok_schedule)
+        connect_if_alive(self.cb_tiktok_schedule, "toggled", lambda _: self._update_tiktok_queue_label())
+        connect_if_alive(self.cb_tiktok_draft, "toggled", lambda _: self._update_tiktok_queue_label())
+        connect_if_alive(self.sb_tiktok_interval, "valueChanged", self._reflect_tiktok_interval)
+        connect_if_alive(self.sb_tiktok_batch_limit, "valueChanged", lambda _: self._update_tiktok_queue_label())
+        connect_if_alive(self.ed_tiktok_src, "textChanged", lambda _: self._update_tiktok_queue_label())
+        connect_if_alive(self.dt_tiktok_publish, "dateTimeChanged", self._sync_tiktok_from_datetime)
+        connect_if_alive(self.btn_tiktok_src_browse, "clicked", lambda: self._browse_dir(self.ed_tiktok_src, "Выбери папку с клипами"))
+        connect_if_alive(self.btn_tiktok_refresh, "clicked", self._update_tiktok_queue_label)
+        connect_if_alive(self.btn_tiktok_start, "clicked", self._start_tiktok_single)
+        connect_if_alive(self.btn_tiktok_dispatch, "clicked", self._dispatch_tiktok_workflow)
 
         # rename
         self.btn_ren_browse.clicked.connect(self._ren_browse)
