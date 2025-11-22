@@ -17,6 +17,9 @@ bun.lockb
 package-lock.json
 pnpm-lock.yaml
 yarn.lock
+*.tsbuildinfo
+sora_suite/frontend/vite.config.js
+sora_suite/frontend/vite.config.d.ts
 
 # Builds
 sora_suite/frontend/dist/

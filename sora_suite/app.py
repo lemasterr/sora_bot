@@ -89,7 +89,7 @@ def main(argv: list[str] | None = None) -> int:
     electron = _ensure_electron_available()
 
     if args.dev:
-        env["ELECTRON_START_URL"] = f"http://{args.host}:{DEFAULT_PORT}"
+        env["ELECTRON_START_URL"] = f"http://{args.host}:{args.port}"
         print(f"Запуск Electron и подключение к dev-серверу Vite: {env['ELECTRON_START_URL']}")
         return _launch_electron(electron, env)
 
