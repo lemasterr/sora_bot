@@ -8,6 +8,7 @@ type BackendAPI = {
   loadContent: () => Promise<ContentState>;
   saveContent: (payload: ContentPayload) => Promise<boolean>;
   onTaskEvent: (cb: (event: BackendTaskEvent) => void) => () => void;
+  updateConfig: (payload: Partial<AppConfig>) => Promise<AppConfig>;
 };
 
 declare global {

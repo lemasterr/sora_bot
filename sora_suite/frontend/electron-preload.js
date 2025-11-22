@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron';
 
 const api = {
   loadConfig: () => ipcRenderer.invoke('config:load'),
+  updateConfig: (payload) => ipcRenderer.invoke('config:update', payload),
   startTask: (payload) => ipcRenderer.invoke('task:start', payload),
   stopTask: (pid) => ipcRenderer.invoke('task:stop', pid),
   tailHistory: (limit) => ipcRenderer.invoke('history:tail', limit),

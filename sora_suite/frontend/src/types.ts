@@ -14,6 +14,13 @@ export interface WorkspaceProfile {
   lastLog?: WorkspaceLog;
   downloadLimit?: number;
   mergeLimit?: number;
+  promptsFile?: string;
+  imagePromptsFile?: string;
+  submittedLog?: string;
+  failedLog?: string;
+  downloadDir?: string;
+  titlesFile?: string;
+  cursorFile?: string;
 }
 
 export interface AutomatorStep {
@@ -52,10 +59,11 @@ export interface TitleEntry {
 }
 
 export interface TelegramConfig {
+  enabled?: boolean;
   botToken: string;
   chatId: string;
-  notificationsEnabled: boolean;
-  lastNotices: string[];
+  notificationsEnabled?: boolean;
+  lastNotices?: string[];
 }
 
 export interface DirectorySettings {
@@ -128,12 +136,82 @@ export interface AppConfigSession {
   open_drafts?: boolean;
 }
 
+export interface YouTubeChannel {
+  name?: string;
+  client_secret?: string;
+  credentials?: string;
+  [key: string]: unknown;
+}
+
+export interface YouTubeConfig {
+  channels?: YouTubeChannel[];
+  active_channel?: string;
+  upload_src_dir?: string;
+  archive_dir?: string;
+  batch_limit?: number;
+  batch_step_minutes?: number;
+  schedule_minutes_from_now?: number;
+  draft_only?: boolean;
+  last_publish_at?: string;
+  [key: string]: unknown;
+}
+
+export interface TikTokProfile {
+  name?: string;
+  client_key?: string;
+  client_secret?: string;
+  refresh_token?: string;
+  open_id?: string;
+  [key: string]: unknown;
+}
+
+export interface TikTokConfig {
+  profiles?: TikTokProfile[];
+  active_profile?: string;
+  upload_src_dir?: string;
+  archive_dir?: string;
+  batch_limit?: number;
+  batch_step_minutes?: number;
+  schedule_minutes_from_now?: number;
+  schedule_enabled?: boolean;
+  draft_only?: boolean;
+  last_publish_at?: string;
+  github_workflow?: string;
+  github_ref?: string;
+  [key: string]: unknown;
+}
+
 export interface AppConfig {
   autogen?: { sessions?: AppConfigSession[]; workdir?: string; image_prompts_file?: string; prompts_file?: string };
   downloader?: { max_videos?: number; open_drafts?: boolean; workdir?: string; entry?: string };
   titles_file?: string;
-  youtube?: Record<string, unknown>;
-  tiktok?: Record<string, unknown>;
+  youtube?: YouTubeConfig;
+  tiktok?: TikTokConfig;
+  downloads_dir?: string;
+  blurred_dir?: string;
+  merged_dir?: string;
+  history_file?: string;
+  telegram?: { enabled?: boolean; bot_token?: string; chat_id?: string };
+  ffmpeg?: {
+    binary?: string;
+    vcodec?: string;
+    crf?: number;
+    preset?: string;
+    format?: string;
+    copy_audio?: boolean;
+    blur_threads?: number;
+    post_chain?: string;
+  };
+  chrome?: { cdp_port?: number; binary?: string; user_data_dir?: string; active_profile?: string };
+  google_genai?: {
+    api_key?: string;
+    model?: string;
+    aspect_ratio?: string;
+    image_size?: string;
+    output_dir?: string;
+    manifest_file?: string;
+  };
+  maintenance?: { auto_cleanup_on_start?: boolean };
   [key: string]: unknown;
 }
 

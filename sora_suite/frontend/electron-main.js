@@ -11,6 +11,32 @@ const __dirname = path.dirname(__filename);
 const suiteRoot = path.resolve(__dirname, '..');
 const appConfigPath = path.join(suiteRoot, 'app_config.yaml');
 
+const deepMerge = (target, source) => {
+  if (Array.isArray(source)) return source;
+  if (source && typeof source === 'object') {
+    const out = { ...(target || {}) };
+    Object.entries(source).forEach(([key, value]) => {
+      out[key] = deepMerge(out[key], value);
+    });
+    return out;
+  }
+  return source;
+};
+
+const readConfig = async () => {
+  try {
+    const raw = await fs.promises.readFile(appConfigPath, 'utf-8');
+    return yaml.parse(raw) || {};
+  } catch (error) {
+    return {};
+  }
+};
+
+const writeConfig = async (config) => {
+  const serialized = yaml.stringify(config || {});
+  await fs.promises.writeFile(appConfigPath, serialized, 'utf-8');
+};
+
 const taskCommands = {
   autogen: ['-m', 'workers.autogen.main'],
   downloader: [path.join(suiteRoot, 'workers', 'downloader', 'download_all.py')],
@@ -81,9 +107,13 @@ const sendTaskEvent = (payload) => {
   });
 };
 
-ipcMain.handle('config:load', async () => {
-  const raw = await fs.promises.readFile(appConfigPath, 'utf-8');
-  return yaml.parse(raw);
+ipcMain.handle('config:load', async () => readConfig());
+
+ipcMain.handle('config:update', async (_event, patch) => {
+  const current = await readConfig();
+  const next = deepMerge(current, patch || {});
+  await writeConfig(next);
+  return next;
 });
 
 ipcMain.handle('task:start', async (_event, payload) => {

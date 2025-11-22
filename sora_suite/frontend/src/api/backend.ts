@@ -8,6 +8,7 @@ type StartTaskRequest = {
 
 type BackendAPI = {
   loadConfig: () => Promise<AppConfig>;
+  updateConfig: (payload: Partial<AppConfig>) => Promise<AppConfig>;
   startTask: (payload: StartTaskRequest) => Promise<{ pid: number }>;
   stopTask: (pid: number) => Promise<boolean>;
   tailHistory: (limit?: number) => Promise<HistoryEntry[]>;
@@ -19,6 +20,7 @@ type BackendAPI = {
 const backend: BackendAPI | undefined = typeof window !== 'undefined' ? (window as any).backend : undefined;
 
 export const loadConfig = async () => backend?.loadConfig?.();
+export const updateConfig = async (payload: Partial<AppConfig>) => backend?.updateConfig?.(payload);
 export const startTask = async (payload: StartTaskRequest) => backend?.startTask?.(payload);
 export const stopTask = async (pid: number) => backend?.stopTask?.(pid);
 export const tailHistory = async (limit?: number) => backend?.tailHistory?.(limit ?? 50);

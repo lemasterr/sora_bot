@@ -6,6 +6,7 @@ import Automator from './components/Automator';
 import WatermarkCheck from './components/WatermarkCheck';
 import Content from './components/Content';
 import Telegram from './components/Telegram';
+import Publishing from './components/Publishing';
 import Settings from './components/Settings';
 import Errors from './components/Errors';
 import Documentation from './components/Documentation';
@@ -17,6 +18,7 @@ const navLinks = [
   { to: '/automator', label: 'Automator' },
   { to: '/watermark', label: 'Watermark Check' },
   { to: '/content', label: 'Content' },
+  { to: '/publishing', label: 'Publishing' },
   { to: '/telegram', label: 'Telegram' },
   { to: '/settings', label: 'Settings' },
   { to: '/errors', label: 'Errors' },
@@ -118,6 +120,7 @@ const App: React.FC = () => {
                 <Route path="/automator" element={<Automator />} />
                 <Route path="/watermark" element={<WatermarkCheck />} />
                 <Route path="/content" element={<Content />} />
+                <Route path="/publishing" element={<Publishing />} />
                 <Route path="/telegram" element={<Telegram />} />
                 <Route path="/settings" element={<Settings />} />
                 <Route path="/errors" element={<Errors />} />

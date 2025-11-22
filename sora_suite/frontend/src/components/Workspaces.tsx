@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { RefreshCcw, Play, Square, Bug } from 'lucide-react';
-import { AppConfigSession, BackendTaskEvent, WorkspaceProfile } from '../types';
+import { AppConfig, AppConfigSession, BackendTaskEvent, WorkspaceProfile } from '../types';
 import { loadConfig, onTaskEvent, startTask, stopTask } from '../api/backend';
 
 const mapSessionToProfile = (session: AppConfigSession): WorkspaceProfile => ({
@@ -9,15 +9,24 @@ const mapSessionToProfile = (session: AppConfigSession): WorkspaceProfile => ({
   port: session.cdp_port || 9222,
   status: 'idle',
   downloadLimit: session.max_videos,
+  promptsFile: session.prompts_file,
+  imagePromptsFile: session.image_prompts_file,
+  submittedLog: session.submitted_log,
+  failedLog: session.failed_log,
+  downloadDir: session.download_dir,
+  titlesFile: session.titles_file,
+  cursorFile: session.cursor_file,
   mergeLimit: undefined,
 });
 
 const Workspaces: React.FC = () => {
   const [profiles, setProfiles] = useState<WorkspaceProfile[]>([]);
+  const [config, setConfig] = useState<AppConfig | null>(null);
   const [running, setRunning] = useState<Record<string, number>>({});
 
   useEffect(() => {
     loadConfig()?.then((cfg) => {
+      setConfig(cfg || null);
       const sessions = cfg?.autogen?.sessions || [];
       const mapped = sessions.map(mapSessionToProfile);
       setProfiles(mapped);
@@ -73,6 +82,7 @@ const Workspaces: React.FC = () => {
 
   const handleRefresh = () => {
     loadConfig()?.then((cfg) => {
+      setConfig(cfg || null);
       const sessions = cfg?.autogen?.sessions || [];
       setProfiles(sessions.map(mapSessionToProfile));
     });
@@ -93,7 +103,36 @@ const Workspaces: React.FC = () => {
     if (profile.port) {
       env.CDP_ENDPOINT = `http://127.0.0.1:${profile.port}`;
     }
+    if (profile.promptsFile) env.SORA_PROMPTS_FILE = profile.promptsFile;
+    if (profile.imagePromptsFile) env.GENAI_IMAGE_PROMPTS_FILE = profile.imagePromptsFile;
+    if (profile.submittedLog) env.SORA_SUBMITTED_LOG = profile.submittedLog;
+    if (profile.failedLog) env.SORA_FAILED_LOG = profile.failedLog;
+
     const result = await startTask({ task: 'autogen', env });
+    if (result?.pid) {
+      setRunning((curr) => ({ ...curr, [profile.id]: result.pid }));
+      setProfiles((current) =>
+        current.map((p) => (p.id === profile.id ? { ...p, status: 'running' as const } : p)),
+      );
+    }
+  };
+
+  const handleDownload = async (profile: WorkspaceProfile) => {
+    const env: Record<string, string> = {};
+    if (profile.port) env.CDP_ENDPOINT = `http://127.0.0.1:${profile.port}`;
+
+    const downloadDir = profile.downloadDir || config?.downloads_dir;
+    if (downloadDir) env.DOWNLOAD_DIR = downloadDir;
+
+    const titlesFile = profile.titlesFile || config?.titles_file;
+    if (titlesFile) env.TITLES_FILE = titlesFile;
+
+    if (profile.cursorFile) env.TITLES_CURSOR_FILE = profile.cursorFile;
+
+    const limit = profile.downloadLimit ?? config?.downloader?.max_videos;
+    if (typeof limit === 'number') env.MAX_VIDEOS = String(limit);
+
+    const result = await startTask({ task: 'downloader', env });
     if (result?.pid) {
       setRunning((curr) => ({ ...curr, [profile.id]: result.pid }));
       setProfiles((current) =>
@@ -194,13 +233,19 @@ const Workspaces: React.FC = () => {
               </div>
             </div>
 
-            <div className="mt-4 flex items-center gap-3">
+            <div className="mt-4 grid grid-cols-3 gap-2">
               <button
-                className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-gradient-to-r from-blue-500 to-indigo-500 px-3 py-2 text-sm font-medium text-white shadow"
+                className="flex items-center justify-center gap-2 rounded-lg bg-gradient-to-r from-blue-500 to-indigo-500 px-3 py-2 text-sm font-medium text-white shadow"
                 onClick={() => handleStart(profile)}
                 disabled={profile.status === 'running'}
               >
-                <Play size={16} /> Start
+                <Play size={16} /> Autogen
+              </button>
+              <button
+                className="flex items-center justify-center gap-2 rounded-lg border border-gray-700 px-3 py-2 text-sm font-medium text-gray-100"
+                onClick={() => handleDownload(profile)}
+              >
+                <Play size={16} /> Download
               </button>
               <button
                 className="flex items-center justify-center gap-2 rounded-lg border border-gray-700 px-3 py-2 text-sm font-medium text-gray-100"
@@ -210,14 +255,14 @@ const Workspaces: React.FC = () => {
                 <Square size={16} /> Stop
               </button>
               <button
-                className="flex items-center justify-center gap-2 rounded-lg border border-gray-700 px-3 py-2 text-sm font-medium text-gray-100"
+                className="col-span-3 flex items-center justify-center gap-2 rounded-lg border border-gray-700 px-3 py-2 text-sm font-medium text-gray-100"
                 onClick={() => {
                   if (profile.port) {
                     window.open(`http://127.0.0.1:${profile.port}`, '_blank');
                   }
                 }}
               >
-                <Bug size={16} /> Debugger
+                <Bug size={16} /> Open DevTools
               </button>
             </div>
           </div>

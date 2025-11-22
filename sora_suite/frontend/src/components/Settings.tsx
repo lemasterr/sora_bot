@@ -1,62 +1,26 @@
-import React, { useState } from 'react';
-import { SettingsState } from '../types';
+import React, { useEffect, useState } from 'react';
+import { AppConfig } from '../types';
+import { loadConfig, updateConfig } from '../api/backend';
 
-const defaultSettings: SettingsState = {
-  directories: {
-    rawDir: '/data/raw',
-    mergedDir: '/data/merged',
-    logsDir: '/data/logs',
-    assetsDir: '/data/assets',
-    tempDir: '/data/tmp',
-  },
-  ffmpeg: {
-    codec: 'h264',
-    preset: 'medium',
-    crf: 18,
-  },
-  imageGen: {
-    model: 'gai-1.0',
-    apiKey: '***',
-    width: 1080,
-    height: 1920,
-  },
-  autogen: {
-    delayMs: 500,
-    maxConcurrent: 3,
-    retryLimit: 2,
-  },
-  interface: {
-    theme: 'dark',
-    density: 'comfortable',
-    showRightPanel: true,
-  },
-  maintenance: {
-    clearCache: false,
-    autoUpdate: true,
-  },
-};
-
-const tabs = [
-  'Directories',
-  'FFmpeg',
-  'Image Gen',
-  'Autogen',
-  'Interface',
-  'Maintenance',
-];
+const tabs = ['Directories', 'Chrome', 'FFmpeg', 'GenAI', 'Maintenance'];
 
 const Settings: React.FC = () => {
   const [activeTab, setActiveTab] = useState<string>('Directories');
-  const [settings, setSettings] = useState<SettingsState>(defaultSettings);
+  const [config, setConfig] = useState<AppConfig | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    loadConfig()?.then((cfg) => setConfig(cfg || {}));
+  }, []);
 
   const updateSetting = (path: string, value: string | number | boolean) => {
-    setSettings((current) => {
+    setConfig((current) => {
+      const next = { ...(current || {}) } as any;
       const segments = path.split('.');
-      const next = { ...current } as any;
       let node = next;
       for (let i = 0; i < segments.length - 1; i += 1) {
         const key = segments[i];
-        node[key] = { ...node[key] };
+        node[key] = { ...(node[key] || {}) };
         node = node[key];
       }
       node[segments[segments.length - 1]] = value;
@@ -64,15 +28,29 @@ const Settings: React.FC = () => {
     });
   };
 
+  const persist = async () => {
+    if (!config) return;
+    setSaving(true);
+    await updateConfig(config);
+    setSaving(false);
+  };
+
+  if (!config) {
+    return <div className="p-6 text-sm text-gray-300">Загрузка конфигурации...</div>;
+  }
+
   return (
     <div className="p-6 space-y-6">
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-semibold">Settings</h1>
-          <p className="text-sm text-gray-400">Configure paths, ffmpeg presets, image generation, autogen, and UI preferences.</p>
+          <p className="text-sm text-gray-400">Пути проекта, Chrome/CDP, ffmpeg, GenAI и обслуживание.</p>
         </div>
-        <button className="rounded-lg bg-gradient-to-r from-blue-500 to-indigo-500 px-4 py-2 text-sm font-medium text-white shadow">
-          Save All
+        <button
+          className="rounded-lg bg-gradient-to-r from-blue-500 to-indigo-500 px-4 py-2 text-sm font-medium text-white shadow"
+          onClick={persist}
+        >
+          {saving ? 'Saving…' : 'Save All'}
         </button>
       </div>
 
@@ -94,18 +72,17 @@ const Settings: React.FC = () => {
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
           {(
             [
-              ['RAW Folder', 'directories.rawDir'],
-              ['Merged Folder', 'directories.mergedDir'],
-              ['Logs Folder', 'directories.logsDir'],
-              ['Assets Folder', 'directories.assetsDir'],
-              ['Temp Folder', 'directories.tempDir'],
+              ['RAW/Downloads', 'downloads_dir'],
+              ['Blurred', 'blurred_dir'],
+              ['Merged', 'merged_dir'],
+              ['History file', 'history_file'],
             ] as const
           ).map(([label, key]) => (
             <label key={key} className="space-y-1 text-sm text-gray-200">
               <span className="text-xs text-gray-400">{label}</span>
               <input
                 className="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-gray-100 focus:border-indigo-500 focus:outline-none"
-                value={(settings as any)[key.split('.')[0]][key.split('.')[1]]}
+                value={(config as any)[key] || ''}
                 onChange={(event) => updateSetting(key, event.target.value)}
               />
             </label>
@@ -113,21 +90,67 @@ const Settings: React.FC = () => {
         </div>
       )}
 
+      {activeTab === 'Chrome' && (
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          <label className="space-y-1 text-sm text-gray-200">
+            <span className="text-xs text-gray-400">DevTools port</span>
+            <input
+              type="number"
+              className="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-gray-100 focus:border-indigo-500 focus:outline-none"
+              value={config.chrome?.cdp_port ?? ''}
+              onChange={(event) => updateSetting('chrome.cdp_port', parseInt(event.target.value, 10))}
+            />
+          </label>
+          <label className="space-y-1 text-sm text-gray-200">
+            <span className="text-xs text-gray-400">Chrome binary</span>
+            <input
+              className="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-gray-100 focus:border-indigo-500 focus:outline-none"
+              value={config.chrome?.binary || ''}
+              onChange={(event) => updateSetting('chrome.binary', event.target.value)}
+            />
+          </label>
+          <label className="space-y-1 text-sm text-gray-200">
+            <span className="text-xs text-gray-400">User data dir</span>
+            <input
+              className="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-gray-100 focus:border-indigo-500 focus:outline-none"
+              value={config.chrome?.user_data_dir || ''}
+              onChange={(event) => updateSetting('chrome.user_data_dir', event.target.value)}
+            />
+          </label>
+          <label className="space-y-1 text-sm text-gray-200">
+            <span className="text-xs text-gray-400">Active profile</span>
+            <input
+              className="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-gray-100 focus:border-indigo-500 focus:outline-none"
+              value={config.chrome?.active_profile || ''}
+              onChange={(event) => updateSetting('chrome.active_profile', event.target.value)}
+            />
+          </label>
+        </div>
+      )}
+
       {activeTab === 'FFmpeg' && (
         <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+          <label className="space-y-1 text-sm text-gray-200">
+            <span className="text-xs text-gray-400">Binary</span>
+            <input
+              className="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-gray-100 focus:border-indigo-500 focus:outline-none"
+              value={config.ffmpeg?.binary || ''}
+              onChange={(event) => updateSetting('ffmpeg.binary', event.target.value)}
+            />
+          </label>
           <label className="space-y-1 text-sm text-gray-200">
             <span className="text-xs text-gray-400">Codec</span>
             <input
               className="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-gray-100 focus:border-indigo-500 focus:outline-none"
-              value={settings.ffmpeg.codec}
-              onChange={(event) => updateSetting('ffmpeg.codec', event.target.value)}
+              value={config.ffmpeg?.vcodec || ''}
+              onChange={(event) => updateSetting('ffmpeg.vcodec', event.target.value)}
             />
           </label>
           <label className="space-y-1 text-sm text-gray-200">
             <span className="text-xs text-gray-400">Preset</span>
             <input
               className="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-gray-100 focus:border-indigo-500 focus:outline-none"
-              value={settings.ffmpeg.preset}
+              value={config.ffmpeg?.preset || ''}
               onChange={(event) => updateSetting('ffmpeg.preset', event.target.value)}
             />
           </label>
@@ -136,116 +159,96 @@ const Settings: React.FC = () => {
             <input
               type="number"
               className="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-gray-100 focus:border-indigo-500 focus:outline-none"
-              value={settings.ffmpeg.crf ?? ''}
+              value={config.ffmpeg?.crf ?? ''}
               onChange={(event) => updateSetting('ffmpeg.crf', parseInt(event.target.value, 10))}
+            />
+          </label>
+          <label className="space-y-1 text-sm text-gray-200">
+            <span className="text-xs text-gray-400">Format</span>
+            <input
+              className="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-gray-100 focus:border-indigo-500 focus:outline-none"
+              value={config.ffmpeg?.format || ''}
+              onChange={(event) => updateSetting('ffmpeg.format', event.target.value)}
+            />
+          </label>
+          <label className="space-y-1 text-sm text-gray-200">
+            <span className="text-xs text-gray-400">Post chain</span>
+            <textarea
+              className="h-24 w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-gray-100 focus:border-indigo-500 focus:outline-none"
+              value={config.ffmpeg?.post_chain || ''}
+              onChange={(event) => updateSetting('ffmpeg.post_chain', event.target.value)}
+            />
+          </label>
+          <label className="space-y-1 text-sm text-gray-200">
+            <span className="text-xs text-gray-400">Copy audio</span>
+            <input
+              type="checkbox"
+              className="h-4 w-4 rounded border-gray-700 bg-gray-800 text-indigo-500"
+              checked={!!config.ffmpeg?.copy_audio}
+              onChange={(event) => updateSetting('ffmpeg.copy_audio', event.target.checked)}
+            />
+          </label>
+          <label className="space-y-1 text-sm text-gray-200">
+            <span className="text-xs text-gray-400">Blur threads</span>
+            <input
+              type="number"
+              className="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-gray-100 focus:border-indigo-500 focus:outline-none"
+              value={config.ffmpeg?.blur_threads ?? ''}
+              onChange={(event) => updateSetting('ffmpeg.blur_threads', parseInt(event.target.value, 10))}
             />
           </label>
         </div>
       )}
 
-      {activeTab === 'Image Gen' && (
+      {activeTab === 'GenAI' && (
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          <label className="space-y-1 text-sm text-gray-200">
+            <span className="text-xs text-gray-400">API key</span>
+            <input
+              className="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-gray-100 focus:border-indigo-500 focus:outline-none"
+              value={config.google_genai?.api_key || ''}
+              onChange={(event) => updateSetting('google_genai.api_key', event.target.value)}
+            />
+          </label>
           <label className="space-y-1 text-sm text-gray-200">
             <span className="text-xs text-gray-400">Model</span>
             <input
               className="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-gray-100 focus:border-indigo-500 focus:outline-none"
-              value={settings.imageGen.model}
-              onChange={(event) => updateSetting('imageGen.model', event.target.value)}
+              value={config.google_genai?.model || ''}
+              onChange={(event) => updateSetting('google_genai.model', event.target.value)}
             />
           </label>
           <label className="space-y-1 text-sm text-gray-200">
-            <span className="text-xs text-gray-400">API Key</span>
+            <span className="text-xs text-gray-400">Aspect ratio</span>
             <input
               className="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-gray-100 focus:border-indigo-500 focus:outline-none"
-              value={settings.imageGen.apiKey}
-              onChange={(event) => updateSetting('imageGen.apiKey', event.target.value)}
+              value={config.google_genai?.aspect_ratio || ''}
+              onChange={(event) => updateSetting('google_genai.aspect_ratio', event.target.value)}
             />
           </label>
           <label className="space-y-1 text-sm text-gray-200">
-            <span className="text-xs text-gray-400">Width</span>
+            <span className="text-xs text-gray-400">Image size</span>
             <input
-              type="number"
               className="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-gray-100 focus:border-indigo-500 focus:outline-none"
-              value={settings.imageGen.width ?? ''}
-              onChange={(event) => updateSetting('imageGen.width', parseInt(event.target.value, 10))}
+              value={config.google_genai?.image_size || ''}
+              onChange={(event) => updateSetting('google_genai.image_size', event.target.value)}
             />
           </label>
           <label className="space-y-1 text-sm text-gray-200">
-            <span className="text-xs text-gray-400">Height</span>
+            <span className="text-xs text-gray-400">Output dir</span>
             <input
-              type="number"
               className="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-gray-100 focus:border-indigo-500 focus:outline-none"
-              value={settings.imageGen.height ?? ''}
-              onChange={(event) => updateSetting('imageGen.height', parseInt(event.target.value, 10))}
+              value={config.google_genai?.output_dir || ''}
+              onChange={(event) => updateSetting('google_genai.output_dir', event.target.value)}
             />
           </label>
-        </div>
-      )}
-
-      {activeTab === 'Autogen' && (
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
           <label className="space-y-1 text-sm text-gray-200">
-            <span className="text-xs text-gray-400">Loop Delay (ms)</span>
+            <span className="text-xs text-gray-400">Manifest file</span>
             <input
-              type="number"
               className="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-gray-100 focus:border-indigo-500 focus:outline-none"
-              value={settings.autogen.delayMs}
-              onChange={(event) => updateSetting('autogen.delayMs', parseInt(event.target.value, 10))}
+              value={config.google_genai?.manifest_file || ''}
+              onChange={(event) => updateSetting('google_genai.manifest_file', event.target.value)}
             />
-          </label>
-          <label className="space-y-1 text-sm text-gray-200">
-            <span className="text-xs text-gray-400">Max Concurrent</span>
-            <input
-              type="number"
-              className="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-gray-100 focus:border-indigo-500 focus:outline-none"
-              value={settings.autogen.maxConcurrent}
-              onChange={(event) => updateSetting('autogen.maxConcurrent', parseInt(event.target.value, 10))}
-            />
-          </label>
-          <label className="space-y-1 text-sm text-gray-200">
-            <span className="text-xs text-gray-400">Retry Limit</span>
-            <input
-              type="number"
-              className="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-gray-100 focus:border-indigo-500 focus:outline-none"
-              value={settings.autogen.retryLimit}
-              onChange={(event) => updateSetting('autogen.retryLimit', parseInt(event.target.value, 10))}
-            />
-          </label>
-        </div>
-      )}
-
-      {activeTab === 'Interface' && (
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-          <label className="space-y-1 text-sm text-gray-200">
-            <span className="text-xs text-gray-400">Theme</span>
-            <select
-              className="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-gray-100 focus:border-indigo-500 focus:outline-none"
-              value={settings.interface.theme}
-              onChange={(event) => updateSetting('interface.theme', event.target.value)}
-            >
-              <option value="dark">Dark</option>
-              <option value="light">Light</option>
-            </select>
-          </label>
-          <label className="space-y-1 text-sm text-gray-200">
-            <span className="text-xs text-gray-400">Density</span>
-            <select
-              className="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-gray-100 focus:border-indigo-500 focus:outline-none"
-              value={settings.interface.density}
-              onChange={(event) => updateSetting('interface.density', event.target.value)}
-            >
-              <option value="compact">Compact</option>
-              <option value="comfortable">Comfortable</option>
-            </select>
-          </label>
-          <label className="flex items-center gap-2 text-sm text-gray-200">
-            <input
-              type="checkbox"
-              className="h-4 w-4 rounded border-gray-700 bg-gray-800 text-indigo-500"
-              checked={settings.interface.showRightPanel}
-              onChange={(event) => updateSetting('interface.showRightPanel', event.target.checked)}
-            />
-            <span className="text-xs text-gray-400">Show Right Panel</span>
           </label>
         </div>
       )}
@@ -254,26 +257,14 @@ const Settings: React.FC = () => {
         <div className="space-y-3 rounded-xl border border-gray-800 bg-gray-900 p-4">
           <label className="flex items-center justify-between text-sm text-gray-200">
             <div>
-              <p className="text-xs uppercase text-gray-400">Cache</p>
-              <p className="text-sm text-gray-300">Clear temporary files and thumbnails</p>
+              <p className="text-xs uppercase text-gray-400">Cleanup on start</p>
+              <p className="text-sm text-gray-300">Автоочистка старых файлов при запуске</p>
             </div>
             <input
               type="checkbox"
               className="h-4 w-4 rounded border-gray-700 bg-gray-800 text-indigo-500"
-              checked={settings.maintenance.clearCache}
-              onChange={(event) => updateSetting('maintenance.clearCache', event.target.checked)}
-            />
-          </label>
-          <label className="flex items-center justify-between text-sm text-gray-200">
-            <div>
-              <p className="text-xs uppercase text-gray-400">Updates</p>
-              <p className="text-sm text-gray-300">Auto-download latest patches</p>
-            </div>
-            <input
-              type="checkbox"
-              className="h-4 w-4 rounded border-gray-700 bg-gray-800 text-indigo-500"
-              checked={settings.maintenance.autoUpdate}
-              onChange={(event) => updateSetting('maintenance.autoUpdate', event.target.checked)}
+              checked={!!config.maintenance?.auto_cleanup_on_start}
+              onChange={(event) => updateSetting('maintenance.auto_cleanup_on_start', event.target.checked)}
             />
           </label>
         </div>
