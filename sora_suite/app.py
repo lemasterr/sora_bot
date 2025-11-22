@@ -4562,7 +4562,10 @@ class MainWindow(QtWidgets.QMainWindow):
         settings_body = QtWidgets.QWidget()
         settings_layout = QtWidgets.QVBoxLayout(settings_body)
         settings_layout.setContentsMargins(16, 16, 16, 16)
-        settings_intro = QtWidgets.QLabel("Настройки сгруппированы по вкладкам: каталоги, Chrome, FFmpeg, YouTube и обслуживание. Раздел Telegram вынесен отдельно слева.")
+        settings_intro = QtWidgets.QLabel(
+            "Настройки сгруппированы по вкладкам: каталоги, FFmpeg, интерфейс, автоген, обслуживание и вспомогательные сервисы."
+            " Раздел Telegram вынесен отдельно слева."
+        )
         settings_intro.setWordWrap(True)
         settings_intro.setStyleSheet("QLabel{color:#94a3b8;font-size:11px;}")
         settings_layout.addWidget(settings_intro)
@@ -5659,7 +5662,7 @@ class MainWindow(QtWidgets.QMainWindow):
         ui_layout.addStretch(1)
         self.settings_tabs.addTab(page_ui, "Интерфейс")
 
-        # --- Chrome ---
+        # --- Chrome (скрыто в новой компоновке) ---
         page_chrome = QtWidgets.QWidget()
         chrome_layout = QtWidgets.QVBoxLayout(page_chrome)
         chrome_form = QtWidgets.QFormLayout()
@@ -5711,7 +5714,7 @@ class MainWindow(QtWidgets.QMainWindow):
         vlp.addLayout(footer)
         chrome_layout.addWidget(grp_prof)
 
-        self.settings_tabs.addTab(page_chrome, "Chrome")
+        # Chrome настройки остаются доступны для кода, но не отображаются в новой навигации
 
         # --- FFmpeg ---
         ff = self.cfg.get("ffmpeg", {})
@@ -5858,7 +5861,7 @@ class MainWindow(QtWidgets.QMainWindow):
         yt_layout.addWidget(grp_yt)
         yt_layout.addStretch(1)
 
-        self.settings_tabs.addTab(page_yt, "YouTube")
+        # Раздел автопостинга YouTube скрыт в обновлённой навигации
 
         page_tt = QtWidgets.QWidget()
         tt_layout = QtWidgets.QVBoxLayout(page_tt)
@@ -5931,7 +5934,7 @@ class MainWindow(QtWidgets.QMainWindow):
         tt_layout.addWidget(grp_tt)
         tt_layout.addStretch(1)
 
-        self.settings_tabs.addTab(page_tt, "TikTok")
+        # Раздел автопостинга TikTok скрыт в обновлённой навигации
 
         # --- Maintenance ---
         maint_cfg = self.cfg.get("maintenance", {}) or {}
