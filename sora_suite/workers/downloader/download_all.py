@@ -346,8 +346,12 @@ def _current_video_src(page) -> str:
         return ""
 
 
-def scroll_to_next_card(page, *, pause_ms: int = 1400, timeout_ms: int = 8000) -> bool:
-    """Листает ленту вниз одним длинным свайпом и ждёт смены карточки."""
+def scroll_to_next_card(page, *, pause_ms: int = 1800, timeout_ms: int = 9000) -> bool:
+    """Листает ленту вниз одним длинным свайпом и ждёт смены карточки.
+
+    Между свайпами даём странице время на смену адреса и источника видео,
+    чтобы не перескочить сразу две карточки подряд.
+    """
 
     start_url = page.url
     start_src = _current_video_src(page)
@@ -366,6 +370,7 @@ def scroll_to_next_card(page, *, pause_ms: int = 1400, timeout_ms: int = 8000) -
     _long_swipe_once(page)
     page.wait_for_timeout(pause_ms)
     if _wait_for_change(timeout_ms):
+        page.wait_for_timeout(700)
         try:
             page.locator(RIGHT_PANEL).wait_for(state="visible", timeout=6500)
         except PwTimeout:
@@ -378,6 +383,7 @@ def scroll_to_next_card(page, *, pause_ms: int = 1400, timeout_ms: int = 8000) -
         page.wait_for_timeout(int(pause_ms * 0.9))
 
     if _wait_for_change(int(timeout_ms * 0.9)):
+        page.wait_for_timeout(700)
         try:
             page.locator(RIGHT_PANEL).wait_for(state="visible", timeout=6500)
         except PwTimeout:
@@ -416,6 +422,7 @@ def download_feed_mode(page, desired: int) -> None:
         if not scroll_to_next_card(page):
             print("[!] Не смог перейти к следующему видео — останавливаюсь.")
             break
+        page.wait_for_timeout(600)
         long_jitter()
 
 

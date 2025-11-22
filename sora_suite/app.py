@@ -1574,6 +1574,11 @@ class MainWindow(QtWidgets.QMainWindow):
             automator_cfg.get("presets")
         )
         automator_cfg["presets"] = [dict(preset) for preset in self._automator_presets]
+        self._automator_queue: List[Dict[str, Any]] = []
+        self._automator_total: int = 0
+        self._automator_index: int = 0
+        self._automator_ok_all: bool = True
+        self._automator_running: bool = False
 
         self._command_registry: Dict[str, Dict[str, Any]] = {}
         self._command_actions: Dict[str, QtGui.QAction] = {}
@@ -9491,51 +9496,86 @@ class MainWindow(QtWidgets.QMainWindow):
             self._post_status(f"Не удалось открыть профиль: {exc}", state="error")
 
     def _run_automator(self):
+        if self._automator_running:
+            self._post_status("Автоматизация уже выполняется", state="error")
+            return
+
         steps = list(self._automator_steps)
         if not steps:
             self._post_status("Список шагов пуст", state="error")
             return
         summary = " → ".join(self._describe_automator_step(step) for step in steps)
         self._append_activity(f"Автоматизация: {summary}", kind="info", card_text=False)
-        total = len(steps)
-        self._post_status("Автоматизация запускается…", progress=0, total=total, state="running")
-        threading.Thread(target=self._automator_flow, args=(steps,), daemon=True).start()
 
-    def _automator_flow(self, steps: List[Dict[str, Any]]):
-        total = len(steps)
-        ok_all = True
-        last_idx = 0
-        for idx, step in enumerate(steps, start=1):
-            last_idx = idx
-            description = self._describe_automator_step(step)
-            self._append_activity(
-                f"Автоматизация: шаг {idx}/{total} — {description}",
-                kind="running",
-                card_text=False,
+        self._automator_queue = steps
+        self._automator_total = len(steps)
+        self._automator_index = 0
+        self._automator_ok_all = True
+        self._automator_running = True
+
+        self._post_status(
+            "Автоматизация запускается…",
+            progress=0,
+            total=self._automator_total,
+            state="running",
+        )
+        QtCore.QTimer.singleShot(0, self._automator_tick)
+
+    def _automator_tick(self):
+        if not self._automator_running:
+            return
+        if self._automator_index >= self._automator_total:
+            state = "ok" if self._automator_ok_all else "error"
+            progress = self._automator_total if self._automator_ok_all else max(
+                0, self._automator_total - 1
             )
-            if not self._execute_automator_step(step, idx, total):
-                ok_all = False
+            text = "Автоматизация завершена" if self._automator_ok_all else (
+                f"Автоматизация остановлена на шаге {self._automator_total}"
+            )
+            self._post_status(text, progress=progress, total=self._automator_total, state=state)
+            self._automator_running = False
+            self._refresh_stats()
+            return
+
+        idx = self._automator_index + 1
+        step = self._automator_queue[self._automator_index]
+        description = self._describe_automator_step(step)
+        self._append_activity(
+            f"Автоматизация: шаг {idx}/{self._automator_total} — {description}",
+            kind="running",
+            card_text=False,
+        )
+
+        def run_step():
+            ok = self._execute_automator_step(step, idx, self._automator_total)
+            if not ok:
+                self._automator_ok_all = False
                 self._append_activity(
                     f"Автоматизация: шаг {idx} завершился ошибкой", kind="error", card_text=False
                 )
-                break
+                self._post_status(
+                    f"Автоматизация остановлена на шаге {idx}",
+                    progress=max(0, idx - 1),
+                    total=self._automator_total,
+                    state="error",
+                )
+                self._automator_running = False
+                self._refresh_stats()
+                return
+
             self._append_activity(
                 f"Автоматизация: шаг {idx} выполнен", kind="success", card_text=False
             )
             self._post_status(
-                f"Шаг {idx}/{total} завершён", progress=idx, total=total, state="running"
+                f"Шаг {idx}/{self._automator_total} завершён",
+                progress=idx,
+                total=self._automator_total,
+                state="running",
             )
+            self._automator_index += 1
+            QtCore.QTimer.singleShot(0, self._automator_tick)
 
-        if ok_all:
-            self._post_status("Автоматизация завершена", progress=total, total=total, state="ok")
-        else:
-            self._post_status(
-                f"Автоматизация остановлена на шаге {last_idx}",
-                progress=max(0, last_idx - 1),
-                total=total,
-                state="error",
-            )
-        self._refresh_stats()
+        QtCore.QTimer.singleShot(0, run_step)
 
     def _execute_automator_step(self, step: Dict[str, Any], idx: int, total: int) -> bool:
         step_type = step.get("type", "")
