@@ -7644,6 +7644,24 @@ class MainWindow(QtWidgets.QMainWindow):
         cb = getattr(self, "cb_tiktok_schedule", None)
         return bool(cb.isChecked()) if self._widget_alive(cb) else False
 
+    def _tiktok_batch_limit_value(self) -> int:
+        sb = getattr(self, "sb_tiktok_batch_limit", None)
+        if not self._widget_alive(sb):
+            return 0
+        try:
+            return int(sb.value())
+        except (TypeError, ValueError):
+            return 0
+
+    def _tiktok_interval_value(self) -> int:
+        sb = getattr(self, "sb_tiktok_interval", None)
+        if not self._widget_alive(sb):
+            return 0
+        try:
+            return int(sb.value())
+        except (TypeError, ValueError):
+            return 0
+
     def _tiktok_draft_enabled(self) -> bool:
         cb = getattr(self, "cb_tiktok_draft", None)
         return bool(cb.isChecked()) if self._widget_alive(cb) else False
@@ -7846,9 +7864,22 @@ class MainWindow(QtWidgets.QMainWindow):
             self.btn_tiktok_archive_browse.clicked.connect(
                 lambda: self._browse_dir(self.ed_tiktok_archive, "Выбери папку архива")
             )
-            self.sb_tiktok_default_delay.valueChanged.connect(self._apply_tiktok_default_delay)
-            self.sb_tiktok_interval_default.valueChanged.connect(lambda val: self.sb_tiktok_interval.setValue(int(val)))
-            self.sb_tiktok_limit_default.valueChanged.connect(lambda val: self.sb_tiktok_batch_limit.setValue(int(val)))
+            if self._widget_alive(getattr(self, "sb_tiktok_default_delay", None)):
+                self.sb_tiktok_default_delay.valueChanged.connect(self._apply_tiktok_default_delay)
+            sb_interval_default = getattr(self, "sb_tiktok_interval_default", None)
+            sb_interval = getattr(self, "sb_tiktok_interval", None)
+            if self._widget_alive(sb_interval_default) and self._widget_alive(sb_interval):
+                try:
+                    sb_interval_default.valueChanged.connect(lambda val: sb_interval.setValue(int(val)))
+                except RuntimeError:
+                    self.sb_tiktok_interval = None
+            sb_limit_default = getattr(self, "sb_tiktok_limit_default", None)
+            sb_limit = getattr(self, "sb_tiktok_batch_limit", None)
+            if self._widget_alive(sb_limit_default) and self._widget_alive(sb_limit):
+                try:
+                    sb_limit_default.valueChanged.connect(lambda val: sb_limit.setValue(int(val)))
+                except RuntimeError:
+                    self.sb_tiktok_batch_limit = None
 
         if self._widget_alive(getattr(self, "btn_youtube_refresh", None)):
             self.sb_youtube_interval.valueChanged.connect(self._reflect_youtube_interval)
@@ -7944,8 +7975,18 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.cb_tiktok_draft.toggled.connect(lambda _: self._update_tiktok_queue_label())
             except RuntimeError:
                 self.cb_tiktok_draft = None
-        self.sb_tiktok_interval.valueChanged.connect(self._reflect_tiktok_interval)
-        self.sb_tiktok_batch_limit.valueChanged.connect(lambda _: self._update_tiktok_queue_label())
+        sb_interval = getattr(self, "sb_tiktok_interval", None)
+        if self._widget_alive(sb_interval):
+            try:
+                sb_interval.valueChanged.connect(self._reflect_tiktok_interval)
+            except RuntimeError:
+                self.sb_tiktok_interval = None
+        sb_batch_limit = getattr(self, "sb_tiktok_batch_limit", None)
+        if self._widget_alive(sb_batch_limit):
+            try:
+                sb_batch_limit.valueChanged.connect(lambda _: self._update_tiktok_queue_label())
+            except RuntimeError:
+                self.sb_tiktok_batch_limit = None
         self.ed_tiktok_src.textChanged.connect(lambda _: self._update_tiktok_queue_label())
         self.dt_tiktok_publish.dateTimeChanged.connect(self._sync_tiktok_from_datetime)
         self.btn_tiktok_src_browse.clicked.connect(lambda: self._browse_dir(self.ed_tiktok_src, "Выбери папку с клипами"))
@@ -12923,9 +12964,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self._refresh_autopost_context()
             return
 
-        limit = int(self.sb_tiktok_batch_limit.value()) if hasattr(self, "sb_tiktok_batch_limit") else 0
+        limit = self._tiktok_batch_limit_value()
         effective = min(count, limit) if limit > 0 else count
-        interval = int(self.sb_tiktok_interval.value()) if hasattr(self, "sb_tiktok_interval") else 0
+        interval = self._tiktok_interval_value()
         parts = [f"найдено {count}"]
         if limit > 0:
             parts.append(f"будет загружено {effective}")
@@ -12941,7 +12982,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         enable = self._tiktok_schedule_enabled() and not self._tiktok_draft_enabled()
         self.dt_tiktok_publish.setEnabled(enable)
-        self.sb_tiktok_interval.setEnabled(enable)
+        if self._widget_alive(getattr(self, "sb_tiktok_interval", None)):
+            self.sb_tiktok_interval.setEnabled(enable)
         self.cfg.setdefault("tiktok", {})["schedule_enabled"] = self._tiktok_schedule_enabled()
 
     def _reflect_tiktok_interval(self, value: int):
@@ -13024,8 +13066,8 @@ class MainWindow(QtWidgets.QMainWindow):
         env["TIKTOK_PROFILE_NAME"] = profile_name
         env["TIKTOK_SRC_DIR"] = str(src_dir)
         env["TIKTOK_ARCHIVE_DIR"] = str(_project_path(tk_cfg.get("archive_dir", str(PROJECT_ROOT / "uploaded_tiktok"))))
-        env["TIKTOK_BATCH_LIMIT"] = str(int(self.sb_tiktok_batch_limit.value()))
-        env["TIKTOK_BATCH_STEP_MINUTES"] = str(int(self.sb_tiktok_interval.value()))
+        env["TIKTOK_BATCH_LIMIT"] = str(self._tiktok_batch_limit_value())
+        env["TIKTOK_BATCH_STEP_MINUTES"] = str(self._tiktok_interval_value())
         env["TIKTOK_DRAFT_ONLY"] = "1" if self._tiktok_draft_enabled() else "0"
         if publish_at_iso:
             env["TIKTOK_PUBLISH_AT"] = publish_at_iso
@@ -13060,8 +13102,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         inputs = {
             "profile": profile,
-            "limit": str(int(self.sb_tiktok_batch_limit.value())),
-            "interval": str(int(self.sb_tiktok_interval.value())),
+            "limit": str(self._tiktok_batch_limit_value()),
+            "interval": str(self._tiktok_interval_value()),
             "draft": "1" if self._tiktok_draft_enabled() else "0",
         }
         if self._tiktok_schedule_enabled() and not self._tiktok_draft_enabled():
