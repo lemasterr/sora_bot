@@ -1,7 +1,7 @@
 import { app, BrowserWindow, ipcMain, shell } from 'electron';
-import fs from 'node:fs';
-import path from 'node:path';
-import { spawn } from 'node:child_process';
+import fs from 'fs';
+import path from 'path';
+import { spawn } from 'child_process';
 
 const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
 let mainWindow: any | null = null;
@@ -53,12 +53,15 @@ const createWindow = () => {
     }
   }
 
-  mainWindow.webContents.on('did-fail-load', (_event, code, desc) => {
-    const message = `[main] Renderer failed to load: ${code} ${desc}`;
+  mainWindow.webContents.on(
+    'did-fail-load',
+    (_event: unknown, code: number, desc: string, url?: string) => {
+      const message = `[main] Renderer failed to load (${url ?? 'n/a'}): ${code} ${desc}`;
     // Emit into devtools console for packaged builds to avoid silent black screens.
-    console.error(message);
-    sendLog({ message, source: 'stderr' });
-  });
+      console.error(message);
+      sendLog({ message, source: 'stderr' });
+    },
+  );
 
   mainWindow.webContents.setWindowOpenHandler(({ url }: { url: string }) => {
     shell.openExternal(url);

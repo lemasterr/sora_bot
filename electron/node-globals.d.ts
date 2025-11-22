@@ -13,12 +13,17 @@ declare class Buffer {
   toString: (...args: any[]) => string;
 }
 
-declare module 'node:path' {
+declare module 'path' {
   const path: any;
   export = path;
 }
 
-declare module 'node:child_process' {
+declare module 'fs' {
+  const fs: any;
+  export = fs;
+}
+
+declare module 'child_process' {
   export const spawn: any;
 }
 
